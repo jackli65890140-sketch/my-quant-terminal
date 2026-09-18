@@ -15,7 +15,7 @@ try:
 except ImportError:
     HAS_SCIPY = False
 
-st.set_page_config(layout="wide", page_title="專業量化交易終端系統 v23.8 (自選股分組強化版)")
+st.set_page_config(layout="wide", page_title="專業量化交易終端系統 v24.2 (全寬表格優化版)")
 
 # ==========================================
 # 0. 伺服器級持久化快取 (徹底解決雷達刷新消失的問題)
@@ -24,9 +24,9 @@ st.set_page_config(layout="wide", page_title="專業量化交易終端系統 v23
 def get_persistent_data():
     """使用 cache_resource 保證數據在 F5 重新整理或點擊 LinkColumn 後絕對不會消失"""
     return {
-        "radar_results": {"港股": None, "美股": None, "自選股": None},
-        "radar_correlation_warnings": {"港股": [], "美股": [], "自選股": []},
-        "radar_correlation_matrices": {"港股": None, "美股": None, "自選股": None},
+        "radar_results": {"港股": None, "美股": None, "自選股": None, "自訂": None},
+        "radar_correlation_warnings": {"港股": [], "美股": [], "自選股": [], "自訂": []},
+        "radar_correlation_matrices": {"港股": None, "美股": None, "自選股": None, "自訂": None},
         "watchlist_radar_results": {} # 🌟 升級為字典，儲存每個分組的獨立掃描結果
     }
 
@@ -138,12 +138,22 @@ def get_index_data(index_ticker, interval="1d"):
 
         idx_df['SMA50'] = idx_df['Close'].rolling(window=50).mean()
         idx_df['SMA200'] = idx_df['Close'].rolling(window=200).mean()
+        
+        # [優化加入] 大盤出貨日統計 (加入防呆機制避免 Volume 丟失導致報錯)
+        idx_df['PriceChange'] = idx_df['Close'].pct_change()
+        if 'Volume' in idx_df.columns:
+            idx_df['VolumeSMA50'] = idx_df['Volume'].rolling(window=50).mean()
+            idx_df['Is_Distribution'] = (idx_df['PriceChange'] <= -0.002) & (idx_df['Volume'] > idx_df['Volume'].shift(1))
+            idx_df['Dist_Days_20d'] = idx_df['Is_Distribution'].rolling(window=20).sum()
+        else:
+            idx_df['Dist_Days_20d'] = 0
+            
         return idx_df
     except:
         return None
 
 # ==========================================
-# 3. 高動能股票池
+# 3. 高動能股票池 & 港股整手數配置
 # ==========================================
 HK_MOMENTUM_POOL = [
     "0700.HK", "3690.HK", "1810.HK", "1211.HK", "2015.HK", "9868.HK", "9988.HK", "0981.HK", "2269.HK", "2317.HK",
@@ -162,6 +172,15 @@ US_MOMENTUM_POOL = [
     "ARM", "ASML", "TSM", "INTC", "QCOM", "MU", "UBER", "ABNB", "PYPL", "SQ",
     "ROKU", "SHOP", "PTON", "DOCU", "ZM", "INTU", "ORCL", "IBM", "CSCO", "CRM"
 ]
+
+# [優化加入] 港股熱門整手數定義，供實盤資金試算與回測使用
+POPULAR_HK_LOTS = {
+    "0700.HK": 100, "3690.HK": 100, "9988.HK": 100, "1810.HK": 200, "1211.HK": 500,
+    "1299.HK": 200, "0005.HK": 400, "0388.HK": 100, "0941.HK": 500, "0883.HK": 1000,
+    "0981.HK": 500, "0939.HK": 1000, "1398.HK": 1000, "2318.HK": 500, "2020.HK": 100,
+    "2269.HK": 100, "2317.HK": 500, "0853.HK": 500, "1024.HK": 100, "1113.HK": 500,
+    "0011.HK": 100, "0002.HK": 500, "0016.HK": 1000, "0066.HK": 500
+}
 
 # ==========================================
 # 4.0.1 Anchored VWAP 錨定成交量加權平均價
@@ -210,6 +229,7 @@ def calculate_indicators(df, bg_df, interval="1d"):
     df['SMA200'] = df['Close'].rolling(window=200).mean()
     
     # EMA 系統 (所見即所得，敏感度高)
+    df['EMA10'] = df['Close'].ewm(span=10, adjust=False).mean() # [優化加入] 用作動能股退場防守線
     df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
     df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
     df['EMA120'] = df['Close'].ewm(span=120, adjust=False).mean()
@@ -335,25 +355,37 @@ def calculate_indicators(df, bg_df, interval="1d"):
     neg_mf = neg_flow.rolling(14).sum()
     df['MFI'] = 100 - (100 / (1 + pos_mf / (neg_mf + 1e-9)))
 
+    # [修復崩潰點] 確保合併時只向真正存在的欄位添加後綴，徹底避免 KeyError
     if bg_df is not None and not bg_df.empty:
+        cols_to_get = ['Close', 'SMA50']
+        if 'SMA200' in bg_df.columns: cols_to_get.append('SMA200')
+        if 'Dist_Days_20d' in bg_df.columns: cols_to_get.append('Dist_Days_20d')
+        
         temp_merged = pd.merge(
             df[['Close']],
-            bg_df[['Close', 'SMA50']],
+            bg_df[cols_to_get],
             left_index=True,
             right_index=True,
             how='left',
             suffixes=('', 'Bench')
         )
+        
+        # 由於只有 'Close' 欄位重疊，其他欄位不會被加上 'Bench' 尾碼，這裡使用 get 安全取值
         temp_merged['CloseBench'] = temp_merged['CloseBench'].ffill()
-        temp_merged['SMA50Bench'] = temp_merged['SMA50'].ffill()
+        temp_merged['SMA50Bench'] = temp_merged.get('SMA50', pd.Series(np.nan, index=temp_merged.index)).ffill()
+        
         rs_raw = temp_merged['Close'] / temp_merged['CloseBench']
         df['Mansfield_RS'] = ((rs_raw / rs_raw.rolling(50).mean()) - 1) * 10
         df['CloseBench'] = temp_merged['CloseBench']
         df['SMA50BenchValue'] = temp_merged['SMA50Bench']
+        df['SMA200BenchValue'] = temp_merged.get('SMA200', pd.Series(np.nan, index=temp_merged.index)).ffill()
+        df['Bench_Dist_Days'] = temp_merged.get('Dist_Days_20d', pd.Series(0, index=temp_merged.index)).ffill()
     else:
         df['Mansfield_RS'] = 0
         df['CloseBench'] = np.nan
         df['SMA50BenchValue'] = np.nan
+        df['SMA200BenchValue'] = np.nan
+        df['Bench_Dist_Days'] = 0
 
     try:
         swing_anchor, low52w_anchor = find_anchor_points(df)
@@ -728,7 +760,7 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         try:
             if bg_df is not None and not bg_df.empty:
                 bg_last = bg_df.iloc[-1]
-                if pd.notna(bg_last['SMA50']) and pd.notna(bg_last['SMA200']):
+                if pd.notna(bg_last.get('SMA50')) and pd.notna(bg_last.get('SMA200')):
                     if (bg_last['SMA50'] < bg_last['SMA200']) or (bg_last['Close'] < bg_last['SMA50']):
                         ms_metrics["market_bear"] = True
             if high_52w > 0:
@@ -754,7 +786,18 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         dist_to_20ma = abs(last['Close'] - last['SMA20']) / last['SMA20'] if pd.notna(last['SMA20']) and last['SMA20'] != 0 else 999
         is_near_20ma = dist_to_20ma < 0.03
 
-        is_long_trigger = pass_count >= strictness_threshold and last['Close'] > last['SMA50'] and last['MACD'] > last['MACDSignal'] and 50 < last['RSI'] < 75
+        # [優化加入] 提早豁免與突破分流邏輯
+        momentum_ready = (last['RSI'] > 55) and (last['Close'] > last['SMA20'])
+        is_tight_setup = last['VCPSignal'] and (last['VolRatio'] < 0.8)
+        p_high_20 = df['Close'].tail(20).max()
+        is_breakout = (last['Close'] >= p_high_20 * 0.99) and (last['VolRatio'] > 1.5)
+        early_stage_bypass = (last['Close'] > last['SMA50']) and (last['Ret1M'] > 0.20)
+
+        # [優化加入] is_long_trigger 整合新邏輯
+        is_long_trigger = momentum_ready and (
+            (pass_count >= strictness_threshold) or early_stage_bypass
+        ) and (is_tight_setup or is_breakout)
+
         is_short_trigger = last['Close'] < last['SMA50'] and last['SMA50'] < last['SMA200'] and last['MACD'] < last['MACDSignal'] and 25 < last['RSI'] < 50
         is_long_candidate = pass_count >= strictness_threshold
         is_short_candidate = short_pass_count >= strictness_threshold
@@ -773,6 +816,13 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         elif is_deduction_pullback:
             plan_type = "LONG"
             status = "🟡 趨勢回撤買點 (2點鐘方向，抵扣價防守成功)"
+        # [優化加入] 獨立的 Breakout 與 Setup 分流判斷
+        elif is_long_trigger and is_breakout:
+            plan_type = "LONG"
+            status = "🟢 放量強勢突破 (Breakout)"
+        elif is_long_trigger and is_tight_setup:
+            plan_type = "LONG"
+            status = "🟢 極限壓縮潛伏 (Setup)"
         elif is_long_trigger:
             plan_type = "LONG"
             status = "🟢 20MA 回踩做多信號"
@@ -883,6 +933,11 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
         cash = initial_capital
         position_type = None
         entry_price, stop_loss, tp_target, entry_structural_sl = 0, 0, 0, None
+        
+        # [優化加入] 階梯式持倉狀態追蹤
+        position_stage = 0 
+        partial_tp_target = 0
+        
         shares = 0
         trade_log, history_equity, history_dates = [], [], []
 
@@ -908,13 +963,22 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
             if 'CloseBench' in prev_row and 'SMA50BenchValue' in prev_row and pd.notna(prev_row['CloseBench']):
                 is_market_bullish = prev_row['CloseBench'] > prev_row['SMA50BenchValue']
 
+            # [優化加入] 大盤 O'Neil 防禦閘門
+            bench_close = prev_row.get('CloseBench', np.nan)
+            bench_200 = prev_row.get('SMA200BenchValue', np.nan)
+            bench_dist = prev_row.get('Bench_Dist_Days', 0)
+            is_market_health_ok = True
+            if pd.notna(bench_close) and pd.notna(bench_200):
+                if bench_close < bench_200 or bench_dist >= 5:
+                    is_market_health_ok = False
+
             current_equity = cash + (
                 shares * row['Close'] if position_type == "LONG"
                 else ((entry_price - row['Close']) * shares if position_type == "SHORT" else 0)
             )
 
             if is_relaxed:
-                is_long_trigger = prev_row['Close'] > prev_row['SMA50'] and prev_row['MACD'] > prev_row['MACDSignal'] and is_hk_liquid and is_market_bullish
+                is_long_trigger = prev_row['Close'] > prev_row['SMA50'] and prev_row['MACD'] > prev_row['MACDSignal'] and is_hk_liquid and is_market_bullish and is_market_health_ok
                 is_short_trigger = prev_row['Close'] < prev_row['SMA50'] and prev_row['MACD'] < prev_row['MACDSignal'] and is_hk_liquid and not is_market_bullish
             else:
                 p_low = df.iloc[:i]['Low'].min()
@@ -930,7 +994,19 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                 prev_pass_count = sum([r1, r2, r3, r4, r5, r6, r7])
 
                 kk_flag = prev_row['Ret1M'] > 0.15 and prev_row['Close'] > prev_row['SMA10'] and prev_row['VCPSignal']
-                is_long_trigger = ((prev_pass_count >= score_threshold and prev_row['VolRatio'] < 1.0) or kk_flag) and is_hk_liquid and is_market_bullish
+                
+                # [優化加入] 動態與提早豁免邏輯 (針對 Backtest)
+                momentum_ready = (prev_row['RSI'] > 55) and (prev_row['Close'] > prev_row['SMA20'])
+                is_tight_setup = prev_row['VCPSignal'] and (prev_row['VolRatio'] < 0.8)
+                p_high_20_slice = df.iloc[max(0, i-20):i]
+                p_high_20_val = p_high_20_slice['Close'].max() if not p_high_20_slice.empty else prev_row['Close']
+                is_breakout = (prev_row['Close'] >= p_high_20_val * 0.99) and (prev_row['VolRatio'] > 1.5)
+                early_stage_bypass = (prev_row['Close'] > prev_row['SMA50']) and (prev_row['Ret1M'] > 0.20)
+
+                is_long_trigger = momentum_ready and (
+                    (prev_pass_count >= score_threshold) or early_stage_bypass or kk_flag
+                ) and (is_tight_setup or is_breakout) and is_hk_liquid and is_market_health_ok
+
                 is_short_trigger = prev_row['Close'] < prev_row['SMA150'] and prev_row['Mansfield_RS'] < 0 and is_hk_liquid and not is_market_bullish
 
             atr_val = prev_row['ATR'] if pd.notna(prev_row['ATR']) and prev_row['ATR'] > 0 else row['Open'] * 0.03
@@ -948,12 +1024,24 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                     if (target_shares * entry_price) > cash:
                         target_shares = int(cash / entry_price)
 
+                    # [優化加入] 港股實盤整手計算，避免虛假過度擬合
+                    if market_type == "HK":
+                        lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
+                        target_shares = (target_shares // lot_sz) * lot_sz
+                        if target_shares == 0:
+                            position_type = None # 資金不足以承擔一手風險，跳過該筆交易
+                            continue
+
                     shares = target_shares
                     cash = cash - shares * entry_price
                     stop_loss = entry_price - risk_per_share
-                    tp_target = entry_price + (3 * atr_val)
+                    
+                    # [優化加入] 取代原始單一止盈，轉用 KK 階梯式持倉
+                    position_stage = 0
+                    partial_tp_target = entry_price + (2.5 * atr_val)
+                    
                     entry_structural_sl = prev_row.get("SupShort", entry_price * 0.9)
-                    trade_info = {"方向": "🟢 做多", "進場日期": current_date, "進場價": entry_price, "初始止損": stop_loss, "最終止盈": tp_target, "結構止損": entry_structural_sl}
+                    trade_info = {"方向": "🟢 做多", "進場日期": current_date, "進場價": entry_price, "初始止損": stop_loss, "最終止盈": "動態 EMA 追蹤", "結構止損": entry_structural_sl}
 
                 elif is_short_trigger and trade_mode in ["全部雙向", "僅做空頭(做空)"]:
                     position_type = "SHORT"
@@ -963,6 +1051,13 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                     risk_amount = current_equity * risk_per_trade
                     risk_per_share = 2 * atr_val
                     target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+
+                    if market_type == "HK":
+                        lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
+                        target_shares = (target_shares // lot_sz) * lot_sz
+                        if target_shares == 0:
+                            position_type = None
+                            continue
 
                     max_short_shares = int((current_equity * 0.05) / entry_price)
                     target_shares = min(target_shares, max_short_shares)
@@ -983,10 +1078,11 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
             elif position_type == "LONG":
                 intraday_ma_break = pd.notna(row['SMA50']) and row['Low'] <= row['SMA50']
 
-                if row['Low'] <= stop_loss or intraday_ma_break:
+                # [優化加入] 情況 1：觸發防守止損 或 盤中跌穿 50MA (僅在第一階段防守)
+                if row['Low'] <= stop_loss or (intraday_ma_break and position_stage == 0):
                     if row['Low'] <= stop_loss:
                         base_exit = min(row['Open'], stop_loss)
-                        result_text = "盤中閃崩觸發止損"
+                        result_text = "觸發防守止損" if position_stage == 0 else "保本出局"
                     else:
                         base_exit = min(row['Open'], row['SMA50'])
                         result_text = "盤中跌穿 SMA50 提前平倉"
@@ -1006,23 +1102,53 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         "盤中洗盤懲罰": penalty
                     })
                     trade_log.append(trade_info)
-                    position_type, shares = None, 0
+                    position_type = None
+                    shares = 0
+                    position_stage = 0
 
-                elif row['High'] >= tp_target:
-                    exit_price = max(row['Open'], tp_target)
-                    exit_price = exit_price * (1 - slippage_fee)
+                # [優化加入] 情況 2：達到 2.5 ATR，賣出 40%，止損推至保本點 (Breakeven)
+                elif position_stage == 0 and row['High'] >= partial_tp_target:
+                    position_stage = 1
+                    stop_loss = entry_price 
+                    sold_shares = int(shares * 0.4)
+                    
+                    if market_type == "HK":
+                        lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
+                        sold_shares = (sold_shares // lot_sz) * lot_sz
+                        
+                    if sold_shares > 0:
+                        exit_price = max(row['Open'], partial_tp_target) * (1 - slippage_fee)
+                        cash += (sold_shares * exit_price)
+                        shares -= sold_shares
+                        partial_info = trade_info.copy()
+                        partial_info.update({
+                            "出場日期": current_date,
+                            "出場價": exit_price,
+                            "結果": "階段一止盈 (減倉鎖定)",
+                            "回報率(%)": ((exit_price - entry_price) / entry_price) * 100,
+                            "利潤": (exit_price - entry_price) * sold_shares,
+                            "盤中洗盤懲罰": 0
+                        })
+                        trade_log.append(partial_info)
+
+                # [優化加入] 情況 3：主升浪跌破 EMA10 全部離場
+                elif position_stage == 1 and row['Close'] < row.get('EMA10', row.get('SMA20', 0)):
+                    exit_price = row['Close'] * (1 - slippage_fee)
                     cash += (shares * exit_price)
                     profit = (exit_price - entry_price) * shares
 
                     trade_info.update({
                         "出場日期": current_date,
                         "出場價": exit_price,
-                        "結果": "策略止盈",
+                        "結果": "主升浪破線動態止盈 (全平)",
                         "回報率(%)": ((exit_price - entry_price) / entry_price) * 100,
-                        "利潤": profit
+                        "利潤": profit,
+                        "盤中洗盤懲罰": 0
                     })
                     trade_log.append(trade_info)
-                    position_type, shares = None, 0
+                    position_type = None
+                    shares = 0
+                    position_stage = 0
 
             elif position_type == "SHORT":
                 intraday_ma_break = pd.notna(row['SMA50']) and row['High'] >= row['SMA50']
@@ -1050,7 +1176,8 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         "盤中洗盤懲罰": penalty
                     })
                     trade_log.append(trade_info)
-                    position_type, shares = None, 0
+                    position_type = None
+                    shares = 0
 
                 elif row['Low'] <= tp_target:
                     exit_price = min(row['Open'], tp_target)
@@ -1066,7 +1193,8 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         "利潤": profit
                     })
                     trade_log.append(trade_info)
-                    position_type, shares = None, 0
+                    position_type = None
+                    shares = 0
 
             current_equity = cash + (
                 shares * row['Close'] if position_type == "LONG"
@@ -1122,6 +1250,13 @@ elif strictness == 7:
     st.sidebar.error("7/7：最嚴格")
 
 st.sidebar.markdown("---")
+
+# [優化加入] 無限擴充股票池輸入框
+st.sidebar.markdown("### 🌐 擴充掃描池 (打破百隻限制)")
+custom_tickers_raw = st.sidebar.text_area("自訂股票代碼 (逗號或空白分隔)", placeholder="例如: AAPL, PLTR, MSTR\n在此輸入你今天感興趣的代號，加入雷達進行全景體檢。")
+
+st.sidebar.markdown("---")
+
 mode_options = [
     "🔎 1. 市場動能掃描雷達",
     "📊 2. 個股量化分析與技術診斷",
@@ -1233,21 +1368,20 @@ def render_radar_results(df_results, title, market_key=None):
                     st.warning("請先選擇或輸入代碼")
     st.markdown("---")
     
-    col1, col2 = st.columns(2)
+    # [佈局優化] 移除 st.columns(2)，改為全寬度上下顯示
+    st.markdown("#### 🟢 做多 (Long) 候選名單")
+    if not df_long.empty:
+        render_styled_dataframe(df_long)
+    else:
+        st.info("目前沒有符合做多條件的標的。")
 
-    with col1:
-        st.markdown("#### 🟢 做多 (Long) 候選名單")
-        if not df_long.empty:
-            render_styled_dataframe(df_long)
-        else:
-            st.info("目前沒有符合做多條件的標的。")
+    st.markdown("<br>", unsafe_allow_html=True) # 增加視覺間距
 
-    with col2:
-        st.markdown("#### 🔴 做空 (Short) 候選名單")
-        if not df_short.empty:
-            render_styled_dataframe(df_short)
-        else:
-            st.info("目前沒有符合做空條件的標的。")
+    st.markdown("#### 🔴 做空 (Short) 候選名單")
+    if not df_short.empty:
+        render_styled_dataframe(df_short)
+    else:
+        st.info("目前沒有符合做空條件的標的。")
 
     if not df_watch.empty:
         with st.expander("⚪ 觀望名單", expanded=False):
@@ -1343,14 +1477,32 @@ if mode == mode_options[0]:
             render_styled_dataframe(q_df)
         st.markdown("---")
 
-    pool_choice = st.selectbox("核心追蹤池：", ["港股高動能增長池 (近100隻強勢成分股)", "美股高動能爆發池"])
-    is_hk_pool = "港股" in pool_choice
+    # [優化加入] 將自訂名單放入雷達掃描選項
+    pool_choice = st.selectbox("核心追蹤池：", ["港股高動能增長池 (近100隻強勢成分股)", "美股高動能爆發池", "自訂擴充名單 (從側欄載入)"])
+    
+    target_pool = []
+    if "港股" in pool_choice:
+        target_pool = HK_MOMENTUM_POOL
+    elif "美股" in pool_choice:
+        target_pool = US_MOMENTUM_POOL
+    else:
+        if custom_tickers_raw:
+            import re
+            target_pool = [x.strip().upper() for x in re.split(r'[\s,]+', custom_tickers_raw) if x.strip()]
+        else:
+            st.warning("⚠️ 自訂名單為空，請在左側欄位輸入股票代碼！")
 
-    if st.button("🚀 啟動全景量化掃描"):
+    if st.button("🚀 啟動全景量化掃描") and target_pool:
         with st.spinner("掃描中 (資料池已擴大，保證產出 20~50 隻符合條件標的，請稍候)..."):
-            df_res = run_all_inclusive_radar(HK_MOMENTUM_POOL if is_hk_pool else US_MOMENTUM_POOL)
+            df_res = run_all_inclusive_radar(target_pool)
             if df_res is not None:
-                dict_key = "港股" if is_hk_pool else "美股"
+                if "自訂" in pool_choice:
+                    dict_key = "自訂"
+                elif "港股" in pool_choice:
+                    dict_key = "港股"
+                else:
+                    dict_key = "美股"
+                    
                 st.session_state.radar_results[dict_key] = df_res
 
                 active_df = df_res[df_res['交易方向'].astype(str).str.contains("做多|做空", na=False)].copy()
@@ -1373,6 +1525,10 @@ if mode == mode_options[0]:
 
     if st.session_state.radar_results.get("美股") is not None:
         render_radar_results(st.session_state.radar_results["美股"], "### 📋 美股雷達結果 (暫存)", market_key="美股")
+        st.markdown("---")
+        
+    if st.session_state.radar_results.get("自訂") is not None:
+        render_radar_results(st.session_state.radar_results["自訂"], "### 📋 自訂名單雷達結果 (暫存)", market_key="自訂")
 
 # ==========================================
 # 🌟 13. 模式 3：自選股 (仿富途牛牛多重分組優化版)
@@ -1654,13 +1810,6 @@ elif mode == mode_options[1]:
             st.markdown("### 💰 投資門檻試算")
             col_lot1, col_lot2, col_lot3 = st.columns(3)
             
-            POPULAR_HK_LOTS = {
-                "0700.HK": 100, "3690.HK": 100, "9988.HK": 100, "1810.HK": 200, "1211.HK": 500,
-                "1299.HK": 200, "0005.HK": 400, "0388.HK": 100, "0941.HK": 500, "0883.HK": 1000,
-                "0981.HK": 500, "0939.HK": 1000, "1398.HK": 1000, "2318.HK": 500, "2020.HK": 100,
-                "2269.HK": 100, "2317.HK": 500, "0853.HK": 500, "1024.HK": 100, "1113.HK": 500,
-                "0011.HK": 100, "0002.HK": 500, "0016.HK": 1000, "0066.HK": 500
-            }
             default_lot = 1 if market_type != "HK" else POPULAR_HK_LOTS.get(fmt_ticker, 100)
             
             with col_lot1:
