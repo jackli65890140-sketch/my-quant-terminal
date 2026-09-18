@@ -1636,7 +1636,7 @@ elif mode == mode_options[1]:
             # 抵扣價防禦判定顯示
             st.markdown("### 🧱 支撐阻力與抵扣價分析 (防假跌破)")
             st.caption("判斷真假跌破的秘訣：只要【現價】大於【抵扣價】，即使股價跌破均線，該均線未來仍會繼續向上發散。")
-            sr1, sr2, sr3, sr4 = st.columns(4)
+            sr1, sr2, sr3, sr4, sr5 = st.columns(5)
             
             deduct_20 = last.get('SMA20_Deduction', 0)
             status_20 = "✅ 均線向上" if last['Close'] > deduct_20 else "❌ 均線下彎"
@@ -1648,7 +1648,8 @@ elif mode == mode_options[1]:
             status_50 = "✅ 均線向上" if last['Close'] > deduct_50 else "❌ 均線下彎"
             sr3.metric("🟢 中期支撐 (50日)", f"{last['SMA50']:.2f}", f"50日抵扣: {deduct_50:.2f} ({status_50})")
             
-            sr4.metric("🔴 長期阻力 (60日高點)", f"{last['ResLong']:.2f}")
+            sr4.metric("🟢 長期支撐 (60日低點)", f"{last['SupLong']:.2f}")
+            sr5.metric("🔴 長期阻力 (60日高點)", f"{last['ResLong']:.2f}")
 
             st.markdown("### 💰 投資門檻試算")
             col_lot1, col_lot2, col_lot3 = st.columns(3)
@@ -1834,6 +1835,19 @@ elif mode == mode_options[1]:
                     fig.add_hline(y=last['SupShort'], line_dash="solid", line_color="#4CAF50", annotation_text="最新短支", row=1, col=1)
                 if 'ResShort' in last and pd.notna(last['ResShort']):
                     fig.add_hline(y=last['ResShort'], line_dash="solid", line_color="#F44336", annotation_text="最新短阻", row=1, col=1)
+                if 'SupLong' in last and pd.notna(last['SupLong']):
+                    fig.add_hline(y=last['SupLong'], line_dash="dash", line_color="#388E3C", annotation_text="最新長支", row=1, col=1)
+                if 'ResLong' in last and pd.notna(last['ResLong']):
+                    fig.add_hline(y=last['ResLong'], line_dash="dash", line_color="#D32F2F", annotation_text="最新長阻", row=1, col=1)
+
+                if 'SupShort' in plot_df.columns:
+                    fig.add_trace(go.Scatter(x=x_dates, y=plot_df['SupShort'].ffill(), name='短期支撐軌跡', line=dict(color='#4CAF50', width=1, dash='dot')), row=1, col=1)
+                if 'ResShort' in plot_df.columns:
+                    fig.add_trace(go.Scatter(x=x_dates, y=plot_df['ResShort'].ffill(), name='短期阻力軌跡', line=dict(color='#F44336', width=1, dash='dot')), row=1, col=1)
+                if 'SupLong' in plot_df.columns:
+                    fig.add_trace(go.Scatter(x=x_dates, y=plot_df['SupLong'].ffill(), name='長期支撐軌跡', line=dict(color='#388E3C', width=1.5, dash='dashdot')), row=1, col=1)
+                if 'ResLong' in plot_df.columns:
+                    fig.add_trace(go.Scatter(x=x_dates, y=plot_df['ResLong'].ffill(), name='長期阻力軌跡', line=dict(color='#D32F2F', width=1.5, dash='dashdot')), row=1, col=1)
 
                 # 正確綁定的入場點與防守線
                 if chart_plan != "WATCH":
@@ -1936,6 +1950,16 @@ elif mode == mode_options[1]:
                 fig.update_layout(uirevision=target_ticker)
                 plot_config = dict(scrollZoom=True, displayModeBar=True, modeBarButtonsToRemove=['lasso2d', 'select2d'], displaylogo=False)
                 st.plotly_chart(fig, use_container_width=True, config=plot_config, theme=None, key=f"main_chart_{target_ticker}")
+
+                # --- 恢復 K 線型態詳細解讀文字區塊 ---
+                st.markdown("### 🕯️ K 線型態解讀")
+                if candlestick_patterns:
+                    for pattern in candlestick_patterns:
+                        if pattern["name"] != "":
+                            with st.container():
+                                st.info(f"**{pattern['name']}** ｜ **市場訊號：** {pattern['signal']}\n\n**理論解釋：** {pattern['theory']}")
+                        else:
+                            st.info(f"**市場訊號：** {pattern['signal']}\n\n**理論解釋：** {pattern['theory']}")
 
             if 'CloseBench' in plot_df.columns and not plot_df['CloseBench'].isna().all():
                 st.markdown(f"### 📈 {benchmark_name} 參考走勢")
