@@ -16,20 +16,50 @@ except ImportError:
     HAS_SCIPY = False
 
 # ==============================================================================
-# [NEW INCREMENTAL PATCH v24.11] 專業 Swing Trading 信號生命週期、風控與審計增強模組
-# (完全保留原有代碼，僅以增量方式提供方向保護、精準樞紐買入價、真實 R:R、止損失效追蹤與動態緩存管理)
+# [NEW INCREMENTAL PATCH v24.14] LEI (@TheMarketMemo) × J Law (@jlawstock) 實戰結構盈虧比、精準買賣位與回測統一引擎
+# (完全保留原有代碼，僅以增量方式提供：
+#  1. 精準結構買入位/沽空位計算 (突破樞紐掛單 vs 回踩支撐/均線低吸位，絕不盲目用現價當買入價)
+#  2. 多層級結構支撐/阻力止損止盈與「每隻股票獨立真實盈虧比 (Variable Structural R:R)」
+#  3. 數字編號 (#1, #2, #3...) 優先買入與優先沽空行動榜 + 精簡/專家模式切換 (修復 KeyError 與 removeChild)
+#  4. 診斷 K 線圖預設關閉對數座標並聚焦最近 150 根 K 線 (修復圖表水平壓縮問題)
+#  5. 掃描系統與回測系統 (含快速勝率與雙向回測) 100% 理念同步統一)
 # ==============================================================================
 import logging
 from dataclasses import dataclass, asdict
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 swing_logger = logging.getLogger("SwingTraderAudit")
 
 RADAR_CACHE_TTL_SECONDS = 1800  # 雷達結果預設 30 分鐘自動過期重算
+CURRENT_SCHEMA_VERSION = "v24.14"
+
+def is_quad_witching_friday(index_dates: pd.Index) -> pd.Series:
+    """
+    [J Law 影片10：股市下跌前4大見頂訊號 15:10-15:38]
+    每年 3、6、9、12 月的第 3 個星期五為期貨結算日 (四巫日)，當日異常放大成交量不計入大戶出貨日 (Distribution Day)。
+    """
+    try:
+        dt_idx = pd.to_datetime(index_dates)
+        is_qw = (dt_idx.month.isin([3, 6, 9, 12])) & (dt_idx.weekday == 4) & (dt_idx.day >= 15) & (dt_idx.day <= 21)
+        return pd.Series(is_qw, index=index_dates)
+    except Exception:
+        return pd.Series(False, index=index_dates)
+
+def ensure_persistent_schema_fresh(persistent_dict: dict) -> None:
+    """[修復 NotFoundError / KeyError] 當程式碼升級後，自動清理舊版結構不相容的暫存 DataFrame"""
+    if persistent_dict.get("_schema_ver") != CURRENT_SCHEMA_VERSION:
+        persistent_dict["radar_results"] = {"港股": None, "美股": None, "自選股": None, "自訂": None}
+        persistent_dict["radar_correlation_warnings"] = {"港股": [], "美股": [], "自選股": [], "自訂": []}
+        persistent_dict["radar_correlation_matrices"] = {"港股": None, "美股": None, "自選股": None, "自訂": None}
+        persistent_dict["watchlist_radar_results"] = {}
+        persistent_dict["radar_timestamps"] = {}
+        persistent_dict["signal_lifecycle_store"] = {}
+        persistent_dict["radar_breadth_stats"] = {}
+        persistent_dict["_schema_ver"] = CURRENT_SCHEMA_VERSION
 
 def is_radar_cache_expired(persistent_dict: dict, market_key: str, ttl_seconds: int = RADAR_CACHE_TTL_SECONDS) -> bool:
-    """[增量修復 Bug 3 & Bug 5] 檢查持久化雷達緩存是否已過期或跨交易日"""
+    """檢查持久化雷達緩存是否已過期或跨交易日"""
     ts_map = persistent_dict.setdefault("radar_timestamps", {})
     last_ts = ts_map.get(market_key)
     if last_ts is None:
@@ -37,18 +67,17 @@ def is_radar_cache_expired(persistent_dict: dict, market_key: str, ttl_seconds: 
     now_ts = time.time()
     if (now_ts - last_ts) > ttl_seconds:
         return True
-    # 若跨日 (例如昨日收盤後掃描，今日開盤後檢視) 強制失效
     if datetime.fromtimestamp(last_ts).date() != datetime.fromtimestamp(now_ts).date():
         return True
     return False
 
 def mark_radar_cache_updated(persistent_dict: dict, market_key: str) -> None:
-    """[增量修復 Bug 3] 記錄雷達掃描時間戳與版本"""
+    """記錄雷達掃描時間戳與版本"""
     ts_map = persistent_dict.setdefault("radar_timestamps", {})
     ts_map[market_key] = time.time()
 
 def compute_wilder_atr_and_rsi(df: pd.DataFrame, period: int = 14) -> Tuple[pd.Series, pd.Series]:
-    """[增量優化 維度1/2] Wilder's RMA 標準 ATR 與 RSI (可選增量對齊 TradingView/富途，不刪改原有 SMA 版欄位)"""
+    """Wilder's RMA 標準 ATR 與 RSI"""
     tr = np.maximum(
         df['High'] - df['Low'],
         np.maximum(abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1)))
@@ -61,12 +90,263 @@ def compute_wilder_atr_and_rsi(df: pd.DataFrame, period: int = 14) -> Tuple[pd.S
     return atr_wilder, rsi_wilder
 
 def compute_causal_swing_sr(df: pd.DataFrame, short_window: int = 20, long_window: int = 60) -> pd.DataFrame:
-    """[增量修復 前視偏差 Look-ahead Bias] 僅使用歷史滾動窗口計算無未來函數之結構支撐與阻力"""
+    """
+    [無未來函數之多層級結構支撐與阻力系統]
+    計算 10日箱體、20日短線波段、60日季線波段、120日半年波段之真實高低點與前波突破頸線 (S/R Flip Level)。
+    """
+    df['BoxHigh10_Causal'] = df['High'].shift(1).rolling(window=10, min_periods=3).max().fillna(df['High'])
+    df['BoxLow10_Causal'] = df['Low'].shift(1).rolling(window=10, min_periods=3).min().fillna(df['Low'])
     df['ResShort_Causal'] = df['High'].shift(1).rolling(window=short_window, min_periods=5).max().fillna(df['High'])
     df['SupShort_Causal'] = df['Low'].shift(1).rolling(window=short_window, min_periods=5).min().fillna(df['Low'])
     df['ResLong_Causal'] = df['High'].shift(1).rolling(window=long_window, min_periods=10).max().fillna(df['High'])
     df['SupLong_Causal'] = df['Low'].shift(1).rolling(window=long_window, min_periods=10).min().fillna(df['Low'])
+    df['Res120_Causal'] = df['High'].shift(1).rolling(window=120, min_periods=20).max().fillna(df['High'])
+    df['Sup120_Causal'] = df['Low'].shift(1).rolling(window=120, min_periods=20).min().fillna(df['Low'])
+    df['PriorWaveHigh_Causal'] = df['High'].shift(10).rolling(window=35, min_periods=5).max().fillna(df['ResShort_Causal'])
+    df['PriorWaveLow_Causal'] = df['Low'].shift(10).rolling(window=35, min_periods=5).min().fillna(df['SupShort_Causal'])
     return df
+
+def compute_lei_dual_ma_and_ppo_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    [LEI @TheMarketMemo 雙均線系統 (20/60/120 MA+EMA) + 歷史均線密集區籌碼峰 + J Law 緊密箱體]
+    """
+    df['SMA60'] = df['Close'].rolling(window=60).mean()
+    df['EMA60'] = df['Close'].ewm(span=60, adjust=False).mean()
+    df['SMA60_Deduction'] = df['Close'].shift(60)
+    df['Ret6M'] = df['Close'] / df['Close'].shift(126) - 1.0
+
+    df['MACD_Pct'] = (df['EMA12'] - df['EMA26']) / (df['EMA26'] + 1e-9) * 100.0
+    df['MACDSignal_Pct'] = df['MACD_Pct'].ewm(span=9, adjust=False).mean()
+    df['Bias_EMA120_Pct'] = (df['Close'] - df['EMA120']) / (df['EMA120'] + 1e-9) * 100.0
+
+    df['Tight_Box_5d_Pct'] = (df['High'].rolling(5).max() - df['Low'].rolling(5).min()) / (df['Close'] + 1e-9) * 100.0
+    df['JLaw_Tight_Box'] = df['Tight_Box_5d_Pct'] <= 5.5
+
+    df['VolSMA10'] = df['Volume'].rolling(10).mean()
+    df['VolSMA30'] = df['Volume'].rolling(30).mean()
+    df['VolSMA60'] = df['Volume'].rolling(60).mean()
+    df['VolSMA90'] = df['Volume'].rolling(90).mean()
+
+    if len(df) >= 120:
+        lei_cols = ['SMA20', 'EMA20', 'SMA60', 'EMA60', 'SMA120', 'EMA120']
+        df['LEI_MA_Max'] = df[lei_cols].max(axis=1)
+        df['LEI_MA_Min'] = df[lei_cols].min(axis=1)
+        df['LEI_MA_Mid'] = (df['LEI_MA_Max'] + df['LEI_MA_Min']) / 2.0
+        df['LEI_MA_Spread_Pct'] = (df['LEI_MA_Max'] - df['LEI_MA_Min']) / (df['LEI_MA_Min'] + 1e-9) * 100.0
+        df['LEI_MA_Tight_2Pct'] = df['LEI_MA_Spread_Pct'] <= 2.5
+    else:
+        df['LEI_MA_Mid'] = df['Close']
+        df['LEI_MA_Spread_Pct'] = 999.0
+        df['LEI_MA_Tight_2Pct'] = False
+
+    return df
+
+def detect_lei_top_bottom_and_2b(df: pd.DataFrame, lookback: int = 35) -> Dict[str, Any]:
+    """
+    [LEI @TheMarketMemo《頂底構造》&《我的交易系統》]
+    包含 K 線合併 + 頂部/底部構造 + 2B 破底翻/假突破 + 破線/拐頭/交叉三部曲
+    """
+    res = {
+        "bottom_structure": False,
+        "top_structure": False,
+        "bullish_2b": False,
+        "bearish_2b": False,
+        "lei_turn_step": "無明顯轉折",
+        "merged_bars_count": 0,
+        "structure_low": np.nan,
+        "structure_high": np.nan,
+        "structure_summary": "⚪ 未出現頂底構造"
+    }
+    if df is None or len(df) < 15:
+        return res
+
+    sub = df.tail(lookback)
+    merged: List[Dict[str, Any]] = []
+    for idx, row in sub.iterrows():
+        h, l, c = float(row['High']), float(row['Low']), float(row['Close'])
+        if not merged:
+            merged.append({"date": idx, "high": h, "low": l, "close": c})
+        else:
+            prev = merged[-1]
+            if h <= prev["high"] and l >= prev["low"]:
+                prev["close"] = c
+                continue
+            merged.append({"date": idx, "high": h, "low": l, "close": c})
+
+    res["merged_bars_count"] = len(merged)
+    if len(merged) >= 4:
+        b1, b2, b3 = merged[-3], merged[-2], merged[-1]
+        recent_min_low = min(m["low"] for m in merged[-6:])
+        res["structure_low"] = float(min(b1["low"], b2["low"], b3["low"]))
+        res["structure_high"] = float(max(b1["high"], b2["high"], b3["high"]))
+        if (b1["low"] <= recent_min_low * 1.015 or b2["low"] <= recent_min_low * 1.015):
+            if b3["high"] > b2["high"] and b3["low"] >= b2["low"] and b3["close"] > b2["high"]:
+                res["bottom_structure"] = True
+            elif b2["low"] < b1["low"] and b3["high"] > b2["high"] and b3["low"] > b2["low"]:
+                res["bottom_structure"] = True
+
+        recent_max_high = max(m["high"] for m in merged[-6:])
+        if (b1["high"] >= recent_max_high * 0.985 or b2["high"] >= recent_max_high * 0.985):
+            if b3["low"] < b2["low"] and b3["high"] <= b2["high"] and b3["close"] < b2["low"]:
+                res["top_structure"] = True
+            elif b2["high"] > b1["high"] and b3["low"] < b2["low"] and b3["high"] < b2["high"]:
+                res["top_structure"] = True
+
+    if len(df) >= 25:
+        last = df.iloc[-1]
+        prior_window = df.iloc[-22:-3]
+        prior_low_A = float(prior_window['Low'].min())
+        prior_high_A = float(prior_window['High'].max())
+        recent_3_low = float(df['Low'].iloc[-3:].min())
+        recent_3_high = float(df['High'].iloc[-3:].max())
+
+        if recent_3_low < prior_low_A and float(last['Close']) > prior_low_A and float(last['Close']) > float(last['Open']):
+            res["bullish_2b"] = True
+            res["bottom_structure"] = True
+            res["structure_low"] = recent_3_low
+
+        if recent_3_high > prior_high_A and float(last['Close']) < prior_high_A and float(last['Close']) < float(last['Open']):
+            res["bearish_2b"] = True
+            res["top_structure"] = True
+            res["structure_high"] = recent_3_high
+
+    last_row = df.iloc[-1]
+    c_val = float(last_row['Close'])
+    ema20_v = float(last_row.get('EMA20', c_val))
+    sma20_v = float(last_row.get('SMA20', c_val))
+    sma60_v = float(last_row.get('SMA60', last_row.get('SMA50', c_val)))
+    ded20_v = float(last_row.get('SMA20_Deduction', c_val))
+
+    step1_break = c_val > ema20_v and c_val > sma20_v
+    step2_turn = c_val > ded20_v
+    step3_cross = sma20_v > sma60_v and ema20_v > float(last_row.get('EMA60', sma60_v))
+
+    if step1_break and step2_turn and step3_cross:
+        res["lei_turn_step"] = "✅ 三部曲全滿 (破線+拐頭+20/60多頭交叉)"
+    elif step1_break and step2_turn:
+        res["lei_turn_step"] = "🟡 階段二：已破線且20MA向上拐頭 (待均線交叉)"
+    elif step1_break:
+        res["lei_turn_step"] = "🟠 階段一：剛破線站上20均線 (待抵扣價拐頭)"
+    else:
+        res["lei_turn_step"] = "🔴 均線下方運行 (空頭或整理姿態)"
+
+    tags = []
+    if res["bullish_2b"]:
+        tags.append("🟢 2B破底翻(假跌破真反轉)")
+    elif res["bottom_structure"]:
+        tags.append("🟢 底構造確認(HL+HH)")
+    if res["bearish_2b"]:
+        tags.append("🔴 2B假突破(誘多轉空)")
+    elif res["top_structure"]:
+        tags.append("🔴 頂構造警報(LH+LL)")
+    res["structure_summary"] = " ｜ ".join(tags) if tags else "⚪ 延續原波段 (未見頂底構造)"
+    return res
+
+def analyze_lei_deduction_forecast(df: pd.DataFrame) -> Dict[str, Any]:
+    """[LEI @TheMarketMemo 未來 5~10 日抵扣價方框推演]"""
+    out = {
+        "ded20_now": 0.0,
+        "ded20_next5d_max": 0.0,
+        "ded20_next10d_mean": 0.0,
+        "ded60_now": 0.0,
+        "ded60_next10d_mean": 0.0,
+        "forecast_20_label": "⚪ 資料不足",
+        "forecast_60_label": "⚪ 資料不足",
+        "is_20ma_turn_up_favorable": False,
+        "is_60ma_turn_up_favorable": False
+    }
+    if df is None or len(df) < 65:
+        return out
+
+    close_now = float(df['Close'].iloc[-1])
+    ded20_now = float(df['Close'].iloc[-20])
+    next10_for_20 = df['Close'].iloc[-19:-9]
+    ded20_next5_max = float(df['Close'].iloc[-19:-14].max()) if len(df) >= 20 else ded20_now
+    ded20_next10_mean = float(next10_for_20.mean()) if not next10_for_20.empty else ded20_now
+
+    ded60_now = float(df['Close'].iloc[-60])
+    next10_for_60 = df['Close'].iloc[-59:-49]
+    ded60_next10_mean = float(next10_for_60.mean()) if not next10_for_60.empty else ded60_now
+
+    out["ded20_now"] = ded20_now
+    out["ded20_next5d_max"] = ded20_next5_max
+    out["ded20_next10d_mean"] = ded20_next10_mean
+    out["ded60_now"] = ded60_now
+    out["ded60_next10d_mean"] = ded60_next10_mean
+
+    if close_now > ded20_next10_mean and ded20_next10_mean < ded20_now * 0.98:
+        out["forecast_20_label"] = f"🚀 未來10日抵扣價快速下移 (均值 {ded20_next10_mean:.2f} < 現價)，20MA 將強勢上翹"
+        out["is_20ma_turn_up_favorable"] = True
+    elif close_now >= ded20_next5_max:
+        out["forecast_20_label"] = f"✅ 現價高於未來5日最高抵扣價 ({ded20_next5_max:.2f})，20MA 穩步向上"
+        out["is_20ma_turn_up_favorable"] = True
+    else:
+        out["forecast_20_label"] = f"⚠️ 未來5日抵扣高點 ({ded20_next5_max:.2f}) 高於現價，需突破該位 20MA 才可拐頭向上"
+
+    if close_now > ded60_next10_mean and ded60_next10_mean < ded60_now * 0.98:
+        out["forecast_60_label"] = f"🚀 未來10日季線抵扣價下移 (均值 {ded60_next10_mean:.2f})，60MA 助漲空間打開"
+        out["is_60ma_turn_up_favorable"] = True
+    elif close_now >= ded60_next10_mean:
+        out["forecast_60_label"] = f"✅ 現價守於未來10日 60MA 抵扣均值 ({ded60_next10_mean:.2f}) 之上，季線維持向上"
+        out["is_60ma_turn_up_favorable"] = True
+    else:
+        out["forecast_60_label"] = f"⚠️ 現價低於未來10日 60MA 抵扣均值 ({ded60_next10_mean:.2f})，季線仍有下壓阻力"
+
+    return out
+
+def _find_historical_ma_convergence_targets(df: pd.DataFrame, ref_price: float, direction: str) -> List[Tuple[float, str]]:
+    """
+    [LEI @TheMarketMemo《我的交易系統》38:35-42:15 &《怎樣做交易計劃》08:05-09:05]
+    尋找歷史上曾經形成「均線密集區 (籌碼峰成本共識區)」或關鍵波峰/波谷的價格區間，作為真實空間阻力/支撐目標位。
+    """
+    candidates: List[Tuple[float, str]] = []
+    last = df.iloc[-1]
+
+    res_short = float(last.get('ResShort_Causal', last.get('ResShort', np.nan)))
+    res_long = float(last.get('ResLong_Causal', last.get('ResLong', np.nan)))
+    res_120 = float(last.get('Res120_Causal', np.nan))
+    high_52w = float(last.get('High52W', np.nan))
+
+    sup_short = float(last.get('SupShort_Causal', last.get('SupShort', np.nan)))
+    sup_long = float(last.get('SupLong_Causal', last.get('SupLong', np.nan)))
+    sup_120 = float(last.get('Sup120_Causal', np.nan))
+    low_52w = float(last.get('Low52W', np.nan))
+
+    if 'LEI_MA_Spread_Pct' in df.columns and 'LEI_MA_Mid' in df.columns and len(df) > 40:
+        hist_slice = df.iloc[-min(len(df), 200):-10]
+        tight_zones = hist_slice[hist_slice['LEI_MA_Spread_Pct'] < 3.5]
+        if not tight_zones.empty:
+            recent_cluster_p = float(tight_zones['LEI_MA_Mid'].iloc[-1])
+            max_cluster_p = float(tight_zones['LEI_MA_Mid'].max())
+            min_cluster_p = float(tight_zones['LEI_MA_Mid'].min())
+            candidates.append((recent_cluster_p, "前次均線密集籌碼峰"))
+            candidates.append((max_cluster_p, "上方歷史均線密集區"))
+            candidates.append((min_cluster_p, "下方歷史均線密集區"))
+
+    if direction == "LONG":
+        if pd.notna(res_short): candidates.append((res_short, "20日前浪頂阻力位"))
+        if pd.notna(res_long): candidates.append((res_long, "60日波段前高阻力"))
+        if pd.notna(res_120): candidates.append((res_120, "半年線大級別前高阻力"))
+        if pd.notna(high_52w): candidates.append((high_52w, "52週歷史前高阻力區"))
+        for ma_name, label in [('SMA60', '60MA季線反壓位'), ('SMA120', '120MA半年線反壓位'), ('SMA200', '200MA年線大阻力')]:
+            val = last.get(ma_name, np.nan)
+            if pd.notna(val) and float(val) > ref_price * 1.02:
+                candidates.append((float(val), label))
+        valid = [(p, lbl) for p, lbl in candidates if pd.notna(p) and p > ref_price * 1.022]
+        valid.sort(key=lambda x: x[0])
+        return valid
+    else:
+        if pd.notna(sup_short): candidates.append((sup_short, "20日前浪底支撐位"))
+        if pd.notna(sup_long): candidates.append((sup_long, "60日波段前低支撐"))
+        if pd.notna(sup_120): candidates.append((sup_120, "半年線大級別前低支撐"))
+        if pd.notna(low_52w): candidates.append((low_52w, "52週前低支撐區"))
+        for ma_name, label in [('SMA60', '60MA季線支撐位'), ('SMA120', '120MA半年線支撐位'), ('SMA200', '200MA年線大支撐')]:
+            val = last.get(ma_name, np.nan)
+            if pd.notna(val) and float(val) < ref_price * 0.98:
+                candidates.append((float(val), label))
+        valid = [(p, lbl) for p, lbl in candidates if pd.notna(p) and p < ref_price * 0.978]
+        valid.sort(key=lambda x: x[0], reverse=True)
+        return valid
 
 def evaluate_swing_trade_plan_and_rr(
     df: pd.DataFrame,
@@ -76,13 +356,11 @@ def evaluate_swing_trade_plan_and_rr(
     is_breakout_long: bool = False,
     is_near_20ma: bool = False,
     is_deduction_pullback: bool = False,
-    is_breakdown_short: bool = False
+    is_breakdown_short: bool = False,
+    lei_struct: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
-    [增量修復 Bug 1 & Bug 2]
-    1. 嚴格根據最終 `plan_type` ("LONG" / "SHORT" / "WATCH") 計算進場價、止損價、目標價，絕不用 `pass_count >= original_short_pass_count` 覆蓋空頭方向。
-    2. 區分「突破單 (Breakout Stop-Buy)」與「回踩單 (Pullback Limit/Trigger)」的理論進場價，而非盲目直接用 `last['Close']` 當作唯一進場價。
-    3. 計算真實結構盈虧比 (Structural R:R) 與理論 2R 目標，若上方阻力過近導致真實 R:R < 1.5，給出明確風險警示。
+    [v24.14 結構買入位、結構止損與多層級真實阻力止盈]
     """
     last = df.iloc[-1]
     close_p = float(last['Close'])
@@ -90,92 +368,342 @@ def evaluate_swing_trade_plan_and_rr(
     low_p = float(last['Low'])
     atr_safe = float(atr_val) if pd.notna(atr_val) and atr_val > 0 else close_p * 0.03
 
+    box_high_10 = float(last.get('BoxHigh10_Causal', df['High'].iloc[-11:-1].max() if len(df) > 11 else high_p))
+    box_low_10 = float(last.get('BoxLow10_Causal', df['Low'].iloc[-11:-1].min() if len(df) > 11 else low_p))
     res_short = float(last.get('ResShort_Causal', last.get('ResShort', close_p * 1.08)))
     sup_short = float(last.get('SupShort_Causal', last.get('SupShort', close_p * 0.92)))
+    prior_wave_high = float(last.get('PriorWaveHigh_Causal', res_short))
+    prior_wave_low = float(last.get('PriorWaveLow_Causal', sup_short))
+    sma10_p = float(last.get('SMA10', close_p))
+    sma20_p = float(last.get('SMA20', close_p))
+    sma50_p = float(last.get('SMA50', close_p))
+    ema20_p = float(last.get('EMA20', sma20_p))
 
     if plan_type == "LONG":
-        if is_breakout_long:
-            pivot_high = float(df['High'].iloc[-21:-1].max()) if len(df) > 21 else high_p
-            recommended_entry = max(close_p, min(pivot_high * 1.002, close_p + 0.5 * atr_safe))
-        elif is_near_20ma or is_deduction_pullback:
-            recommended_entry = close_p
+        if is_near_20ma or is_deduction_pullback or "回踩" in status or "回撤" in status:
+            support_anchor = max(min(close_p, sma20_p * 1.005), ema20_p * 0.998)
+            if close_p > sma20_p and (close_p - sma20_p) / sma20_p <= 0.02:
+                recommended_entry = round(support_anchor, 2)
+                entry_type_desc = f"低吸回踩單 (回測 20MA 支撐區 {sma20_p:.2f} 承接)"
+            else:
+                recommended_entry = round(min(high_p + 0.05 * atr_safe, close_p * 1.008), 2)
+                entry_type_desc = f"底構造確認單 (突破回撤確認位 {recommended_entry:.2f} 買入)"
+        elif is_breakout_long or "突破" in status or "旗型" in status:
+            pivot_buy = box_high_10 + 0.08 * atr_safe
+            if close_p > box_high_10 * 1.03:
+                retest_level = max(box_high_10, sma10_p, prior_wave_high if prior_wave_high <= close_p else sma10_p)
+                recommended_entry = round(retest_level, 2)
+                entry_type_desc = f"等回測低吸單 (現價已高出突破位 {(close_p/box_high_10 - 1)*100:.1f}%，勿追高，等回踩前高支撐 {recommended_entry:.2f} 買入)"
+            else:
+                recommended_entry = round(max(close_p * 1.002, min(pivot_buy, close_p + 0.35 * atr_safe)), 2)
+                entry_type_desc = f"突破觸發單 (Stop-Buy 升穿箱體樞紐 {recommended_entry:.2f} 進場)"
+        elif bool(last.get('VCPSignal', False)) or bool(last.get('JLaw_Tight_Box', False)) or bool(last.get('LEI_MA_Tight_2Pct', False)) or "壓縮" in status or "密集" in status:
+            recommended_entry = round(box_high_10 + 0.05 * atr_safe, 2)
+            entry_type_desc = f"突破埋伏單 (待升穿近10日緊密平台頂 {recommended_entry:.2f} 觸發買入)"
         else:
-            recommended_entry = close_p
+            pullback_target = max(sma20_p, min(sma10_p, prior_wave_high if prior_wave_high < close_p else sma10_p))
+            if abs(close_p - pullback_target) / close_p < 0.005:
+                pullback_target = close_p * 0.985
+            recommended_entry = round(pullback_target, 2)
+            entry_type_desc = f"拉回等待單 (目前無即時突破，建議等縮量回踩 10/20MA 支撐位 {recommended_entry:.2f} 買入)"
 
-        structural_sl = min(low_p, sup_short) - 0.2 * atr_safe
-        atr_sl = recommended_entry - 2.0 * atr_safe
-        stop_loss = max(atr_sl, structural_sl) if (recommended_entry - structural_sl) >= 0.8 * atr_safe else atr_sl
-        risk_per_share = max(recommended_entry - stop_loss, 1e-6)
+        struct_low_candidates = [
+            (box_low_10 - 0.15 * atr_safe, f"近10日緊密箱體底 ({box_low_10:.2f}) 下方"),
+            (sup_short - 0.20 * atr_safe, f"20日波段前浪底支撐 ({sup_short:.2f}) 外側"),
+            (sma20_p - 0.50 * atr_safe, f"20MA 生命線 ({sma20_p:.2f}) 下方緩衝"),
+            (sma50_p - 0.30 * atr_safe, f"50MA 中期支撐 ({sma50_p:.2f}) 下方")
+        ]
+        if lei_struct and pd.notna(lei_struct.get("structure_low")):
+            sl_st = float(lei_struct["structure_low"]) - 0.15 * atr_safe
+            struct_low_candidates.append((sl_st, f"LEI 底部構造低點 ({lei_struct['structure_low']:.2f}) 下方"))
 
-        structural_tp = res_short if res_short > recommended_entry else (recommended_entry + 2.0 * risk_per_share)
-        min_2r_tp = recommended_entry + 2.0 * risk_per_share
-        take_profit = structural_tp if structural_tp >= min_2r_tp else min_2r_tp
+        valid_sls = [
+            (sl_p, sl_lbl) for sl_p, sl_lbl in struct_low_candidates
+            if pd.notna(sl_p) and (recommended_entry * 0.925 <= sl_p <= recommended_entry * 0.986)
+        ]
+        if valid_sls:
+            best_sl_pair = max(valid_sls, key=lambda x: x[0] if (recommended_entry - x[0]) >= 0.85 * atr_safe else -999999)
+            if (recommended_entry - best_sl_pair[0]) < 0.85 * atr_safe:
+                best_sl_pair = min(valid_sls, key=lambda x: x[0])
+            stop_loss = round(best_sl_pair[0], 2)
+            sl_basis_desc = best_sl_pair[1]
+        else:
+            fallback_sl = max(recommended_entry - 1.8 * atr_safe, recommended_entry * 0.928)
+            stop_loss = round(min(fallback_sl, recommended_entry * 0.982), 2)
+            sl_basis_desc = f"波動率與 J Law ≤7.2% 硬止損保護位"
 
-        structural_rr = (structural_tp - recommended_entry) / risk_per_share
-        planned_rr = (take_profit - recommended_entry) / risk_per_share
+        risk_per_share = max(recommended_entry - stop_loss, 1e-4)
+        stop_pct = (risk_per_share / recommended_entry) * 100.0
+
+        sr_targets = _find_historical_ma_convergence_targets(df, recommended_entry, "LONG")
+        recent_swing_amp = max(res_short - sup_short, 3.2 * atr_safe)
+        measured_move_tp = round(recommended_entry + recent_swing_amp * 0.85, 2)
+
+        if sr_targets:
+            first_sr_p, first_sr_lbl = sr_targets[0]
+            first_sr_rr = (first_sr_p - recommended_entry) / risk_per_share
+            if first_sr_rr < 1.6 and len(sr_targets) >= 2:
+                second_sr_p, second_sr_lbl = sr_targets[1]
+                take_profit = round(first_sr_p, 2)
+                tp2_price = round(second_sr_p, 2)
+                tp_basis_desc = f"第一阻力: {first_sr_lbl} ({first_sr_p:.2f}) ｜ 次級目標: {second_sr_lbl} ({second_sr_p:.2f})"
+            else:
+                take_profit = round(first_sr_p, 2)
+                tp2_price = round(sr_targets[1][0], 2) if len(sr_targets) >= 2 else measured_move_tp
+                tp_basis_desc = f"{first_sr_lbl} ({take_profit:.2f})"
+            structural_tp = round(first_sr_p, 2)
+        else:
+            take_profit = measured_move_tp
+            tp2_price = round(recommended_entry + recent_swing_amp * 1.35, 2)
+            structural_tp = take_profit
+            tp_basis_desc = f"創高無套牢阻力，按前波段等距通道投射 ({take_profit:.2f})"
+
+        structural_rr = round((structural_tp - recommended_entry) / risk_per_share, 2)
+        planned_rr = round((take_profit - recommended_entry) / risk_per_share, 2)
+        tp2_rr = round((tp2_price - recommended_entry) / risk_per_share, 2)
+
+        warnings = []
+        if structural_rr < 1.8:
+            warnings.append(f"⚠️ 上方 {tp_basis_desc} 距離買入位僅 {structural_rr:.2f}R (<1.8R)，獲利空間受阻，不建議優先追入")
+        if close_p > recommended_entry * 1.025:
+            warnings.append(f"⏳ 現價 ({close_p:.2f}) 高於最佳買入位 ({recommended_entry:.2f})，請耐心掛單等待回測該買入位，切勿市價高追")
 
         return {
             "entry": recommended_entry,
+            "entry_type_desc": entry_type_desc,
             "sl": stop_loss,
+            "sl_basis_desc": sl_basis_desc,
             "tp": take_profit,
+            "tp2": tp2_price,
+            "tp_basis_desc": tp_basis_desc,
             "structural_tp": structural_tp,
             "risk_per_share": risk_per_share,
-            "structural_rr": round(structural_rr, 2),
-            "planned_rr": round(planned_rr, 2),
-            "rr_warning": f"⚠️ 距離上方短線阻力 ({structural_tp:.2f}) 僅 {structural_rr:.2f}R (<1.5R)，追高空間受限" if structural_rr < 1.5 else ""
+            "stop_pct": round(stop_pct, 2),
+            "structural_rr": structural_rr,
+            "planned_rr": planned_rr,
+            "tp2_rr": tp2_rr,
+            "rr_warning": " ｜ ".join(warnings)
         }
 
     elif plan_type == "SHORT":
-        if is_breakdown_short:
-            pivot_low = float(df['Low'].iloc[-21:-1].min()) if len(df) > 21 else low_p
-            recommended_entry = min(close_p, max(pivot_low * 0.998, close_p - 0.5 * atr_safe))
+        if is_breakdown_short or "破底" in status:
+            pivot_short = box_low_10 - 0.08 * atr_safe
+            if close_p < box_low_10 * 0.97:
+                retest_short_lvl = min(box_low_10, sma10_p, prior_wave_low if prior_wave_low >= close_p else sma10_p)
+                recommended_entry = round(retest_short_lvl, 2)
+                entry_type_desc = f"等反彈沽空單 (現價已急跌偏離破底位，等無量反抽前低阻力 {recommended_entry:.2f} 沽空)"
+            else:
+                recommended_entry = round(min(close_p * 0.998, max(pivot_short, close_p - 0.35 * atr_safe)), 2)
+                entry_type_desc = f"破底觸發沽空單 (Stop-Sell 跌穿箱體下沿 {recommended_entry:.2f} 追空)"
         else:
-            recommended_entry = close_p
+            resist_anchor = min(max(close_p, sma20_p * 0.995), sma50_p if pd.notna(sma50_p) and sma50_p > close_p else sma20_p * 1.01)
+            recommended_entry = round(resist_anchor, 2)
+            entry_type_desc = f"逢高反彈沽空單 (於 20MA/前支撐轉阻力區 {recommended_entry:.2f} 掛單沽空)"
 
-        structural_sl = max(high_p, res_short) + 0.2 * atr_safe
-        atr_sl = recommended_entry + 2.0 * atr_safe
-        stop_loss = min(atr_sl, structural_sl) if (structural_sl - recommended_entry) >= 0.8 * atr_safe else atr_sl
-        risk_per_share = max(stop_loss - recommended_entry, 1e-6)
+        struct_high_candidates = [
+            (box_high_10 + 0.15 * atr_safe, f"近10日反彈高點 ({box_high_10:.2f}) 上方"),
+            (res_short + 0.20 * atr_safe, f"20日前浪頂阻力 ({res_short:.2f}) 外側"),
+            (sma20_p + 0.50 * atr_safe, f"20MA 蓋頭均線 ({sma20_p:.2f}) 上方緩衝"),
+            (sma50_p + 0.30 * atr_safe, f"50MA 生命線 ({sma50_p:.2f}) 上方")
+        ]
+        if lei_struct and pd.notna(lei_struct.get("structure_high")):
+            sh_st = float(lei_struct["structure_high"]) + 0.15 * atr_safe
+            struct_high_candidates.append((sh_st, f"LEI 頂部構造高點 ({lei_struct['structure_high']:.2f}) 上方"))
 
-        structural_tp = sup_short if sup_short < recommended_entry else (recommended_entry - 2.0 * risk_per_share)
-        min_2r_tp = recommended_entry - 2.0 * risk_per_share
-        take_profit = structural_tp if structural_tp <= min_2r_tp else min_2r_tp
+        valid_sls = [
+            (sl_p, sl_lbl) for sl_p, sl_lbl in struct_high_candidates
+            if pd.notna(sl_p) and (recommended_entry * 1.014 <= sl_p <= recommended_entry * 1.075)
+        ]
+        if valid_sls:
+            best_sl_pair = min(valid_sls, key=lambda x: x[0] if (x[0] - recommended_entry) >= 0.85 * atr_safe else 999999)
+            if (best_sl_pair[0] - recommended_entry) < 0.85 * atr_safe:
+                best_sl_pair = max(valid_sls, key=lambda x: x[0])
+            stop_loss = round(best_sl_pair[0], 2)
+            sl_basis_desc = best_sl_pair[1]
+        else:
+            fallback_sl = min(recommended_entry + 1.8 * atr_safe, recommended_entry * 1.072)
+            stop_loss = round(max(fallback_sl, recommended_entry * 1.018), 2)
+            sl_basis_desc = f"波動率與 J Law ≤7.2% 空頭硬止損保護位"
 
-        structural_rr = (recommended_entry - structural_tp) / risk_per_share
-        planned_rr = (recommended_entry - take_profit) / risk_per_share
+        risk_per_share = max(stop_loss - recommended_entry, 1e-4)
+        stop_pct = (risk_per_share / recommended_entry) * 100.0
+
+        sr_targets = _find_historical_ma_convergence_targets(df, recommended_entry, "SHORT")
+        recent_swing_amp = max(res_short - sup_short, 3.2 * atr_safe)
+        measured_move_tp = round(max(0.01, recommended_entry - recent_swing_amp * 0.85), 2)
+
+        if sr_targets:
+            first_sr_p, first_sr_lbl = sr_targets[0]
+            first_sr_rr = (recommended_entry - first_sr_p) / risk_per_share
+            if first_sr_rr < 1.6 and len(sr_targets) >= 2:
+                second_sr_p, second_sr_lbl = sr_targets[1]
+                take_profit = round(first_sr_p, 2)
+                tp2_price = round(second_sr_p, 2)
+                tp_basis_desc = f"第一支撐: {first_sr_lbl} ({first_sr_p:.2f}) ｜ 次級目標: {second_sr_lbl} ({second_sr_p:.2f})"
+            else:
+                take_profit = round(first_sr_p, 2)
+                tp2_price = round(sr_targets[1][0], 2) if len(sr_targets) >= 2 else measured_move_tp
+                tp_basis_desc = f"{first_sr_lbl} ({take_profit:.2f})"
+            structural_tp = round(first_sr_p, 2)
+        else:
+            take_profit = measured_move_tp
+            tp2_price = round(max(0.01, recommended_entry - recent_swing_amp * 1.35), 2)
+            structural_tp = take_profit
+            tp_basis_desc = f"破底無歷史支撐，按波段等距下跌通道投射 ({take_profit:.2f})"
+
+        structural_rr = round((recommended_entry - structural_tp) / risk_per_share, 2)
+        planned_rr = round((recommended_entry - take_profit) / risk_per_share, 2)
+        tp2_rr = round((recommended_entry - tp2_price) / risk_per_share, 2)
+
+        warnings = []
+        if structural_rr < 1.8:
+            warnings.append(f"⚠️ 下方 {tp_basis_desc} 距離沽空位僅 {structural_rr:.2f}R (<1.8R)，下跌空間受限，不建議優先追空")
+        if close_p < recommended_entry * 0.975:
+            warnings.append(f"⏳ 現價 ({close_p:.2f}) 低於理想沽空位 ({recommended_entry:.2f})，請耐心等待反彈至阻力位再沽空")
 
         return {
             "entry": recommended_entry,
+            "entry_type_desc": entry_type_desc,
             "sl": stop_loss,
+            "sl_basis_desc": sl_basis_desc,
             "tp": take_profit,
+            "tp2": tp2_price,
+            "tp_basis_desc": tp_basis_desc,
             "structural_tp": structural_tp,
             "risk_per_share": risk_per_share,
-            "structural_rr": round(structural_rr, 2),
-            "planned_rr": round(planned_rr, 2),
-            "rr_warning": f"⚠️ 距離下方短線支撐 ({structural_tp:.2f}) 僅 {structural_rr:.2f}R (<1.5R)，做空空間受限" if structural_rr < 1.5 else ""
+            "stop_pct": round(stop_pct, 2),
+            "structural_rr": structural_rr,
+            "planned_rr": planned_rr,
+            "tp2_rr": tp2_rr,
+            "rr_warning": " ｜ ".join(warnings)
         }
 
     else:
         return {
             "entry": close_p,
-            "sl": close_p - 2.0 * atr_safe,
-            "tp": close_p + 4.0 * atr_safe,
+            "entry_type_desc": "觀望狀態 (暫無掛單建議)",
+            "sl": round(close_p - 2.0 * atr_safe, 2),
+            "sl_basis_desc": "-",
+            "tp": round(close_p + 4.0 * atr_safe, 2),
+            "tp2": round(close_p + 6.0 * atr_safe, 2),
+            "tp_basis_desc": "-",
             "structural_tp": res_short,
             "risk_per_share": 2.0 * atr_safe,
+            "stop_pct": round((2.0 * atr_safe / close_p) * 100.0, 2),
             "structural_rr": 0.0,
             "planned_rr": 0.0,
+            "tp2_rr": 0.0,
             "rr_warning": ""
         }
 
+def evaluate_jlaw_power_trend_and_meta(
+    df: pd.DataFrame,
+    bg_df: Optional[pd.DataFrame],
+    market_type: str,
+    lei_struct: Dict[str, Any],
+    lei_ded: Dict[str, Any],
+    trade_plan_eval: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    [J Law @jlawstock《EP1：強勁趨勢與多重優勢進場點 META》&《EP2：趨勢線與回測》]
+    """
+    meta_res = {
+        "is_power_trend": False,
+        "rs_1m_outperform": False,
+        "rs_6m_outperform": False,
+        "triple_liquidity_ok": False,
+        "up_down_vol_ratio": 1.0,
+        "sr_flip_retest_long": False,
+        "sr_flip_retest_short": False,
+        "meta_long_score": 0,
+        "meta_short_score": 0,
+        "meta_edges_list": [],
+        "meta_badge": "-",
+        "priority_score_100": 0.0
+    }
+    if df is None or len(df) < 60:
+        return meta_res
+
+    last = df.iloc[-1]
+    close_p = float(last['Close'])
+
+    recent20 = df.tail(20)
+    up_bars = recent20[recent20['Close'] > recent20['Open']]
+    down_bars = recent20[recent20['Close'] < recent20['Open']]
+    avg_up_v = float(up_bars['Volume'].mean()) if not up_bars.empty else 1.0
+    avg_dn_v = float(down_bars['Volume'].mean()) if not down_bars.empty else 1.0
+    ud_vol_ratio = round(avg_up_v / max(avg_dn_v, 1.0), 2)
+    meta_res["up_down_vol_ratio"] = ud_vol_ratio
+
+    above_200 = pd.notna(last.get('SMA200')) and close_p > float(last['SMA200'])
+    sma10_gt_20 = pd.notna(last.get('SMA10')) and pd.notna(last.get('SMA20')) and float(last['SMA10']) > float(last['SMA20'])
+    held_20ma_recently = int((df['Close'].tail(10) >= df['SMA20'].tail(10) * 0.99).sum()) >= 8
+    meta_res["is_power_trend"] = bool(above_200 and sma10_gt_20 and held_20ma_recently and ud_vol_ratio >= 1.2)
+
+    stock_ret1m = float(last.get('Ret1M', 0.0)) if pd.notna(last.get('Ret1M')) else 0.0
+    stock_ret6m = float(last.get('Ret6M', 0.0)) if pd.notna(last.get('Ret6M')) else 0.0
+    bench_ret1m, bench_ret6m = 0.0, 0.0
+    if bg_df is not None and len(bg_df) > 126:
+        bench_ret1m = float(bg_df['Close'].iloc[-1] / bg_df['Close'].iloc[-21] - 1.0)
+        bench_ret6m = float(bg_df['Close'].iloc[-1] / bg_df['Close'].iloc[-126] - 1.0)
+    meta_res["rs_1m_outperform"] = bool(stock_ret1m > max(0.05, bench_ret1m * 1.8))
+    meta_res["rs_6m_outperform"] = bool(stock_ret6m > max(0.10, bench_ret6m * 1.8))
+
+    if market_type == "HK":
+        meta_res["triple_liquidity_ok"] = bool(float(last.get('TurnoverMA20', 0)) >= 20_000_000)
+    else:
+        v_ok = all(float(last.get(c, 0)) >= 500_000 for c in ['VolSMA10', 'VolSMA30', 'VolSMA60'] if pd.notna(last.get(c)))
+        turnover_ok = float(last.get('TurnoverMA20', 0)) >= 30_000_000
+        meta_res["triple_liquidity_ok"] = bool(v_ok and turnover_ok)
+
+    if len(df) >= 45:
+        prior_box_high = float(df['High'].iloc[-45:-10].max())
+        prior_box_low = float(df['Low'].iloc[-45:-10].min())
+        if float(df['High'].iloc[-10:].max()) > prior_box_high * 1.01 and (prior_box_high * 0.975 <= close_p <= prior_box_high * 1.035):
+            meta_res["sr_flip_retest_long"] = True
+        if float(df['Low'].iloc[-10:].min()) < prior_box_low * 0.99 and (prior_box_low * 0.965 <= close_p <= prior_box_low * 1.025):
+            meta_res["sr_flip_retest_short"] = True
+
+    long_edges = []
+    if meta_res["is_power_trend"] or (meta_res["rs_1m_outperform"] and meta_res["rs_6m_outperform"]):
+        long_edges.append("Edge1:強勁趨勢/雙週期RS領先")
+    if meta_res["sr_flip_retest_long"] or bool(last.get('JLaw_Tight_Box', False)) or bool(last.get('LEI_MA_Tight_2Pct', False)):
+        long_edges.append("Edge2:S/R互換支撐區或<5%緊密平台")
+    dist_10 = abs(close_p - float(last.get('SMA10', 0))) / (close_p + 1e-9)
+    dist_20 = abs(close_p - float(last.get('SMA20', 0))) / (close_p + 1e-9)
+    if (dist_10 <= 0.025 or dist_20 <= 0.03) and lei_ded.get("is_20ma_turn_up_favorable", False):
+        long_edges.append("Edge3:10/20MA均線保護+抵扣價助攻")
+    if lei_struct.get("bottom_structure", False) or lei_struct.get("bullish_2b", False) or (bool(last.get('VCPSignal', False)) and float(last.get('VolRatio', 1.0)) < 0.85):
+        long_edges.append("Edge4:底構造/2B破底翻/縮量洗盤確認")
+    sma150_up = len(df) > 170 and pd.notna(last.get('SMA150')) and float(last['SMA150']) > float(df['SMA150'].iloc[-20])
+    if sma150_up and float(trade_plan_eval.get("structural_rr", 0.0)) >= 1.8:
+        long_edges.append("Edge5:30週線(Stage2)向上且結構空間充足")
+
+    short_edges = []
+    if (not above_200 or float(last.get('SMA20', 0)) < float(last.get('SMA50', 0))) and float(last.get('Mansfield_RS', 0)) < 0:
+        short_edges.append("Edge1:空頭趨勢且RS弱於大盤")
+    if meta_res["sr_flip_retest_short"] or bool(last.get('JLaw_Tight_Box', False)):
+        short_edges.append("Edge2:支撐Flip轉阻力回測/弱勢熊旗")
+    if dist_20 <= 0.03 and not lei_ded.get("is_20ma_turn_up_favorable", True):
+        short_edges.append("Edge3:20MA蓋頭壓制+抵扣價下壓")
+    if lei_struct.get("top_structure", False) or lei_struct.get("bearish_2b", False) or ud_vol_ratio < 0.85:
+        short_edges.append("Edge4:頂構造/2B假突破/下跌放量反彈縮量")
+    if float(trade_plan_eval.get("structural_rr", 0.0)) >= 1.8:
+        short_edges.append("Edge5:下方至前低支撐空間充足")
+
+    meta_res["meta_long_score"] = len(long_edges)
+    meta_res["meta_short_score"] = len(short_edges)
+    if len(long_edges) >= len(short_edges):
+        meta_res["meta_edges_list"] = long_edges
+        meta_res["meta_badge"] = f"💎 {len(long_edges)}/5 多重優勢" if len(long_edges) >= 3 else f"⚪ {len(long_edges)}/5 優勢"
+    else:
+        meta_res["meta_edges_list"] = short_edges
+        meta_res["meta_badge"] = f"🏴‍☠️ {len(short_edges)}/5 空頭優勢" if len(short_edges) >= 3 else f"⚪ {len(short_edges)}/5 優勢"
+
+    return meta_res
+
 def check_recent_signal_and_stop_invalidation(df: pd.DataFrame, lookback_bars: int = 15) -> Dict[str, Any]:
-    """
-    [增量修復 Bug 4 & Bug 5]
-    解決「股票已大幅下跌仍顯示優先做多」及「早已觸及當時買入止損仍繼續顯示做多」的核心狀態檢查器：
-    1. 追蹤最近 `lookback_bars` (預設 15 日) 內的前波突破點 / 階段高點 (Swing Signal Anchor)。
-    2. 計算當時進場的初始止損位：`anchor_entry - 2 * anchor_atr` 以及結構支撐位 `SupShort`。
-    3. 檢查自該高點/信號日之後的日內最低價 (`Low`) 或最新收盤價 (`Close`) 是否已跌穿當時止損位 (Stop-Loss Hit)。
-    4. 檢查短期趨勢是否已經崩壞（例如 `Close < SMA20` 且 `SMA20` 下彎、或跌破 `SMA50`、或創 20 日新低）。
-    """
+    """解決「股票已大幅下跌仍顯示優先做多」及「早已觸及當時買入止損仍繼續顯示做多」的核心狀態檢查器。"""
     result = {
         "long_stop_hit": False,
         "short_stop_hit": False,
@@ -208,7 +736,7 @@ def check_recent_signal_and_stop_invalidation(df: pd.DataFrame, lookback_bars: i
     peak_row = df.iloc[peak_pos]
     peak_entry = float(peak_row['Close'])
     peak_atr = float(peak_row['ATR']) if pd.notna(peak_row.get('ATR')) and peak_row['ATR'] > 0 else peak_entry * 0.03
-    peak_initial_sl = peak_entry - 2.0 * peak_atr
+    peak_initial_sl = max(peak_entry - 2.0 * peak_atr, peak_entry * 0.925)
 
     post_peak_df = df.iloc[peak_pos + 1:] if peak_pos + 1 < len(df) else pd.DataFrame()
     min_low_since_peak = float(post_peak_df['Low'].min()) if not post_peak_df.empty else float(last['Low'])
@@ -222,7 +750,7 @@ def check_recent_signal_and_stop_invalidation(df: pd.DataFrame, lookback_bars: i
         result["long_stop_hit"] = True
         result["invalidation_reason"] = (
             f"⛔ 觸及前波止損失效：自 {result['anchor_date']} 波段高點 ({peak_entry:.2f}) 起算，"
-            f"盤中最低價 ({min_low_since_peak:.2f}) 已跌穿當時 2ATR 止損位 ({peak_initial_sl:.2f})"
+            f"盤中最低價 ({min_low_since_peak:.2f}) 已跌穿當時止損位 ({peak_initial_sl:.2f})"
         )
 
     if below_sma20_and_50 or (last['Close'] < last.get('SMA20', 0) and sma20_falling and macd_bearish) or broke_20d_low_intraday:
@@ -238,7 +766,7 @@ def check_recent_signal_and_stop_invalidation(df: pd.DataFrame, lookback_bars: i
     trough_row = df.iloc[trough_pos]
     trough_entry = float(trough_row['Close'])
     trough_atr = float(trough_row['ATR']) if pd.notna(trough_row.get('ATR')) and trough_row['ATR'] > 0 else trough_entry * 0.03
-    trough_initial_sl = trough_entry + 2.0 * trough_atr
+    trough_initial_sl = min(trough_entry + 2.0 * trough_atr, trough_entry * 1.075)
     post_trough_df = df.iloc[trough_pos + 1:] if trough_pos + 1 < len(df) else pd.DataFrame()
     max_high_since_trough = float(post_trough_df['High'].max()) if not post_trough_df.empty else float(last['High'])
 
@@ -251,7 +779,7 @@ def check_recent_signal_and_stop_invalidation(df: pd.DataFrame, lookback_bars: i
     return result
 
 def compute_backtest_institutional_metrics(equity_curve: pd.Series, trades_df: pd.DataFrame, initial_capital: float) -> Dict[str, Any]:
-    """[增量優化 維度3 回測與驗證] 計算最大回撤 (MDD)、獲利因子 (Profit Factor)、夏普比率 (Sharpe)、期望值 (Expectancy)"""
+    """計算最大回撤 (MDD)、獲利因子 (Profit Factor)、夏普比率 (Sharpe)、期望值 (Expectancy)"""
     metrics = {
         "max_drawdown_pct": 0.0,
         "profit_factor": 0.0,
@@ -300,10 +828,13 @@ def get_persistent_data():
         # NEW: 保留 watchlist_radar_results 並增量加入時間戳與信號狀態追蹤池
         "watchlist_radar_results": {}, # 🌟 升級為字典，儲存每個分組的獨立掃描結果
         "radar_timestamps": {},        # 🕒 [NEW] 紀錄各池最後掃描時間，解決緩存永不失效問題
-        "signal_lifecycle_store": {}   # 🛡️ [NEW] 紀錄信號初始買入價與初始止損，解決觸及止損仍顯示問題
+        "signal_lifecycle_store": {},  # 🛡️ [NEW] 紀錄信號初始買入價與初始止損，解決觸及止損仍顯示問題
+        "radar_breadth_stats": {},     # 🌐 [NEW J Law 影片10] 紀錄掃描池 >50MA 及 >200MA 市場寬度百分比
+        "_schema_ver": CURRENT_SCHEMA_VERSION
     }
 
 persistent_data = get_persistent_data()
+ensure_persistent_schema_fresh(persistent_data)
 
 # ==========================================
 # 🌟 初始化 Session State (仿富途牛牛分組)
@@ -418,7 +949,15 @@ def get_index_data(index_ticker, interval="1d"):
         idx_df['PriceChange'] = idx_df['Close'].pct_change()
         if 'Volume' in idx_df.columns:
             idx_df['VolumeSMA50'] = idx_df['Volume'].rolling(window=50).mean()
-            idx_df['Is_Distribution'] = (idx_df['PriceChange'] <= -0.002) & (idx_df['Volume'] > idx_df['Volume'].shift(1))
+            # OLD: idx_df['Is_Distribution'] = (idx_df['PriceChange'] <= -0.002) & (idx_df['Volume'] > idx_df['Volume'].shift(1))
+            # NEW: [J Law 影片10 15:10] 排除 3/6/9/12 月第 3 個星期五期貨結算日 (四巫日) 異常成交量，並涵蓋放量滯漲出貨日
+            _qw_mask_idx = is_quad_witching_friday(idx_df.index)
+            idx_df['Is_Distribution'] = (
+                (idx_df['PriceChange'] <= 0.002)
+                & (idx_df['Volume'] > idx_df['Volume'].shift(1))
+                & (idx_df['Volume'] > idx_df['VolumeSMA50'])
+                & (~_qw_mask_idx)
+            )
             idx_df['Dist_Days_20d'] = idx_df['Is_Distribution'].rolling(window=20).sum()
         else:
             idx_df['Dist_Days_20d'] = 0
@@ -600,10 +1139,19 @@ def calculate_indicators(df, bg_df, interval="1d"):
     df['MACDHist'] = df['MACD'] - df['MACDSignal']
 
     df['PriceChange'] = df['Close'].pct_change()
+    # OLD:
+    # df['Is_Distribution'] = (
+    #     (df['PriceChange'] <= 0.002) & 
+    #     (df['Volume'] > df['Volume'].shift(1)) & 
+    #     (df['Volume'] > df['VolumeSMA50'])
+    # )
+    # NEW: [J Law 影片10] 排除四巫日結算量干擾
+    _qw_mask_stk = is_quad_witching_friday(df.index)
     df['Is_Distribution'] = (
         (df['PriceChange'] <= 0.002) & 
         (df['Volume'] > df['Volume'].shift(1)) & 
-        (df['Volume'] > df['VolumeSMA50'])
+        (df['Volume'] > df['VolumeSMA50']) &
+        (~_qw_mask_stk)
     )
     df['Dist_Days_20d'] = df['Is_Distribution'].rolling(window=20).sum()
     df['Is_Abnormal_Drop'] = (df['PriceChange'] < -0.03) & (df['Volume'] > df['VolumeSMA50'])
@@ -678,9 +1226,10 @@ def calculate_indicators(df, bg_df, interval="1d"):
     df['CumulativeHigh'] = df['High'].cummax()
     df['CumulativeLow'] = df['Low'].cummin()
 
-    # [NEW INCREMENTAL PATCH] 增量計算無未來函數之因果支撐阻力與 Wilder 標準 ATR/RSI
+    # [NEW INCREMENTAL PATCH v24.14] 增量計算無未來函數之多層級結構支撐阻力、Wilder ATR/RSI 與 LEI × J Law 雙大師特徵欄位
     df = compute_causal_swing_sr(df)
     df['ATR_Wilder'], df['RSI_Wilder'] = compute_wilder_atr_and_rsi(df)
+    df = compute_lei_dual_ma_and_ppo_features(df)
 
     return df
 
@@ -900,16 +1449,46 @@ def quick_historical_win_rate(df, market_type):
             
             atr_val = prev['ATR'] if pd.notna(prev['ATR']) and prev['ATR'] > 0 else row['Open'] * 0.03
 
+            # OLD:
+            # if is_kk_trigger or is_long_trigger:
+            #     position = "LONG"
+            #     entry_price = row['Open']
+            #     stop_loss = entry_price - 2 * atr_val
+            #     tp_target = entry_price + 3 * atr_val
+            # elif is_short_trigger:
+            #     position = "SHORT"
+            #     entry_price = row['Open']
+            #     stop_loss = entry_price + 2 * atr_val
+            #     tp_target = entry_price - 3 * atr_val
+            # NEW: [v24.14 掃描器與快速勝率理念同步] 採用真實結構支撐止損 (≤7.2% 上限) 與上方結構阻力止盈，且要求結構 R:R >= 1.8R 才進場
             if is_kk_trigger or is_long_trigger:
-                position = "LONG"
-                entry_price = row['Open']
-                stop_loss = entry_price - 2 * atr_val
-                tp_target = entry_price + 3 * atr_val
+                _cand_entry = float(row['Open'])
+                _sup_s = float(prev.get('SupShort_Causal', prev.get('SupShort', _cand_entry * 0.94))) - 0.15 * atr_val
+                _cand_sl = max(_cand_entry - 1.8 * atr_val, _sup_s, _cand_entry * 0.928)
+                if _cand_sl >= _cand_entry * 0.99:
+                    _cand_sl = _cand_entry * 0.965
+                _risk = max(_cand_entry - _cand_sl, 1e-4)
+                _res_t = max(float(prev.get('ResShort_Causal', 0)), float(prev.get('ResLong_Causal', 0)))
+                _cand_tp = _res_t if _res_t > _cand_entry + 1.8 * _risk else (_cand_entry + 2.4 * _risk)
+                if (_cand_tp - _cand_entry) / _risk >= 1.8:
+                    position = "LONG"
+                    entry_price = _cand_entry
+                    stop_loss = _cand_sl
+                    tp_target = _cand_tp
             elif is_short_trigger:
-                position = "SHORT"
-                entry_price = row['Open']
-                stop_loss = entry_price + 2 * atr_val
-                tp_target = entry_price - 3 * atr_val
+                _cand_entry = float(row['Open'])
+                _res_s = float(prev.get('ResShort_Causal', prev.get('ResShort', _cand_entry * 1.06))) + 0.15 * atr_val
+                _cand_sl = min(_cand_entry + 1.8 * atr_val, _res_s, _cand_entry * 1.072)
+                if _cand_sl <= _cand_entry * 1.01:
+                    _cand_sl = _cand_entry * 1.035
+                _risk = max(_cand_sl - _cand_entry, 1e-4)
+                _sup_t = min(float(prev.get('SupShort_Causal', 999999)), float(prev.get('SupLong_Causal', 999999)))
+                _cand_tp = _sup_t if (0 < _sup_t < _cand_entry - 1.8 * _risk) else (_cand_entry - 2.4 * _risk)
+                if (_cand_entry - _cand_tp) / _risk >= 1.8:
+                    position = "SHORT"
+                    entry_price = _cand_entry
+                    stop_loss = _cand_sl
+                    tp_target = _cand_tp
 
         elif position == "LONG":
             if row['Low'] <= stop_loss:
@@ -989,8 +1568,10 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         kk4 = last['Close'] > last['ResShort'] * 0.95
         is_kk_htf = kk1 and kk2 and kk3 and kk4
 
-        # [NEW INCREMENTAL PATCH] 先執行近期止損觸發與短期結構轉空檢查 (修復 Bug 4 & Bug 5)
+        # [NEW INCREMENTAL PATCH] 先執行近期止損觸發與短期結構轉空檢查 + LEI 頂底構造/2B/抵扣推演 (修復 Bug 4 & Bug 5)
         invalidation_info = check_recent_signal_and_stop_invalidation(df, lookback_bars=15)
+        lei_struct_info = detect_lei_top_bottom_and_2b(df, lookback=35)
+        lei_ded_forecast = analyze_lei_deduction_forecast(df)
         is_short_term_uptrend = bool(
             pd.notna(last.get('SMA20')) and pd.notna(last.get('SMA50')) and
             (last['Close'] >= last['SMA50']) and not invalidation_info["downtrend_veto_long"] and not invalidation_info["long_stop_hit"]
@@ -1153,17 +1734,28 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
             # if (last['Close'] < last['SMA20'] and last['Close'] > last.get('SMA20_Deduction', 0)) or \
             #    (last['Close'] < last['SMA50'] and last['Close'] > last.get('SMA50_Deduction', 0)):
             #     is_deduction_pullback = True
-            # NEW: 抵扣價回撤買點必須確保當日非爆量長陰破位 (!Is_Abnormal_Drop)、未觸及前波止損、且收盤守在 50MA 之上
+            # NEW: [LEI 影片4 13:00-14:50] 2點鐘回撤買點必須滿足：(1)未觸及前波止損 (2)非爆量長陰破位 (3)未來抵扣價不構成下彎威脅 (4)未出現頂部構造
             if (
                 (not invalidation_info["long_stop_hit"])
                 and (not last.get('Is_Abnormal_Drop', False))
+                and (not lei_struct_info.get("top_structure", False))
                 and (last['Close'] >= last['SMA50'] * 0.99)
                 and (
                     (last['Close'] < last['SMA20'] and last['Close'] > last.get('SMA20_Deduction', 0)) or
-                    (last['Close'] < last['SMA50'] and last['Close'] > last.get('SMA50_Deduction', 0))
+                    (last['Close'] < last['SMA50'] and last['Close'] > last.get('SMA50_Deduction', 0)) or
+                    (lei_struct_info.get("bottom_structure", False) and is_near_20ma)
                 )
             ):
                 is_deduction_pullback = True
+
+        # [NEW LEI 均線高度密集 (<2.5%) 多頭張嘴突破埋伏信號 - 影片4 04:15-05:50]
+        is_lei_ma_convergence_long = bool(
+            last.get('LEI_MA_Tight_2Pct', False)
+            and (last['Close'] > last.get('EMA20', 0))
+            and (last.get('EMA20', 0) >= last.get('EMA60', 0) * 0.995)
+            and lei_ded_forecast.get("is_20ma_turn_up_favorable", False)
+            and (not invalidation_info["long_stop_hit"])
+        )
 
         # [NEW] 若已觸發空頭破位或短期結構轉空，優先防止被長線滯後多頭指標覆蓋 (修復 Bug 1 & Bug 4)
         has_active_short_signal = bool(
@@ -1179,13 +1771,17 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
             status = "🟢 放量強勢突破 (Breakout)"
         elif is_long_trigger and is_tight_setup and not invalidation_info["long_stop_hit"]:
             plan_type = "LONG"
-            status = "🟢 極限壓縮潛伏 (Setup)"
+            status = "🟢 極限壓縮潛伏 (VCP/緊密箱體 Setup)"
+        elif is_lei_ma_convergence_long and not has_active_short_signal:
+            plan_type = "LONG"
+            status = "🟢 LEI 均線高度密集 (<2.5%) 張嘴突破埋伏"
         elif is_long_trigger and not invalidation_info["long_stop_hit"]:
             plan_type = "LONG"
             status = "🟢 20MA 回踩做多信號"
         elif is_deduction_pullback and not has_active_short_signal:
             plan_type = "LONG"
-            status = "🟡 趨勢回撤買點 (2點鐘方向，抵扣價防守成功)"
+            _b_tag = " + 底構造確認" if lei_struct_info.get("bottom_structure") else ""
+            status = f"🟡 趨勢回撤買點 (2點鐘方向，抵扣價防守成功{_b_tag})"
         elif is_jlaw_short_trigger and is_breakdown:
             plan_type = "SHORT"
             status = "🔴 帶量破底做空 (Breakdown)"
@@ -1206,7 +1802,7 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
             status = "🟠 J Law 空頭條件成型 (醞釀中)"
         elif is_long_candidate:
             plan_type = "LONG"
-            status = "🟡 強勢多頭排列 (等待突破/回踩觸發)"
+            status = "🟡 強勢多頭排列 (等待拉回或突破買點)"
         else:
             plan_type = "WATCH"
             if invalidation_info["long_stop_hit"]:
@@ -1230,7 +1826,7 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         # else:
         #     stop_loss = potential_short_sl
         #     take_profit = potential_short_tp
-        # NEW: [修復 Bug 1 & Bug 2] 嚴格依據 plan_type 決定多空止損與目標價，並使用精準樞紐買入價與真實 R:R 計算器！
+        # NEW: [v24.14 結構買入位、結構止損與多層級真實阻力止盈]
         trade_plan_eval = evaluate_swing_trade_plan_and_rr(
             df=df,
             plan_type=plan_type,
@@ -1239,7 +1835,8 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
             is_breakout_long=bool(is_breakout_long),
             is_near_20ma=bool(is_near_20ma),
             is_deduction_pullback=bool(is_deduction_pullback),
-            is_breakdown_short=bool(is_breakdown)
+            is_breakdown_short=bool(is_breakdown),
+            lei_struct=lei_struct_info
         )
         target_entry = trade_plan_eval["entry"]
         if plan_type == "LONG":
@@ -1252,8 +1849,20 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
             stop_loss = potential_long_sl
             take_profit = potential_long_tp
 
+        jlaw_meta_info = evaluate_jlaw_power_trend_and_meta(
+            df=df,
+            bg_df=bg_df,
+            market_type=market_type,
+            lei_struct=lei_struct_info,
+            lei_ded=lei_ded_forecast,
+            trade_plan_eval=trade_plan_eval
+        )
+
         df.attrs["trade_plan_eval"] = trade_plan_eval
         df.attrs["invalidation_info"] = invalidation_info
+        df.attrs["lei_struct_info"] = lei_struct_info
+        df.attrs["lei_ded_forecast"] = lei_ded_forecast
+        df.attrs["jlaw_meta_info"] = jlaw_meta_info
 
         # --- 🌐 大週期週線共振監測 ---
         weekly_alignment = {"warning": "", "label": "", "detail": {}}
@@ -1423,73 +2032,135 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
             atr_val = prev_row['ATR'] if pd.notna(prev_row['ATR']) and prev_row['ATR'] > 0 else row['Open'] * 0.03
 
             if position_type is None:
-                if is_long_trigger and trade_mode in ["全部雙向", "僅做多頭(做多)"]:
-                    trigger_price = prev_row['High']
-                    
-                    if row['High'] >= trigger_price:
-                        actual_entry_price = max(row['Open'], trigger_price) 
+                # [NEW v24.14 回測與掃描系統 100% 理念同步]
+                _lei_pullback_ok = bool(
+                    prev_row.get('Clock_2', False)
+                    and (not prev_row.get('Is_Abnormal_Drop', False))
+                    and (prev_row['Close'] >= prev_row.get('SMA50', 0) * 0.99)
+                    and (prev_row['Close'] < prev_row.get('SMA20', 0) and prev_row['Close'] > prev_row.get('SMA20_Deduction', 0))
+                )
+                _lei_tight_ok = bool(
+                    prev_row.get('LEI_MA_Tight_2Pct', False)
+                    and (prev_row['Close'] > prev_row.get('EMA20', 0))
+                    and (prev_row['Close'] > prev_row.get('SMA20_Deduction', 0))
+                )
+                _short_term_uptrend_ok = bool(prev_row['Close'] >= prev_row.get('SMA50', 0))
+                _unified_long_signal = (is_long_trigger or _lei_pullback_ok or _lei_tight_ok) and _short_term_uptrend_ok and is_hk_liquid and is_market_health_ok
+
+                if _unified_long_signal and trade_mode in ["全部雙向", "僅做多頭(做多)"]:
+                    trigger_price = float(prev_row['High'])
+                    if row['High'] >= trigger_price and row['Open'] <= trigger_price * 1.035:
+                        actual_entry_price = max(float(row['Open']), trigger_price)
                         entry_price = actual_entry_price * (1 + slippage_fee)
 
-                        risk_amount = current_equity * 0.01
-                        risk_per_share = 2 * atr_val
-                        target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                        _struct_sup = max(
+                            float(prev_row.get("BoxLow10_Causal", prev_row.get("SupShort_Causal", entry_price * 0.94))) - 0.15 * atr_val,
+                            entry_price * 0.925
+                        )
+                        _atr_sl = max(entry_price - 1.8 * atr_val, entry_price * 0.925)
+                        stop_loss = max(_atr_sl, _struct_sup) if (entry_price - _struct_sup) >= 0.8 * atr_val else _atr_sl
+                        if stop_loss >= entry_price * 0.988:
+                            stop_loss = entry_price * 0.965
+                        risk_per_share = max(entry_price - stop_loss, 1e-4)
 
-                        if (target_shares * entry_price) > cash:
-                            target_shares = int(cash / entry_price)
+                        _cands_tp = [
+                            float(prev_row.get("ResShort_Causal", 0)),
+                            float(prev_row.get("ResLong_Causal", 0)),
+                            float(prev_row.get("Res120_Causal", 0)),
+                            float(prev_row.get("High52W", 0))
+                        ]
+                        _valid_tps = sorted([p for p in _cands_tp if p > entry_price * 1.022])
+                        if _valid_tps:
+                            tp_target = _valid_tps[0]
+                            if (tp_target - entry_price) / risk_per_share < 1.6 and len(_valid_tps) >= 2:
+                                tp_target = _valid_tps[1]
+                        else:
+                            _wave_amp = max(float(prev_row.get("ResShort_Causal", entry_price)) - float(prev_row.get("SupShort_Causal", stop_loss)), 3.2 * atr_val)
+                            tp_target = entry_price + _wave_amp * 0.85
 
-                        if market_type == "HK":
-                            lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
-                            target_shares = (target_shares // lot_sz) * lot_sz
-                            if target_shares == 0: continue
-
-                        shares = target_shares
-                        cash -= shares * entry_price
-                        stop_loss = entry_price - risk_per_share
-                        
-                        tp_target = max(prev_row.get("ResShort", entry_price * 1.08), entry_price + 4 * atr_val)
-                        
-                        position_stage = 0
-                        days_in_trade = 0
-                        
-                        entry_structural_sl = prev_row.get("SupShort", entry_price * 0.9)
-                        
-                        position_type = "LONG"
-                        trade_info = {"方向": "🟢 做多", "進場日期": current_date, "進場價": entry_price, "初始止損": stop_loss, "最終止盈": "TP 或 9EMA 跟蹤", "結構止損": entry_structural_sl}
+                        _planned_rr = (tp_target - entry_price) / risk_per_share
+                        if _planned_rr >= 1.8:
+                            risk_amount = current_equity * 0.01
+                            target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                            if (target_shares * entry_price) > cash:
+                                target_shares = int(cash / entry_price)
+                            if market_type == "HK":
+                                lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
+                                target_shares = (target_shares // lot_sz) * lot_sz
+                            if target_shares > 0:
+                                shares = target_shares
+                                cash -= shares * entry_price
+                                position_stage = 0
+                                days_in_trade = 0
+                                entry_structural_sl = float(prev_row.get("SupShort_Causal", prev_row.get("SupShort", entry_price * 0.92)))
+                                position_type = "LONG"
+                                trade_info = {
+                                    "方向": "🟢 做多",
+                                    "進場日期": current_date,
+                                    "進場價": round(entry_price, 2),
+                                    "初始止損": round(stop_loss, 2),
+                                    "目標止盈": round(tp_target, 2),
+                                    "計畫盈虧比": f"{_planned_rr:.2f}R",
+                                    "最終止盈": "結構TP 或 9EMA 跟蹤",
+                                    "結構止損": round(entry_structural_sl, 2)
+                                }
 
                 elif is_short_trigger and trade_mode in ["全部雙向", "僅做空頭(做空)"]:
-                    trigger_price = prev_row['Low']
-                    
-                    if row['Low'] <= trigger_price:
-                        actual_entry_price = min(row['Open'], trigger_price)
+                    trigger_price = float(prev_row['Low'])
+                    if row['Low'] <= trigger_price and row['Open'] >= trigger_price * 0.965:
+                        actual_entry_price = min(float(row['Open']), trigger_price)
                         entry_price = actual_entry_price * (1 - slippage_fee)
 
-                        risk_amount = current_equity * 0.01
-                        risk_per_share = 2 * atr_val
-                        target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                        _struct_res = min(
+                            float(prev_row.get("BoxHigh10_Causal", prev_row.get("ResShort_Causal", entry_price * 1.06))) + 0.15 * atr_val,
+                            entry_price * 1.075
+                        )
+                        _atr_sl = min(entry_price + 1.8 * atr_val, entry_price * 1.075)
+                        stop_loss = min(_atr_sl, _struct_res) if (_struct_res - entry_price) >= 0.8 * atr_val else _atr_sl
+                        if stop_loss <= entry_price * 1.012:
+                            stop_loss = entry_price * 1.035
+                        risk_per_share = max(stop_loss - entry_price, 1e-4)
 
-                        if market_type == "HK":
-                            lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
-                            target_shares = (target_shares // lot_sz) * lot_sz
-                            if target_shares == 0: continue
+                        _cands_tp = [
+                            float(prev_row.get("SupShort_Causal", 999999)),
+                            float(prev_row.get("SupLong_Causal", 999999)),
+                            float(prev_row.get("Sup120_Causal", 999999)),
+                            float(prev_row.get("Low52W", 999999))
+                        ]
+                        _valid_tps = sorted([p for p in _cands_tp if 0 < p < entry_price * 0.978], reverse=True)
+                        if _valid_tps:
+                            tp_target = _valid_tps[0]
+                            if (entry_price - tp_target) / risk_per_share < 1.6 and len(_valid_tps) >= 2:
+                                tp_target = _valid_tps[1]
+                        else:
+                            _wave_amp = max(float(prev_row.get("ResShort_Causal", stop_loss)) - float(prev_row.get("SupShort_Causal", entry_price)), 3.2 * atr_val)
+                            tp_target = max(0.01, entry_price - _wave_amp * 0.85)
 
-                        max_short_shares = int((current_equity * 0.05) / entry_price)
-                        target_shares = min(target_shares, max_short_shares)
-
-                        if (target_shares * entry_price) > cash:
-                            target_shares = int(cash / entry_price)
-
-                        shares = target_shares
-                        stop_loss = entry_price + risk_per_share
-                        
-                        tp_target = min(prev_row.get("SupShort", entry_price * 0.92), entry_price - 4 * atr_val)
-                        
-                        position_stage = 0
-                        days_in_trade = 0
-                        
-                        entry_structural_sl = prev_row.get("ResShort", entry_price * 1.1)
-                        
-                        position_type = "SHORT"
-                        trade_info = {"方向": "🔴 做空", "進場日期": current_date, "進場價": entry_price, "初始止損": stop_loss, "最終止盈": "TP 或 9EMA 跟蹤", "結構止損": entry_structural_sl}
+                        _planned_rr = (entry_price - tp_target) / risk_per_share
+                        if _planned_rr >= 1.8:
+                            risk_amount = current_equity * 0.01
+                            target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                            if (target_shares * entry_price) > cash:
+                                target_shares = int(cash / entry_price)
+                            if market_type == "HK":
+                                lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
+                                target_shares = (target_shares // lot_sz) * lot_sz
+                            if target_shares > 0:
+                                shares = target_shares
+                                position_stage = 0
+                                days_in_trade = 0
+                                entry_structural_sl = float(prev_row.get("ResShort_Causal", prev_row.get("ResShort", entry_price * 1.08)))
+                                position_type = "SHORT"
+                                trade_info = {
+                                    "方向": "🔴 做空",
+                                    "進場日期": current_date,
+                                    "進場價": round(entry_price, 2),
+                                    "初始止損": round(stop_loss, 2),
+                                    "目標止盈": round(tp_target, 2),
+                                    "計畫盈虧比": f"{_planned_rr:.2f}R",
+                                    "最終止盈": "結構TP 或 9EMA 跟蹤",
+                                    "結構止損": round(entry_structural_sl, 2)
+                                }
 
             elif position_type == "LONG":
                 days_in_trade += 1
@@ -1568,7 +2239,9 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         position_stage = 0
 
                 elif position_stage == 2:
-                    if row['Close'] < row.get('EMA9', 0) or row['Close'] < row.get('SupShort', 0):
+                    # OLD: if row['Close'] < row.get('EMA9', 0) or row['Close'] < row.get('SupShort', 0):
+                    # NEW: 採用無未來函數之 SupShort_Causal 與 9EMA 作為大趨勢跟蹤離場線
+                    if row['Close'] < row.get('EMA9', 0) or row['Close'] < row.get('SupShort_Causal', row.get('SupShort', 0)):
                         exit_price = row['Close'] * (1 - slippage_fee)
                         cash += (shares * exit_price)
                         profit = (exit_price - entry_price) * shares
@@ -1661,7 +2334,9 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         position_stage = 0
 
                 elif position_stage == 2:
-                    if row['Close'] > row.get('EMA9', 9999) or row['Close'] > row.get('ResShort', 9999):
+                    # OLD: if row['Close'] > row.get('EMA9', 9999) or row['Close'] > row.get('ResShort', 9999):
+                    # NEW: 採用無未來函數之 ResShort_Causal 與 9EMA 作為空頭跟蹤離場線
+                    if row['Close'] > row.get('EMA9', 9999) or row['Close'] > row.get('ResShort_Causal', row.get('ResShort', 9999)):
                         exit_price = row['Close'] * (1 + slippage_fee)
                         cash += ((entry_price - exit_price) * shares)
                         profit = (entry_price - exit_price) * shares
@@ -1791,7 +2466,10 @@ def render_styled_dataframe(df):
                 return 'color: #808080;'
         return ''
 
-    styled_df = df.style.map(highlight_status, subset=['J Law 強勢形態', '診斷結果', '交易方向'])
+    # OLD: styled_df = df.style.map(highlight_status, subset=['J Law 強勢形態', '診斷結果', '交易方向'])
+    # NEW: [修復 Screenshot 2 KeyError] 動態取 df.columns 交集，無論精簡視圖或完整視圖均絕不拋出 KeyError
+    _valid_style_cols = [c for c in ['優先次序', 'J Law 強勢形態', '診斷結果', '交易方向', '信號狀態', 'META多重優勢'] if c in df.columns]
+    styled_df = df.style.map(highlight_status, subset=_valid_style_cols) if _valid_style_cols else df.style
     
     st.dataframe(
         styled_df,
@@ -1827,57 +2505,134 @@ def render_radar_results(df_results, title, market_key=None):
         else:
             st.success("✅ 未發現明顯高相關性集群，持倉分散度相對健康。")
 
-    df_long = df_results[df_results['交易方向'].astype(str).str.contains("做多", na=False)]
-    df_short = df_results[df_results['交易方向'].astype(str).str.contains("做空", na=False)]
-    df_watch = df_results[df_results['交易方向'].astype(str).str.contains("觀望", na=False)]
-
-    st.markdown("---")
-    st.markdown("#### ⚡ 快速無縫跳轉診斷 (防刷新防丟失)")
-    st.caption("請使用下方的選單無縫跳轉，以防部分瀏覽器直接點擊表格後遺失暫存畫面。")
-    
-    all_tickers = []
-    if not df_long.empty: all_tickers.extend(df_long['代碼'].tolist())
-    if not df_short.empty: all_tickers.extend(df_short['代碼'].tolist())
-    if not df_watch.empty: all_tickers.extend(df_watch['代碼'].tolist())
-    
-    if all_tickers:
-        c1, c2 = st.columns([3, 1])
-        with c1:
-            jump_ticker = st.selectbox("選擇要診斷的標的:", all_tickers, index=None, placeholder="點擊此處輸入或搜尋代碼...", key=f"jump_sel_{market_key}")
-        with c2:
-            st.write("")
-            if st.button("🚀 進入診斷", key=f"jump_btn_{market_key}"):
-                if jump_ticker:
-                    st.query_params["mode"] = "診斷"
-                    st.query_params["ticker"] = jump_ticker
-                    st.query_params["strict"] = str(strictness)
-                    _matched_rows = df_results[df_results['代碼'] == jump_ticker]
-                    if not _matched_rows.empty:
-                        _dir_txt = str(_matched_rows.iloc[0].get('交易方向', ''))
-                        st.query_params["dir"] = "SHORT" if "做空" in _dir_txt else ("LONG" if "做多" in _dir_txt else "WATCH")
-                    st.rerun()
+    # [NEW v24.14] 穩定容器包裹 + 清晰數字編號 (#1, #2, #3...) 優先買入與優先沽空精選榜 + 精簡/專家模式切換
+    with st.container():
+        if market_key is not None:
+            _b_stats = persistent_data.get("radar_breadth_stats", {}).get(market_key)
+            if _b_stats:
+                _p50 = _b_stats.get("pct_above_50ma", 0.0)
+                _p200 = _b_stats.get("pct_above_200ma", 0.0)
+                if _p50 < 45.0:
+                    st.warning(f"📉 **J Law 市場寬度預警 ({market_key})**：目前池內僅 **{_p50:.1f}%** 股票高於 50MA、**{_p200:.1f}%** 高於 200MA。若大盤指數仍在高位，屬「指數與成分股背馳」見頂信號，宜縮減倉位或冬眠！")
                 else:
-                    st.warning("請先選擇或輸入代碼")
-    st.markdown("---")
-    
-    # [佈局優化] 上下全寬度展示
-    st.markdown("#### 🟢 做多 (Long) 候選名單")
-    if not df_long.empty:
-        render_styled_dataframe(df_long)
-    else:
-        st.info("目前沒有符合做多條件的標的。")
+                    st.info(f"🌐 **J Law 市場內部體質 ({market_key})**：高於 50MA 比例 **{_p50:.1f}%** ｜ 高於 200MA 比例 **{_p200:.1f}%**")
 
-    st.markdown("<br>", unsafe_allow_html=True)
+        with st.expander("🧭 新手必看：3步看懂並使用此掃描器 (點擊展開教學)", expanded=False):
+            st.markdown(
+                "1. **第一步（直接看下方【🏆 優先買入 / 🏴‍☠️ 優先沽空 數字編號榜】）**：系統已自動幫你剔除「盈虧比不足 (<1.8R)」、「已跌破止損」或「純多頭但無買點」的股票，並按綜合實力由 **`#1`、`#2`、`#3`...** 排好優先次序。\n"
+                "2. **第二步（看清【🎯 建議買入位 & 掛單方式】，絕不盲目用現價買）**：\n"
+                "   - **突破單 (Stop-Buy)**：代表股價正處於緊密平台，請在顯示的「建議買入價（箱體頂樞紐）」上方設突破觸發單，未突破前不買。\n"
+                "   - **回踩低吸單 (Limit-Buy)**：代表股價剛突破或正在回測 10/20MA 及前波浪頂支撐區，請在顯示的「建議買入價」附近掛單低吸，切勿追高。\n"
+                "3. **第三步（一鍵進入個股診斷看 K 線圖）**：在下方下拉選單揀選 `#1` 或 `#2` 的股票，撳 **「🚀 進入診斷」**，K 線圖會用藍線(Entry)、紅線(結構止損SL)、綠線(結構阻力止盈TP) 畫出完整交易計劃！"
+            )
 
-    st.markdown("#### 🔴 做空 (Short) 候選名單")
-    if not df_short.empty:
-        render_styled_dataframe(df_short)
-    else:
-        st.info("目前沒有符合做空條件的標的。")
+        df_long = df_results[df_results['交易方向'].astype(str).str.contains("做多", na=False)].copy()
+        df_short = df_results[df_results['交易方向'].astype(str).str.contains("做空", na=False)].copy()
+        df_watch = df_results[df_results['交易方向'].astype(str).str.contains("觀望", na=False)].copy()
 
-    if not df_watch.empty:
-        with st.expander("⚪ 觀望名單", expanded=False):
-            render_styled_dataframe(df_watch)
+        if not df_long.empty and "優先次序" not in df_long.columns:
+            df_long.insert(0, "優先次序", [f"#{i}" for i in range(1, len(df_long) + 1)])
+        if not df_short.empty and "優先次序" not in df_short.columns:
+            df_short.insert(0, "優先次序", [f"#{i}" for i in range(1, len(df_short) + 1)])
+        if not df_watch.empty and "優先次序" not in df_watch.columns:
+            df_watch.insert(0, "優先次序", [f"-{i}" for i in range(1, len(df_watch) + 1)])
+
+        st.markdown("### 🏆 今日優先行動精選榜 (已按綜合優勢由 #1 排序，只列 R:R ≥ 1.8R 頂級機會)")
+        col_top_l, col_top_s = st.columns(2)
+        with col_top_l:
+            st.markdown("#### 🟢 優先買入 (Priority Buy) Top 名單")
+            if not df_long.empty and "_raw_rr" in df_long.columns and "信號狀態" in df_long.columns:
+                top_long = df_long[(df_long["_raw_rr"] >= 1.8) & (~df_long["信號狀態"].astype(str).str.contains("⛔"))].head(8)
+            else:
+                top_long = df_long.head(8)
+            if not top_long.empty:
+                for idx_r, (_, r_row) in enumerate(top_long.iterrows(), 1):
+                    st.success(
+                        f"**第 {idx_r} 優先：{r_row['代碼']} {r_row['股票名稱']}** ｜ 現價 **{r_row['最新價']}** ｜ 綜合分 **{r_row.get('優先總分', '-')}**\n\n"
+                        f"- 🎯 **在哪裡買入**：**{r_row['建議進場價']}** — *{r_row.get('掛單與買入位說明', '-')}*\n"
+                        f"- 🛡️ **結構止損位**：**{r_row['ATR防守止損']}** — *{r_row.get('止損依據', '-')}*\n"
+                        f"- 💰 **結構止盈位**：**{r_row['ATR目標止盈']}** — *{r_row.get('止盈阻力依據', '-')}*\n"
+                        f"- ⚖️ **真實結構盈虧比**：**{r_row.get('預估盈虧比(R:R)', '-')}** ｜ 優勢：{r_row.get('META多重優勢', '-')} / {r_row.get('LEI頂底/2B', '-')}"
+                    )
+            else:
+                st.info("目前無同時滿足「多頭觸發 + 結構盈虧比 ≥ 1.8R」的優先買入股票，建議耐心等待。")
+
+        with col_top_s:
+            st.markdown("#### 🔴 優先沽空 (Priority Short) Top 名單")
+            if not df_short.empty and "_raw_rr" in df_short.columns and "信號狀態" in df_short.columns:
+                top_short = df_short[(df_short["_raw_rr"] >= 1.8) & (~df_short["信號狀態"].astype(str).str.contains("⛔"))].head(8)
+            else:
+                top_short = df_short.head(8)
+            if not top_short.empty:
+                for idx_r, (_, r_row) in enumerate(top_short.iterrows(), 1):
+                    st.error(
+                        f"**第 {idx_r} 優先：{r_row['代碼']} {r_row['股票名稱']}** ｜ 現價 **{r_row['最新價']}** ｜ 綜合分 **{r_row.get('優先總分', '-')}**\n\n"
+                        f"- 🎯 **在哪裡沽空**：**{r_row['建議進場價']}** — *{r_row.get('掛單與買入位說明', '-')}*\n"
+                        f"- 🛡️ **結構止損位**：**{r_row['ATR防守止損']}** — *{r_row.get('止損依據', '-')}*\n"
+                        f"- 💰 **結構回補位**：**{r_row['ATR目標止盈']}** — *{r_row.get('止盈阻力依據', '-')}*\n"
+                        f"- ⚖️ **真實結構盈虧比**：**{r_row.get('預估盈虧比(R:R)', '-')}** ｜ 優勢：{r_row.get('META多重優勢', '-')} / {r_row.get('LEI頂底/2B', '-')}"
+                    )
+            else:
+                st.info("目前無同時滿足「空頭觸發 + 結構盈虧比 ≥ 1.8R」的優先沽空股票。")
+
+        st.markdown("---")
+        st.markdown("#### ⚡ 快速無縫跳轉診斷 (揀選上方 #1, #2 股票一鍵查看 K 線買賣位)")
+        all_tickers = []
+        if not df_long.empty: all_tickers.extend(df_long['代碼'].tolist())
+        if not df_short.empty: all_tickers.extend(df_short['代碼'].tolist())
+        if not df_watch.empty: all_tickers.extend(df_watch['代碼'].tolist())
+        
+        if all_tickers:
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                jump_ticker = st.selectbox("選擇要診斷的標的:", all_tickers, index=None, placeholder="點擊此處輸入或搜尋代碼...", key=f"jump_sel_{market_key}")
+            with c2:
+                st.write("")
+                if st.button("🚀 進入診斷", key=f"jump_btn_{market_key}"):
+                    if jump_ticker:
+                        st.query_params["mode"] = "診斷"
+                        st.query_params["ticker"] = jump_ticker
+                        st.query_params["strict"] = str(strictness)
+                        _matched_rows = df_results[df_results['代碼'] == jump_ticker]
+                        if not _matched_rows.empty:
+                            _dir_txt = str(_matched_rows.iloc[0].get('交易方向', ''))
+                            st.query_params["dir"] = "SHORT" if "做空" in _dir_txt else ("LONG" if "做多" in _dir_txt else "WATCH")
+                        st.rerun()
+                    else:
+                        st.warning("請先選擇或輸入代碼")
+        st.markdown("---")
+
+        show_expert_cols = st.checkbox("🔬 顯示全部專家技術欄位 (預設關閉，只顯示最核心買賣位與盈虧比)", value=False, key=f"exp_cols_{market_key}")
+        simple_cols = [
+            "優先次序", "跳轉診斷", "代碼", "股票名稱", "交易方向", "優先總分",
+            "最新價", "建議進場價", "掛單與買入位說明", "ATR防守止損", "ATR目標止盈",
+            "預估盈虧比(R:R)", "META多重優勢", "J Law 強勢形態", "診斷結果"
+        ]
+
+        def _prepare_display_df(sub_df):
+            clean_df = sub_df.drop(columns=['_raw_rr'], errors='ignore')
+            if not show_expert_cols:
+                avail_cols = [c for c in simple_cols if c in clean_df.columns]
+                return clean_df[avail_cols]
+            return clean_df
+
+        st.markdown("#### 🟢 做多 (Long) 完整排名列表 (已按 #1, #2, #3 優先次序排列)")
+        if not df_long.empty:
+            render_styled_dataframe(_prepare_display_df(df_long))
+        else:
+            st.info("目前沒有符合做多條件的標的。")
+
+        st.write("")
+
+        st.markdown("#### 🔴 做空 (Short) 完整排名列表 (已按 #1, #2, #3 優先次序排列)")
+        if not df_short.empty:
+            render_styled_dataframe(_prepare_display_df(df_short))
+        else:
+            st.info("目前沒有符合做空條件的標的。")
+
+        if not df_watch.empty:
+            with st.expander("⚪ 觀望名單 (未觸發或已觸及止損失效)", expanded=False):
+                render_styled_dataframe(_prepare_display_df(df_watch))
 
 # ==========================================
 # 11. 全景雷達掃描
@@ -1914,15 +2669,30 @@ def run_all_inclusive_radar(stock_list):
             jl_display = "🔥 KK" if is_kk_htf else ("🌟 J Law" if jlpass else "-")
             rs_strength = float(last.get('Mansfield_RS', 0))
 
-            # [NEW INCREMENTAL PATCH 修復 Bug 2, 3, 4, 5] 提取真實盈虧比、信號新鮮度與止損狀態
+            # [NEW v24.14] 提取精準結構買入位說明、止損依據、多層阻力止盈依據與每筆獨立盈虧比
             _tp_eval = df.attrs.get("trade_plan_eval", {})
             _inv_info = df.attrs.get("invalidation_info", {})
-            _planned_rr = _tp_eval.get("planned_rr", 0.0)
-            _struct_rr = _tp_eval.get("structural_rr", 0.0)
-            _rr_str = f"{_planned_rr:.2f}R (結構 {_struct_rr:.2f}R)" if ptype in ["LONG", "SHORT"] else "-"
+            _lei_st = df.attrs.get("lei_struct_info", {})
+            _jlaw_m = df.attrs.get("jlaw_meta_info", {})
+            _planned_rr = float(_tp_eval.get("planned_rr", 0.0))
+            _struct_rr = float(_tp_eval.get("structural_rr", 0.0))
+            _tp2_rr = float(_tp_eval.get("tp2_rr", 0.0))
+            _stop_pct = float(_tp_eval.get("stop_pct", 0.0))
+            _entry_desc = _tp_eval.get("entry_type_desc", "-")
+            _sl_desc = f"{_tp_eval.get('sl_basis_desc', '-')} (風險 -{_stop_pct:.1f}%)" if ptype in ["LONG", "SHORT"] else "-"
+            _tp_desc = _tp_eval.get("tp_basis_desc", "-")
+            _rr_str = f"{_planned_rr:.2f}R (次級 {_tp2_rr:.2f}R)" if ptype in ["LONG", "SHORT"] else "-"
             _is_fresh_trigger = int(any(k in status for k in ["🔥", "🟢", "🔴", "🏴‍☠️", "🩸"]))
+            _meta_score_val = _jlaw_m.get("meta_long_score", 0) if ptype == "LONG" else (_jlaw_m.get("meta_short_score", 0) if ptype == "SHORT" else 0)
 
-            # 持久化記錄首次掃描到的活躍信號，並檢查存續信號是否已觸及止損 (修復 Bug 5)
+            _rr_bonus = min(max(_planned_rr, 0.0), 6.0) * 4.5
+            _fresh_bonus = 25.0 if _is_fresh_trigger else 0.0
+            _meta_bonus = _meta_score_val * 7.0
+            _trend_bonus = (passcount if ptype == "LONG" else shortpasscount) * 2.5
+            _rs_bonus = min(max(abs(rs_strength) * 2.0, 0.0), 12.0)
+            _rr_penalty = -25.0 if _planned_rr < 1.8 else 0.0
+            _priority_score = round(min(99.9, max(10.0, _fresh_bonus + _meta_bonus + _rr_bonus + _trend_bonus + _rs_bonus + _rr_penalty)), 1) if ptype in ["LONG", "SHORT"] else 0.0
+
             _sig_store = persistent_data.get("signal_lifecycle_store", {})
             _existing_sig = _sig_store.get(ticker)
             _lifecycle_status = "✅ 有效"
@@ -1933,6 +2703,7 @@ def run_all_inclusive_radar(stock_list):
                         tactical_dir = "⚪ 觀望"
                         status = f"⚪ 觀望 (已跌穿 {_existing_sig['scan_date']} 止損位 {_existing_sig['sl']:.2f})"
                         entry_str, sl_str, tp_str, _rr_str = "-", "-", "-", "-"
+                        _priority_score = 0.0
             elif _existing_sig and _existing_sig.get("plan_type") == "SHORT":
                 if float(last['High']) >= float(_existing_sig["sl"]):
                     _lifecycle_status = f"⛔ 已觸及前次空頭止損 ({_existing_sig['sl']:.2f})"
@@ -1940,6 +2711,7 @@ def run_all_inclusive_radar(stock_list):
                         tactical_dir = "⚪ 觀望"
                         status = f"⚪ 觀望 (已升穿 {_existing_sig['scan_date']} 空頭止損 {_existing_sig['sl']:.2f})"
                         entry_str, sl_str, tp_str, _rr_str = "-", "-", "-", "-"
+                        _priority_score = 0.0
 
             if tactical_dir in ["🟢 做多", "🔴 做空"] and (_existing_sig is None or _existing_sig.get("plan_type") != ptype):
                 _sig_store[ticker] = {
@@ -1956,23 +2728,34 @@ def run_all_inclusive_radar(stock_list):
                 "股票名稱": name,
                 "最新價": f"{last['Close']:.2f}",
                 "交易方向": tactical_dir,
+                "優先總分": f"{_priority_score:.1f}分",
                 "信號狀態": _lifecycle_status if not _inv_info.get("long_stop_hit") else "⛔ 近期止損已觸發",
+                "建議進場價": entry_str,
+                "掛單與買入位說明": _entry_desc if tactical_dir != "⚪ 觀望" else "-",
+                "ATR防守止損": sl_str,
+                "止損依據": _sl_desc,
+                "ATR目標止盈": tp_str,
+                "止盈阻力依據": _tp_desc if tactical_dir != "⚪ 觀望" else "-",
                 "預估盈虧比(R:R)": _rr_str,
+                "META多重優勢": _jlaw_m.get("meta_badge", "-"),
+                "LEI頂底/2B": _lei_st.get("structure_summary", "-"),
                 "大戶出貨日次數": int(dist_days) if pd.notna(dist_days) else 0,
                 "J Law 強勢形態": jl_display,
                 "距52W高點(%)": dist_str,
                 "RS強度": round(rs_strength, 2),
                 "全歷史勝率": display_win_rate,
-                "建議進場價": entry_str,
-                "ATR防守止損": sl_str,
-                "ATR目標止盈": tp_str,
                 "多頭分": passcount,
                 "空頭分": shortpasscount,
                 "成交量": f"{int(last['Volume']):,}" if pd.notna(last['Volume']) else "-",
-                "VCP壓縮": "🔥 收窄" if last['VCPSignal'] else "正常",
+                "VCP壓縮": "🔥 收窄" if (last['VCPSignal'] or last.get('JLaw_Tight_Box', False)) else "正常",
                 "診斷結果": status,
+                "_priority_num": _priority_score,
+                "_raw_rr": _planned_rr,
                 "_is_fresh_trigger": _is_fresh_trigger,
-                "_vol_ratio": float(last.get('VolRatio', 0.0))
+                "_meta_score": _meta_score_val,
+                "_vol_ratio": float(last.get('VolRatio', 0.0)),
+                "_above_50ma": int(pd.notna(last.get('SMA50')) and float(last['Close']) > float(last['SMA50'])),
+                "_above_200ma": int(pd.notna(last.get('SMA200')) and float(last['Close']) > float(last['SMA200']))
             })
 
         progress_bar.progress((idx + 1) / len(stock_list))
@@ -1985,13 +2768,18 @@ def run_all_inclusive_radar(stock_list):
             if "J Law 強勢形態" in df_results.columns and "全歷史勝率" in df_results.columns:
                 df_results['sort_win_rate'] = df_results['全歷史勝率'].str.extract(r'([0-9]+\.[0-9]+)').astype(float).fillna(0)
                 df_results['sort_jlaw'] = df_results['J Law 強勢形態'].str.contains('✅|🔥|🌟').astype(int)
+                df_results.attrs["pct_above_50ma"] = float(df_results['_above_50ma'].mean() * 100.0) if '_above_50ma' in df_results.columns else 0.0
+                df_results.attrs["pct_above_200ma"] = float(df_results['_above_200ma'].mean() * 100.0) if '_above_200ma' in df_results.columns else 0.0
                 # OLD: df_results = df_results.sort_values(by=['sort_jlaw', 'sort_win_rate', 'RS強度'], ascending=[False, False, False])
-                # NEW: [修復 Bug 3] 優先按「當日新鮮突破/回踩觸發 (_is_fresh_trigger)」、「RS強度」、「量比 (_vol_ratio)」排序，打破長期只排同樣十幾隻老牌權重股的僵局！
+                # NEW: [v24.14] 直接按「綜合優先總分 (_priority_num)」、「當日新鮮觸發 (_is_fresh_trigger)」、「真實結構盈虧比 (_raw_rr)」排序！
                 df_results = df_results.sort_values(
-                    by=['_is_fresh_trigger', 'RS強度', '_vol_ratio', 'sort_jlaw', 'sort_win_rate'],
+                    by=['_priority_num', '_is_fresh_trigger', '_meta_score', '_raw_rr', 'RS強度'],
                     ascending=[False, False, False, False, False]
                 )
-                df_results = df_results.drop(columns=['sort_win_rate', 'sort_jlaw', '_is_fresh_trigger', '_vol_ratio'], errors='ignore')
+                df_results = df_results.drop(
+                    columns=['sort_win_rate', 'sort_jlaw', '_priority_num', '_is_fresh_trigger', '_meta_score', '_vol_ratio', '_above_50ma', '_above_200ma'],
+                    errors='ignore'
+                )
             else:
                 df_results = df_results.sort_values(by=["RS強度", "多頭分", "空頭分"], ascending=[False, False, False])
             
@@ -2041,8 +2829,12 @@ if mode == mode_options[0]:
                     dict_key = "美股"
                     
                 st.session_state.radar_results[dict_key] = df_res
-                # [NEW INCREMENTAL PATCH 修復 Bug 3] 記錄本次掃描時間戳
+                # [NEW INCREMENTAL PATCH 修復 Bug 3 & J Law 市場寬度記錄]
                 mark_radar_cache_updated(persistent_data, dict_key)
+                persistent_data.setdefault("radar_breadth_stats", {})[dict_key] = {
+                    "pct_above_50ma": df_res.attrs.get("pct_above_50ma", 0.0),
+                    "pct_above_200ma": df_res.attrs.get("pct_above_200ma", 0.0)
+                }
 
                 active_df = df_res[df_res['交易方向'].astype(str).str.contains("做多|做空", na=False)].copy()
                 rs_map = dict(zip(active_df['代碼'], active_df['RS強度']))
@@ -2295,48 +3087,72 @@ elif mode == mode_options[1]:
 
             st.markdown("---")
             rationale_col1, rationale_col2 = st.columns(2)
+            # [NEW v24.14 一眼看懂：精準結構買賣位、止損止盈依據與雙大師實戰認證]
+            _tp_eval = df.attrs.get("trade_plan_eval", {})
+            _inv_info = df.attrs.get("invalidation_info", {})
+            _lei_st = df.attrs.get("lei_struct_info", {})
+            _lei_ded = df.attrs.get("lei_ded_forecast", {})
+            _jlaw_m = df.attrs.get("jlaw_meta_info", {})
+
+            st.markdown("### 🎯 一眼看懂：結構買賣執行計劃與雙大師認證 (v24.14)")
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric(
+                "💎 J Law META 多重優勢",
+                _jlaw_m.get("meta_badge", "-"),
+                f"漲跌量比 {_jlaw_m.get('up_down_vol_ratio', 1.0):.2f}x"
+            )
+            mc2.metric(
+                "⚡ 強勁趨勢 (Power Trend)",
+                "🔥 已發動" if _jlaw_m.get("is_power_trend") else "⚪ 一般趨勢",
+                "1M & 6M 雙週期領先" if (_jlaw_m.get("rs_1m_outperform") and _jlaw_m.get("rs_6m_outperform")) else "RS 常規表現"
+            )
+            mc3.metric(
+                "🧱 LEI 頂底與 2B 構造",
+                _lei_st.get("structure_summary", "⚪ 無明顯構造"),
+                _lei_st.get("lei_turn_step", "")
+            )
+            mc4.metric(
+                "📐 LEI 六線密集度 (20/60/120)",
+                f"{float(last.get('LEI_MA_Spread_Pct', 0.0)):.2f}%",
+                "🔥 <2.5% 高度密集" if last.get('LEI_MA_Tight_2Pct', False) else f"120EMA乖離 {float(last.get('Bias_EMA120_Pct', 0.0)):+.1f}%"
+            )
+            if _jlaw_m.get("meta_edges_list"):
+                st.caption("🎯 **當前匯聚之交易優勢 (Multiple Edges)**：" + " ｜ ".join(_jlaw_m["meta_edges_list"]))
+
             with rationale_col1:
-                # OLD: 原有 if-elif 未先判斷 plan_type，導致做空 (SHORT) 股票若靠近 20MA 且縮量時誤顯示「J Law 20MA 回踩低量承接」做多理由
-                # NEW: [修復 Bug 1D] 嚴格依 plan_type 分流進場理由，並附加上方阻力/下方支撐 R:R 與止損失效警告
-                _tp_eval = df.attrs.get("trade_plan_eval", {})
-                _inv_info = df.attrs.get("invalidation_info", {})
+                _entry_how = _tp_eval.get("entry_type_desc", "")
                 if plan_type == "SHORT":
-                    if ms_score >= 3 and last['Close'] < last['SMA50']:
-                        entry_reason = f"🔴 【做空計畫】建議進場價：{target_entry:.2f}。符合 Cohodes 做空法，股價跌破生命線且反彈無力，絕佳高空點。"
-                    elif ms_metrics["rebound_resist"] and ms_metrics["low_vol_rebound"]:
-                        entry_reason = f"🔴 【做空計畫】建議進場價：{target_entry:.2f}。弱勢反彈且量能萎縮，受阻於50MA，高勝率做空點。"
-                    elif short_pass_count >= strictness:
-                        entry_reason = f"🔴 【做空計畫】建議進場價：{target_entry:.2f}。符合 J Law 動能做空條件 ({status})，可留意破底或弱反彈做空機會。"
-                    else:
-                        entry_reason = f"🔴 【做空計畫】建議進場價：{target_entry:.2f}。空頭結構主導 ({status})。"
+                    entry_reason = (
+                        f"🔴 **【沽空執行位】建議掛單價：{target_entry:.2f} {currency}**（現價：{last['Close']:.2f}）\n\n"
+                        f"📌 **進場方式**：{_entry_how}\n\n"
+                        f"📊 **信號形態**：{status}"
+                    )
                 elif plan_type == "LONG":
-                    if is_kk_htf:
-                        entry_reason = f"🟢 【做多計畫】建議進場價：{target_entry:.2f}。屬 Kullamägi 15% 動能 + VCP 壓縮型態。"
-                    elif is_deduction_pullback:
-                        entry_reason = f"🟢 【做多計畫】建議進場價：{target_entry:.2f}。處於 2 點鐘穩定上漲趨勢，雖跌破短期均線，但**現價仍高於抵扣價**，均線持續向上，此為絕佳**回撤買點**！"
-                    elif is_near_20ma and last['VolRatio'] < 0.8:
-                        entry_reason = f"🟢 【做多計畫】建議進場價：{target_entry:.2f}。屬 J Law 20MA 回踩低量承接。"
-                    elif last['Close'] > last['ResShort'] * 0.98 and last['VolRatio'] > 1.2:
-                        entry_reason = f"🟢 【做多計畫】建議進場價：{target_entry:.2f}。接近突破點且量能放大。"
-                    elif pass_count >= strictness:
-                        entry_reason = f"🟢 【做多觀察】參考進場價：{target_entry:.2f}。符合 Minervini 多頭條件，RS / MACD / 趨勢排列支持。"
-                    else:
-                        entry_reason = f"🟢 【做多計畫】建議進場價：{target_entry:.2f} ({status})。"
+                    entry_reason = (
+                        f"🟢 **【買入執行位】建議掛單價：{target_entry:.2f} {currency}**（現價：{last['Close']:.2f}）\n\n"
+                        f"📌 **進場方式**：{_entry_how}\n\n"
+                        f"📊 **信號形態**：{status}"
+                    )
                 else:
                     if _inv_info.get("invalidation_reason"):
-                        entry_reason = f"⚪ 【觀望 / 信號已失效】{_inv_info['invalidation_reason']}"
+                        entry_reason = f"⚪ **【觀望 / 信號已失效】** {_inv_info['invalidation_reason']}"
                     else:
-                        entry_reason = "⚪ 未達最優觸發條件，建議觀察等待。"
+                        entry_reason = "⚪ **【觀望等待】** 目前未達高勝率觸發條件，請等待股價形成緊密平台或回測關鍵支撐位。"
                 st.info(entry_reason)
 
             with rationale_col2:
                 _struct_rr = _tp_eval.get("structural_rr", 0.0)
                 _plan_rr = _tp_eval.get("planned_rr", 0.0)
+                _tp2_p = _tp_eval.get("tp2", take_profit)
+                _tp2_rr = _tp_eval.get("tp2_rr", 0.0)
+                _stop_pct = _tp_eval.get("stop_pct", 0.0)
+                _sl_basis = _tp_eval.get("sl_basis_desc", "-")
+                _tp_basis = _tp_eval.get("tp_basis_desc", "-")
                 _rr_warn = _tp_eval.get("rr_warning", "")
                 exit_reason = (
-                    f"止損 {stop_loss:.2f}；目標區間 {take_profit:.2f} 附近 "
-                    f"(計畫盈虧比: **{_plan_rr:.2f}R**｜結構阻力盈虧比: **{_struct_rr:.2f}R**)。"
-                    f"大趨勢將依 9 EMA 移動跟蹤，震盪市則達標即止盈。"
+                    f"🛡️ **結構止損位：{stop_loss:.2f} {currency}**（風險幅度 **-{_stop_pct:.2f}%** ｜ 依據：*{_sl_basis}*）\n\n"
+                    f"💰 **第一結構止盈 (TP1)：{take_profit:.2f} {currency}**（真實盈虧比 **{_plan_rr:.2f} R** ｜ 依據：*{_tp_basis}*）\n\n"
+                    f"🚀 **波段次級目標 (TP2)：{_tp2_p:.2f} {currency}**（潛在盈虧比 **{_tp2_rr:.2f} R** ｜ 大趨勢沿 9 EMA 移動跟蹤）"
                 )
                 if _rr_warn:
                     exit_reason = exit_reason + "\n\n" + _rr_warn
@@ -2365,8 +3181,9 @@ elif mode == mode_options[1]:
             status_50 = "✅ 均線向上" if last['Close'] > deduct_50 else "❌ 均線下彎"
             sr3.metric("🟢 中期支撐 (50日)", f"{last['SMA50']:.2f}", f"50日抵扣: {deduct_50:.2f} ({status_50})")
             
-            sr4.metric("🟢 長期支撐 (60日低點)", f"{last['SupLong']:.2f}")
-            sr5.metric("🔴 長期阻力 (60日高點)", f"{last['ResLong']:.2f}")
+            sr4.metric("🟢 長期支撐 (60日低點)", f"{last['SupLong']:.2f}", f"60MA抵扣: {float(last.get('SMA60_Deduction', 0)):.2f}")
+            sr5.metric("🔴 長期阻力 (60日高點)", f"{last['ResLong']:.2f}", f"5日箱體波幅: {float(last.get('Tight_Box_5d_Pct', 0)):.1f}%")
+            st.caption(f"🔮 **LEI 未來兩週抵扣價方框推演**：20MA → {_lei_ded.get('forecast_20_label', '')} ｜ 60MA → {_lei_ded.get('forecast_60_label', '')}")
 
             st.markdown("### 💰 投資門檻試算")
             col_lot1, col_lot2, col_lot3 = st.columns(3)
@@ -2386,20 +3203,23 @@ elif mode == mode_options[1]:
             
             st.markdown("---")
 
-            st.markdown("### 🎯 ATR 交易計畫 (系統理論值)")
-            p1, p2, p3, p4 = st.columns(4)
+            st.markdown("### 🎯 結構支撐阻力交易計畫 (依據關鍵價位動態計算)")
+            p1, p2, p3, p4, p5 = st.columns(5)
             if plan_type == "WATCH":
-                p1.metric("建議進場", "觀望")
-                p2.metric("ATR 防守止損", "-")
-                p3.metric("最低目標區間", "-")
-                p4.metric("交易方向", "-")
+                p1.metric("建議掛單進場位", "觀望")
+                p2.metric("結構防守止損位", "-")
+                p3.metric("第一結構止盈 (TP1)", "-")
+                p4.metric("真實結構盈虧比", "-")
+                p5.metric("交易方向", "⚪ 觀望")
             else:
-                p1.metric("建議進場", f"{target_entry:.2f} {currency}")
+                _entry_diff_pct = (target_entry - last['Close']) / last['Close'] * 100.0
+                p1.metric("🎯 建議掛單進場位", f"{target_entry:.2f} {currency}", delta=f"距現價 {_entry_diff_pct:+.2f}%")
                 sl_diff = stop_loss - target_entry
-                p2.metric("ATR 防守止損", f"{stop_loss:.2f} {currency}", delta=f"{sl_diff:.2f}", delta_color="inverse")
+                p2.metric("🛡️ 結構防守止損位", f"{stop_loss:.2f} {currency}", delta=f"{sl_diff:+.2f} (-{_tp_eval.get('stop_pct', 0):.1f}%)", delta_color="inverse")
                 tp_diff = take_profit - target_entry
-                p3.metric("最低目標區間 (≥2R)", f"{take_profit:.2f} {currency}", delta=f"{tp_diff:.2f}")
-                p4.metric("交易方向", "🟢 做多" if plan_type == "LONG" else "🔴 做空")
+                p3.metric("💰 第一結構止盈 (TP1)", f"{take_profit:.2f} {currency}", delta=f"{tp_diff:+.2f}")
+                p4.metric("⚖️ 真實結構盈虧比", f"{_tp_eval.get('planned_rr', 0):.2f} R", delta=f"次級目標 {_tp_eval.get('tp2_rr', 0):.2f} R")
+                p5.metric("🔄 交易方向", "🟢 做多" if plan_type == "LONG" else "🔴 做空")
 
             # [UI 更新] 完全植入動態強勢鎖潤提示與保本提醒
             st.markdown("### 🛡️ 實戰持倉防守與風控導航")
@@ -2506,10 +3326,29 @@ elif mode == mode_options[1]:
                     unsafe_allow_html=True
                 )
             with col_chart_opt2:
-                # 對數座標切換，預設日線開啟
-                use_log_scale = st.checkbox("📐 開啟對數座標 (Log Scale) - 觀察長期斜率必備", value=True if selected_interval in ["1d", "1wk"] else False)
-            
-            plot_df = df.dropna(subset=['Open', 'High', 'Low', 'Close']).copy()
+                # OLD: use_log_scale = st.checkbox("📐 開啟對數座標 (Log Scale) - 觀察長期斜率必備", value=True if selected_interval in ["1d", "1wk"] else False)
+                # NEW: [v24.14 預設關閉對數座標 + 新增顯示 K 線根數選擇器，徹底解決圖表被壓縮到最右邊的問題！]
+                c_sub_opt1, c_sub_opt2 = st.columns(2)
+                with c_sub_opt1:
+                    use_log_scale = st.checkbox("📐 開啟對數座標 (Log Scale)", value=False, help="預設關閉以便清晰檢視買入位、結構止損位與止盈目標價")
+                with c_sub_opt2:
+                    chart_window_choice = st.selectbox(
+                        "🔍 圖表顯示 K 線範圍:",
+                        ["最近 120 根 K 線 (約半年，最清晰)", "最近 200 根 K 線 (約10個月)", "最近 300 根 K 線 (約1年半)", "全部歷史 K 線"],
+                        index=0
+                    )
+
+            # OLD: plot_df = df.dropna(subset=['Open', 'High', 'Low', 'Close']).copy()
+            # NEW: 指標已於完整 df 計算完畢，繪圖時截取最近 N 根 K 線，使全部 6 層子圖 X 軸完美對齊且 K 線清晰不壓縮！
+            _full_valid_df = df.dropna(subset=['Open', 'High', 'Low', 'Close']).copy()
+            if "120" in chart_window_choice:
+                plot_df = _full_valid_df.tail(120).copy()
+            elif "200" in chart_window_choice:
+                plot_df = _full_valid_df.tail(200).copy()
+            elif "300" in chart_window_choice:
+                plot_df = _full_valid_df.tail(300).copy()
+            else:
+                plot_df = _full_valid_df
             if plot_df.empty:
                 st.warning("K 線資料不足")
             else:
@@ -2608,10 +3447,32 @@ elif mode == mode_options[1]:
                     fig.add_trace(go.Scatter(x=x_dates, y=plot_df['ResLong'].ffill(), name='長期阻力軌跡', line=dict(color='#D32F2F', width=1.5, dash='dashdot')), row=1, col=1)
 
                 # 正確綁定的入場點與防守線
+                # OLD:
+                # if chart_plan != "WATCH":
+                #     fig.add_hline(y=chart_tp, line_dash="dash", line_color="green", annotation_text=f"TP {chart_tp:.2f}", annotation_position="top left", row=1, col=1)
+                #     fig.add_hline(y=chart_entry, line_dash="dot", line_color="blue", annotation_text=f"Entry {chart_entry:.2f}", annotation_position="top left", row=1, col=1)
+                #     fig.add_hline(y=chart_sl, line_dash="dash", line_color="red", annotation_text=f"SL {chart_sl:.2f}", annotation_position="top left", row=1, col=1)
+                # NEW: [v24.14] 在 K 線圖上清晰標示建議買入位、結構止損位、結構止盈位與實際盈虧比 R:R！
                 if chart_plan != "WATCH":
-                    fig.add_hline(y=chart_tp, line_dash="dash", line_color="green", annotation_text=f"TP {chart_tp:.2f}", annotation_position="top left", row=1, col=1)
-                    fig.add_hline(y=chart_entry, line_dash="dot", line_color="blue", annotation_text=f"Entry {chart_entry:.2f}", annotation_position="top left", row=1, col=1)
-                    fig.add_hline(y=chart_sl, line_dash="dash", line_color="red", annotation_text=f"SL {chart_sl:.2f}", annotation_position="top left", row=1, col=1)
+                    _c_risk = abs(chart_entry - chart_sl)
+                    _c_rr = abs(chart_tp - chart_entry) / _c_risk if _c_risk > 0 else 0.0
+                    _tp_pct = (chart_tp - chart_entry) / chart_entry * 100.0
+                    _sl_pct = (chart_sl - chart_entry) / chart_entry * 100.0
+                    fig.add_hline(
+                        y=chart_tp, line_dash="dash", line_width=2, line_color="#00C853",
+                        annotation_text=f"🎯 結構止盈 TP: {chart_tp:.2f} ({_tp_pct:+.1f}% ｜ 盈虧比 {_c_rr:.2f}R)",
+                        annotation_position="top left", annotation_font=dict(color="#007E33", size=12), row=1, col=1
+                    )
+                    fig.add_hline(
+                        y=chart_entry, line_dash="solid", line_width=2, line_color="#2962FF",
+                        annotation_text=f"📌 建議{'買入' if chart_plan == 'LONG' else '沽空'}位 Entry: {chart_entry:.2f}",
+                        annotation_position="top left", annotation_font=dict(color="#2962FF", size=12), row=1, col=1
+                    )
+                    fig.add_hline(
+                        y=chart_sl, line_dash="dash", line_width=2, line_color="#D50000",
+                        annotation_text=f"🛡️ 結構止損 SL: {chart_sl:.2f} ({_sl_pct:+.1f}%)",
+                        annotation_position="bottom left", annotation_font=dict(color="#D50000", size=12), row=1, col=1
+                    )
 
                 candlestick_patterns = detect_candlestick_patterns(plot_df)
                 if candlestick_patterns and candlestick_patterns[0]["name"] != "":
@@ -2679,14 +3540,17 @@ elif mode == mode_options[1]:
                     paper_bgcolor='white', plot_bgcolor='white'
                 )
 
-                # 修復對數座標崩潰：動態計算合理的 Y 軸上下界，強制限制顯示範圍
+                # 修復對數座標與線性座標 Y 軸範圍：確保当前窗口 K 線與 Entry / SL / TP 盈虧比價格線 100% 清晰顯示
                 if use_log_scale:
                     try:
                         valid_lows = plot_df['Low'].replace(0, np.nan).dropna()
                         valid_highs = plot_df['High'].replace(0, np.nan).dropna()
                         if not valid_lows.empty and not valid_highs.empty:
-                            min_y = valid_lows.min() * 0.8
-                            max_y = valid_highs.max() * 1.2
+                            min_y = float(valid_lows.min()) * 0.92
+                            max_y = float(valid_highs.max()) * 1.08
+                            if chart_plan != "WATCH":
+                                min_y = min(min_y, float(chart_sl) * 0.96, float(chart_tp) * 0.96)
+                                max_y = max(max_y, float(chart_sl) * 1.04, float(chart_tp) * 1.04)
                             if min_y > 0 and max_y > 0:
                                 log_min_y = math.log10(min_y)
                                 log_max_y = math.log10(max_y)
@@ -2696,7 +3560,18 @@ elif mode == mode_options[1]:
                         else:
                             fig.update_yaxes(type="log", row=1, col=1) 
                     except Exception:
-                        fig.update_yaxes(type="log", row=1, col=1) 
+                        fig.update_yaxes(type="log", row=1, col=1)
+                else:
+                    try:
+                        lin_min = float(plot_df['Low'].min())
+                        lin_max = float(plot_df['High'].max())
+                        if chart_plan != "WATCH":
+                            lin_min = min(lin_min, float(chart_sl), float(chart_entry), float(chart_tp))
+                            lin_max = max(lin_max, float(chart_sl), float(chart_entry), float(chart_tp))
+                        pad = (lin_max - lin_min) * 0.08 if lin_max > lin_min else lin_max * 0.05
+                        fig.update_yaxes(type="linear", range=[max(0, lin_min - pad), lin_max + pad], row=1, col=1)
+                    except Exception:
+                        pass
                 
                 for i in range(1, 7):
                     fig.update_yaxes(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, spikethickness=1, spikecolor='#757575', spikedash='solid', row=i, col=1)
@@ -2984,73 +3859,135 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
             atr_val = prev_row['ATR'] if pd.notna(prev_row['ATR']) and prev_row['ATR'] > 0 else row['Open'] * 0.03
 
             if position_type is None:
-                if is_long_trigger and trade_mode in ["全部雙向", "僅做多頭(做多)"]:
-                    trigger_price = prev_row['High']
-                    
-                    if row['High'] >= trigger_price:
-                        actual_entry_price = max(row['Open'], trigger_price) 
+                # [NEW v24.14 回測與掃描系統 100% 理念同步]
+                _lei_pullback_ok = bool(
+                    prev_row.get('Clock_2', False)
+                    and (not prev_row.get('Is_Abnormal_Drop', False))
+                    and (prev_row['Close'] >= prev_row.get('SMA50', 0) * 0.99)
+                    and (prev_row['Close'] < prev_row.get('SMA20', 0) and prev_row['Close'] > prev_row.get('SMA20_Deduction', 0))
+                )
+                _lei_tight_ok = bool(
+                    prev_row.get('LEI_MA_Tight_2Pct', False)
+                    and (prev_row['Close'] > prev_row.get('EMA20', 0))
+                    and (prev_row['Close'] > prev_row.get('SMA20_Deduction', 0))
+                )
+                _short_term_uptrend_ok = bool(prev_row['Close'] >= prev_row.get('SMA50', 0))
+                _unified_long_signal = (is_long_trigger or _lei_pullback_ok or _lei_tight_ok) and _short_term_uptrend_ok and is_hk_liquid and is_market_health_ok
+
+                if _unified_long_signal and trade_mode in ["全部雙向", "僅做多頭(做多)"]:
+                    trigger_price = float(prev_row['High'])
+                    if row['High'] >= trigger_price and row['Open'] <= trigger_price * 1.035:
+                        actual_entry_price = max(float(row['Open']), trigger_price)
                         entry_price = actual_entry_price * (1 + slippage_fee)
 
-                        risk_amount = current_equity * 0.01
-                        risk_per_share = 2 * atr_val
-                        target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                        _struct_sup = max(
+                            float(prev_row.get("BoxLow10_Causal", prev_row.get("SupShort_Causal", entry_price * 0.94))) - 0.15 * atr_val,
+                            entry_price * 0.925
+                        )
+                        _atr_sl = max(entry_price - 1.8 * atr_val, entry_price * 0.925)
+                        stop_loss = max(_atr_sl, _struct_sup) if (entry_price - _struct_sup) >= 0.8 * atr_val else _atr_sl
+                        if stop_loss >= entry_price * 0.988:
+                            stop_loss = entry_price * 0.965
+                        risk_per_share = max(entry_price - stop_loss, 1e-4)
 
-                        if (target_shares * entry_price) > cash:
-                            target_shares = int(cash / entry_price)
+                        _cands_tp = [
+                            float(prev_row.get("ResShort_Causal", 0)),
+                            float(prev_row.get("ResLong_Causal", 0)),
+                            float(prev_row.get("Res120_Causal", 0)),
+                            float(prev_row.get("High52W", 0))
+                        ]
+                        _valid_tps = sorted([p for p in _cands_tp if p > entry_price * 1.022])
+                        if _valid_tps:
+                            tp_target = _valid_tps[0]
+                            if (tp_target - entry_price) / risk_per_share < 1.6 and len(_valid_tps) >= 2:
+                                tp_target = _valid_tps[1]
+                        else:
+                            _wave_amp = max(float(prev_row.get("ResShort_Causal", entry_price)) - float(prev_row.get("SupShort_Causal", stop_loss)), 3.2 * atr_val)
+                            tp_target = entry_price + _wave_amp * 0.85
 
-                        if market_type == "HK":
-                            lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
-                            target_shares = (target_shares // lot_sz) * lot_sz
-                            if target_shares == 0: continue
-
-                        shares = target_shares
-                        cash -= shares * entry_price
-                        stop_loss = entry_price - risk_per_share
-                        
-                        tp_target = max(prev_row.get("ResShort", entry_price * 1.08), entry_price + 4 * atr_val)
-                        
-                        position_stage = 0
-                        days_in_trade = 0
-                        
-                        entry_structural_sl = prev_row.get("SupShort", entry_price * 0.9)
-                        
-                        position_type = "LONG"
-                        trade_info = {"方向": "🟢 做多", "進場日期": current_date, "進場價": entry_price, "初始止損": stop_loss, "最終止盈": "TP 或 9EMA 跟蹤", "結構止損": entry_structural_sl}
+                        _planned_rr = (tp_target - entry_price) / risk_per_share
+                        if _planned_rr >= 1.8:
+                            risk_amount = current_equity * 0.01
+                            target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                            if (target_shares * entry_price) > cash:
+                                target_shares = int(cash / entry_price)
+                            if market_type == "HK":
+                                lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
+                                target_shares = (target_shares // lot_sz) * lot_sz
+                            if target_shares > 0:
+                                shares = target_shares
+                                cash -= shares * entry_price
+                                position_stage = 0
+                                days_in_trade = 0
+                                entry_structural_sl = float(prev_row.get("SupShort_Causal", prev_row.get("SupShort", entry_price * 0.92)))
+                                position_type = "LONG"
+                                trade_info = {
+                                    "方向": "🟢 做多",
+                                    "進場日期": current_date,
+                                    "進場價": round(entry_price, 2),
+                                    "初始止損": round(stop_loss, 2),
+                                    "目標止盈": round(tp_target, 2),
+                                    "計畫盈虧比": f"{_planned_rr:.2f}R",
+                                    "最終止盈": "結構TP 或 9EMA 跟蹤",
+                                    "結構止損": round(entry_structural_sl, 2)
+                                }
 
                 elif is_short_trigger and trade_mode in ["全部雙向", "僅做空頭(做空)"]:
-                    trigger_price = prev_row['Low']
-                    
-                    if row['Low'] <= trigger_price:
-                        actual_entry_price = min(row['Open'], trigger_price)
+                    trigger_price = float(prev_row['Low'])
+                    if row['Low'] <= trigger_price and row['Open'] >= trigger_price * 0.965:
+                        actual_entry_price = min(float(row['Open']), trigger_price)
                         entry_price = actual_entry_price * (1 - slippage_fee)
 
-                        risk_amount = current_equity * 0.01
-                        risk_per_share = 2 * atr_val
-                        target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                        _struct_res = min(
+                            float(prev_row.get("BoxHigh10_Causal", prev_row.get("ResShort_Causal", entry_price * 1.06))) + 0.15 * atr_val,
+                            entry_price * 1.075
+                        )
+                        _atr_sl = min(entry_price + 1.8 * atr_val, entry_price * 1.075)
+                        stop_loss = min(_atr_sl, _struct_res) if (_struct_res - entry_price) >= 0.8 * atr_val else _atr_sl
+                        if stop_loss <= entry_price * 1.012:
+                            stop_loss = entry_price * 1.035
+                        risk_per_share = max(stop_loss - entry_price, 1e-4)
 
-                        if market_type == "HK":
-                            lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
-                            target_shares = (target_shares // lot_sz) * lot_sz
-                            if target_shares == 0: continue
+                        _cands_tp = [
+                            float(prev_row.get("SupShort_Causal", 999999)),
+                            float(prev_row.get("SupLong_Causal", 999999)),
+                            float(prev_row.get("Sup120_Causal", 999999)),
+                            float(prev_row.get("Low52W", 999999))
+                        ]
+                        _valid_tps = sorted([p for p in _cands_tp if 0 < p < entry_price * 0.978], reverse=True)
+                        if _valid_tps:
+                            tp_target = _valid_tps[0]
+                            if (entry_price - tp_target) / risk_per_share < 1.6 and len(_valid_tps) >= 2:
+                                tp_target = _valid_tps[1]
+                        else:
+                            _wave_amp = max(float(prev_row.get("ResShort_Causal", stop_loss)) - float(prev_row.get("SupShort_Causal", entry_price)), 3.2 * atr_val)
+                            tp_target = max(0.01, entry_price - _wave_amp * 0.85)
 
-                        max_short_shares = int((current_equity * 0.05) / entry_price)
-                        target_shares = min(target_shares, max_short_shares)
-
-                        if (target_shares * entry_price) > cash:
-                            target_shares = int(cash / entry_price)
-
-                        shares = target_shares
-                        stop_loss = entry_price + risk_per_share
-                        
-                        tp_target = min(prev_row.get("SupShort", entry_price * 0.92), entry_price - 4 * atr_val)
-                        
-                        position_stage = 0
-                        days_in_trade = 0
-                        
-                        entry_structural_sl = prev_row.get("ResShort", entry_price * 1.1)
-                        
-                        position_type = "SHORT"
-                        trade_info = {"方向": "🔴 做空", "進場日期": current_date, "進場價": entry_price, "初始止損": stop_loss, "最終止盈": "TP 或 9EMA 跟蹤", "結構止損": entry_structural_sl}
+                        _planned_rr = (entry_price - tp_target) / risk_per_share
+                        if _planned_rr >= 1.8:
+                            risk_amount = current_equity * 0.01
+                            target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+                            if (target_shares * entry_price) > cash:
+                                target_shares = int(cash / entry_price)
+                            if market_type == "HK":
+                                lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
+                                target_shares = (target_shares // lot_sz) * lot_sz
+                            if target_shares > 0:
+                                shares = target_shares
+                                position_stage = 0
+                                days_in_trade = 0
+                                entry_structural_sl = float(prev_row.get("ResShort_Causal", prev_row.get("ResShort", entry_price * 1.08)))
+                                position_type = "SHORT"
+                                trade_info = {
+                                    "方向": "🔴 做空",
+                                    "進場日期": current_date,
+                                    "進場價": round(entry_price, 2),
+                                    "初始止損": round(stop_loss, 2),
+                                    "目標止盈": round(tp_target, 2),
+                                    "計畫盈虧比": f"{_planned_rr:.2f}R",
+                                    "最終止盈": "結構TP 或 9EMA 跟蹤",
+                                    "結構止損": round(entry_structural_sl, 2)
+                                }
 
             elif position_type == "LONG":
                 days_in_trade += 1
@@ -3129,7 +4066,9 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         position_stage = 0
 
                 elif position_stage == 2:
-                    if row['Close'] < row.get('EMA9', 0) or row['Close'] < row.get('SupShort', 0):
+                    # OLD: if row['Close'] < row.get('EMA9', 0) or row['Close'] < row.get('SupShort', 0):
+                    # NEW: 採用無未來函數之 SupShort_Causal 與 9EMA 作為大趨勢跟蹤離場線
+                    if row['Close'] < row.get('EMA9', 0) or row['Close'] < row.get('SupShort_Causal', row.get('SupShort', 0)):
                         exit_price = row['Close'] * (1 - slippage_fee)
                         cash += (shares * exit_price)
                         profit = (exit_price - entry_price) * shares
@@ -3222,7 +4161,9 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         position_stage = 0
 
                 elif position_stage == 2:
-                    if row['Close'] > row.get('EMA9', 9999) or row['Close'] > row.get('ResShort', 9999):
+                    # OLD: if row['Close'] > row.get('EMA9', 9999) or row['Close'] > row.get('ResShort', 9999):
+                    # NEW: 採用無未來函數之 ResShort_Causal 與 9EMA 作為空頭跟蹤離場線
+                    if row['Close'] > row.get('EMA9', 9999) or row['Close'] > row.get('ResShort_Causal', row.get('ResShort', 9999)):
                         exit_price = row['Close'] * (1 + slippage_fee)
                         cash += ((entry_price - exit_price) * shares)
                         profit = (entry_price - exit_price) * shares
