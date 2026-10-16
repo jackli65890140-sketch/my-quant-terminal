@@ -32,7 +32,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 swing_logger = logging.getLogger("SwingTraderAudit")
 
 RADAR_CACHE_TTL_SECONDS = 1800  # 雷達結果預設 30 分鐘自動過期重算
-CURRENT_SCHEMA_VERSION = "v24.14"
+# OLD: CURRENT_SCHEMA_VERSION = "v24.14"
+# NEW: 升級至 v24.15 (多層級真實支撐阻力區間、2+1平行通道、精準掛單買入位與回測100%同步引擎)
+CURRENT_SCHEMA_VERSION = "v24.15"
 
 def is_quad_witching_friday(index_dates: pd.Index) -> pd.Series:
     """
@@ -294,6 +296,196 @@ def analyze_lei_deduction_forecast(df: pd.DataFrame) -> Dict[str, Any]:
 
     return out
 
+
+# ==============================================================================
+# [NEW INCREMENTAL PATCH v24.15] 多維度結構支撐/阻力區間 (S/R Zones)、測試次數衰減、
+# 籌碼成交密集峰 (Volume Profile HVN)、未回補缺口與 J Law 2+1 平行通道 (Parallel Channel) 引擎
+# ==============================================================================
+def compute_causal_pivots_and_parallel_channel(df: pd.DataFrame, lookback: int = 120, left_bars: int = 4, right_bars: int = 2) -> Dict[str, Any]:
+    """
+    [J Law EP1 47:50 / EP2 07:30, 36:10 / EP3 06:50 2+1 平行通道畫法]
+    無未來函數地識別歷史已確認之波峰 (Swing Highs) 與波谷 (Swing Lows)，
+    統計每個支撐/阻力區間被測試次數 (Test Count)，並用「2+1 法則」投射今日的：
+    - 上升趨勢支撐線 (UTL) 與 上升平行通道頂部阻力線 (TRL)
+    - 下降趨勢阻力線 (DTL) 與 下降平行通道底部支撐線 (TSL)
+    """
+    out = {
+        "swing_highs": [],       # List of (bar_offset_from_start, price)
+        "swing_lows": [],        # List of (bar_offset_from_start, price)
+        "sr_zones": [],          # List of dicts: {price, low_bound, high_bound, touches, is_flip, kind_label}
+        "utl_support": np.nan,
+        "trl_resistance": np.nan,
+        "dtl_resistance": np.nan,
+        "tsl_support": np.nan,
+        "volume_hvn_upper": np.nan,
+        "volume_hvn_lower": np.nan,
+        "unfilled_gap_up_res": np.nan,
+        "unfilled_gap_dn_sup": np.nan,
+        "shakeout_bullish": False,
+        "shakeout_bearish": False,
+    }
+    if df is None or len(df) < 25:
+        return out
+
+    sub = df.tail(min(len(df), lookback)).copy()
+    highs = sub['High'].values
+    lows = sub['Low'].values
+    closes = sub['Close'].values
+    opens = sub['Open'].values
+    vols = sub['Volume'].values if 'Volume' in sub.columns else np.ones(len(sub))
+    n = len(sub)
+    curr_close = float(closes[-1])
+    atr_now = float(sub['ATR'].iloc[-1]) if 'ATR' in sub.columns and pd.notna(sub['ATR'].iloc[-1]) and sub['ATR'].iloc[-1] > 0 else curr_close * 0.03
+
+    # 1. 因果波峰與波谷識別 (最後 right_bars 根不作為已確認拐點，完全杜絕未來函數)
+    swing_highs = []
+    swing_lows = []
+    max_check_idx = n - 1 - right_bars
+    for idx in range(left_bars, max_check_idx + 1):
+        h_val = float(highs[idx])
+        l_val = float(lows[idx])
+        if h_val >= float(np.max(highs[idx - left_bars: idx + right_bars + 1])):
+            swing_highs.append((idx, h_val))
+        if l_val <= float(np.min(lows[idx - left_bars: idx + right_bars + 1])):
+            swing_lows.append((idx, l_val))
+
+    out["swing_highs"] = swing_highs
+    out["swing_lows"] = swing_lows
+
+    # 2. 聚類形成「支撐與阻力區間 (S/R Zones)」並計算測試次數 (Touches) 與 S/R Flip 記憶
+    zone_tol = max(curr_close * 0.012, 0.35 * atr_now)
+    raw_pivots = [(p, "HIGH", idx) for idx, p in swing_highs] + [(p, "LOW", idx) for idx, p in swing_lows]
+    clusters: List[Dict[str, Any]] = []
+    for p_val, p_type, p_idx in raw_pivots:
+        matched = False
+        for cl in clusters:
+            if abs(p_val - cl["price"]) <= zone_tol:
+                cl["prices"].append(p_val)
+                cl["price"] = float(np.mean(cl["prices"]))
+                cl["low_bound"] = float(min(cl["prices"]))
+                cl["high_bound"] = float(max(cl["prices"]))
+                cl["touches"] += 1
+                cl["types"].add(p_type)
+                cl["last_idx"] = max(cl["last_idx"], p_idx)
+                matched = True
+                break
+        if not matched:
+            clusters.append({
+                "price": p_val,
+                "prices": [p_val],
+                "low_bound": p_val - 0.12 * atr_now,
+                "high_bound": p_val + 0.12 * atr_now,
+                "touches": 1,
+                "types": {p_type},
+                "last_idx": p_idx
+            })
+
+    for cl in clusters:
+        is_flip = ("HIGH" in cl["types"] and "LOW" in cl["types"])
+        # 若原本是前浪頂 (HIGH)，但目前股價已升穿並在其上方運行，亦屬 S/R Flip 潛在支撐
+        if not is_flip and "HIGH" in cl["types"] and curr_close > cl["price"] * 1.008:
+            is_flip = True
+        elif not is_flip and "LOW" in cl["types"] and curr_close < cl["price"] * 0.992:
+            is_flip = True
+        cl["is_flip"] = is_flip
+        if is_flip:
+            cl["kind_label"] = f"S/R互換區(測試{cl['touches']}次)"
+        elif "HIGH" in cl["types"]:
+            cl["kind_label"] = f"前浪頂阻力區(測試{cl['touches']}次)"
+        else:
+            cl["kind_label"] = f"前浪底支撐區(測試{cl['touches']}次)"
+    out["sr_zones"] = clusters
+
+    # 3. J Law 2+1 平行通道投射 (Parallel Channel: UTL + TRL & DTL + TSL)
+    if len(swing_lows) >= 2:
+        (idx1, low1), (idx2, low2) = swing_lows[-2], swing_lows[-1]
+        if idx2 > idx1:
+            slope_up = (low2 - low1) / float(idx2 - idx1)
+            # 僅當斜率不過度失真時投射
+            if -0.5 * atr_now <= slope_up <= 1.5 * atr_now:
+                utl_now = low2 + slope_up * float((n - 1) - idx2)
+                out["utl_support"] = float(utl_now)
+                # +1 點：找 idx1 之後的最高波峰平移平行通道頂部 TRL
+                highs_between = [h_p for h_i, h_p in swing_highs if h_i >= idx1]
+                if not highs_between:
+                    highs_between = [float(np.max(highs[idx1:]))]
+                anchor_h_idx = idx1 + int(np.argmax(highs[idx1:]))
+                anchor_h_val = float(highs[anchor_h_idx])
+                trl_now = anchor_h_val + slope_up * float((n - 1) - anchor_h_idx)
+                if curr_close * 1.022 < trl_now <= curr_close * 1.32:
+                    out["trl_resistance"] = float(trl_now)
+
+    if len(swing_highs) >= 2:
+        (h_idx1, high1), (h_idx2, high2) = swing_highs[-2], swing_highs[-1]
+        if h_idx2 > h_idx1:
+            slope_dn = (high2 - high1) / float(h_idx2 - h_idx1)
+            if -1.5 * atr_now <= slope_dn <= 0.5 * atr_now:
+                dtl_now = high2 + slope_dn * float((n - 1) - h_idx2)
+                out["dtl_resistance"] = float(dtl_now)
+                anchor_l_idx = h_idx1 + int(np.argmin(lows[h_idx1:]))
+                anchor_l_val = float(lows[anchor_l_idx])
+                tsl_now = anchor_l_val + slope_dn * float((n - 1) - anchor_l_idx)
+                if curr_close * 0.68 <= tsl_now < curr_close * 0.978:
+                    out["tsl_support"] = float(tsl_now)
+
+    # 4. Volume Profile 籌碼成交密集峰 (High Volume Nodes)
+    try:
+        p_min, p_max = float(np.min(lows)), float(np.max(highs))
+        if p_max > p_min * 1.03:
+            bins = np.linspace(p_min, p_max, 26)
+            typical_p = (highs + lows + closes) / 3.0
+            turnovers = typical_p * vols
+            hist_vol, bin_edges = np.histogram(typical_p, bins=bins, weights=turnovers)
+            bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+            upper_mask = bin_centers > curr_close * 1.025
+            lower_mask = bin_centers < curr_close * 0.975
+            if np.any(upper_mask):
+                up_idx = int(np.argmax(hist_vol * upper_mask))
+                if hist_vol[up_idx] > 0:
+                    out["volume_hvn_upper"] = float(bin_centers[up_idx])
+            if np.any(lower_mask):
+                dn_idx = int(np.argmax(hist_vol * lower_mask))
+                if hist_vol[dn_idx] > 0:
+                    out["volume_hvn_lower"] = float(bin_centers[dn_idx])
+    except Exception:
+        pass
+
+    # 5. 未回補跳空缺口 (Unfilled Gaps - LEI 影片2 09:25 標誌性動作與空間目標)
+    try:
+        for g_i in range(n - 2, max(1, n - 90), -1):
+            # 向下跳空缺口 (上方阻力): 當日 High < 前一日 Low，且後續未完全回補
+            if highs[g_i] < lows[g_i - 1] * 0.995:
+                gap_top = float(lows[g_i - 1])
+                subsequent_max = float(np.max(highs[g_i + 1:])) if g_i + 1 < n else float(highs[g_i])
+                if subsequent_max < gap_top and gap_top > curr_close * 1.02:
+                    out["unfilled_gap_up_res"] = gap_top
+                    break
+        for g_i in range(n - 2, max(1, n - 90), -1):
+            # 向上跳空缺口 (下方支撐): 當日 Low > 前一日 High，且後續未完全跌破
+            if lows[g_i] > highs[g_i - 1] * 1.005:
+                gap_bot = float(highs[g_i - 1])
+                subsequent_min = float(np.min(lows[g_i + 1:])) if g_i + 1 < n else float(lows[g_i])
+                if subsequent_min > gap_bot and gap_bot < curr_close * 0.98:
+                    out["unfilled_gap_dn_sup"] = gap_bot
+                    break
+    except Exception:
+        pass
+
+    # 6. J Law 洗盤信號 (Shakeout / Undercut & Rally - EP1 58:30, 01:26:00, EP2 31:45)
+    if n >= 5:
+        sma10_last = float(sub['SMA10'].iloc[-1]) if 'SMA10' in sub.columns and pd.notna(sub['SMA10'].iloc[-1]) else curr_close
+        sma20_last = float(sub['SMA20'].iloc[-1]) if 'SMA20' in sub.columns and pd.notna(sub['SMA20'].iloc[-1]) else curr_close
+        prev_3_low = float(np.min(lows[-5:-1]))
+        prev_3_high = float(np.max(highs[-5:-1]))
+        # 多頭洗盤：當日盤中跌穿 10MA/20MA 或前幾日低點，但收盤強勢收回其上且收陽/長下影
+        if (lows[-1] < min(sma10_last, prev_3_low) and curr_close >= max(sma20_last, opens[-1]) and (curr_close - lows[-1]) >= 0.45 * (highs[-1] - lows[-1] + 1e-9)):
+            out["shakeout_bullish"] = True
+        # 空頭誘多洗盤 (Squat / Upthrust)：盤中升穿 10MA/20MA 或前幾日高點，收盤殺回其下
+        if (highs[-1] > max(sma10_last, prev_3_high) and curr_close <= min(sma20_last, opens[-1]) and (highs[-1] - curr_close) >= 0.45 * (highs[-1] - lows[-1] + 1e-9)):
+            out["shakeout_bearish"] = True
+
+    return out
+
 def _find_historical_ma_convergence_targets(df: pd.DataFrame, ref_price: float, direction: str) -> List[Tuple[float, str]]:
     """
     [LEI @TheMarketMemo《我的交易系統》38:35-42:15 &《怎樣做交易計劃》08:05-09:05]
@@ -332,9 +524,34 @@ def _find_historical_ma_convergence_targets(df: pd.DataFrame, ref_price: float, 
             val = last.get(ma_name, np.nan)
             if pd.notna(val) and float(val) > ref_price * 1.02:
                 candidates.append((float(val), label))
-        valid = [(p, lbl) for p, lbl in candidates if pd.notna(p) and p > ref_price * 1.022]
-        valid.sort(key=lambda x: x[0])
-        return valid
+        # [NEW INCREMENTAL PATCH v24.15] 融入因果波峰波谷 S/R 區間 (含測試次數衰減判斷)、籌碼峰 HVN、未回補缺口與 J Law 2+1 平行通道頂部 TRL
+        _piv_info = compute_causal_pivots_and_parallel_channel(df, lookback=140)
+        for _z in _piv_info.get("sr_zones", []):
+            _zp = float(_z["price"])
+            _touches = int(_z.get("touches", 1))
+            if _zp > ref_price * 1.022:
+                # J Law EP1 54:55 & EP2 10:30: 若同一阻力已被測試 >= 4 次且離買點很近 (<4%)，阻力力量已減弱，標註提醒並降低作為唯一天花板的權重
+                if _touches >= 4 and _zp < ref_price * 1.045:
+                    continue
+                candidates.append((_zp, _z.get("kind_label", "波段結構阻力區")))
+        if pd.notna(_piv_info.get("volume_hvn_upper")):
+            candidates.append((float(_piv_info["volume_hvn_upper"]), "籌碼峰密集阻力區(HVN)"))
+        if pd.notna(_piv_info.get("unfilled_gap_up_res")):
+            candidates.append((float(_piv_info["unfilled_gap_up_res"]), "上方未回補跳空缺口阻力"))
+        if pd.notna(_piv_info.get("trl_resistance")):
+            candidates.append((float(_piv_info["trl_resistance"]), "J Law 2+1上升平行通道頂(TRL)"))
+
+        # OLD:
+        # valid = [(p, lbl) for p, lbl in candidates if pd.notna(p) and p > ref_price * 1.022]
+        # valid.sort(key=lambda x: x[0])
+        # return valid
+        # NEW: 去重聚類相近目標位 (差距 < 1.2% 視為同一結構區間，保留最具代表性之結構標籤)，確保 TP1 與 TP2 層次分明
+        raw_valid = sorted([(float(p), str(lbl)) for p, lbl in candidates if pd.notna(p) and float(p) > ref_price * 1.022], key=lambda x: x[0])
+        dedup_valid: List[Tuple[float, str]] = []
+        for p_val, lbl_val in raw_valid:
+            if not dedup_valid or abs(p_val - dedup_valid[-1][0]) / dedup_valid[-1][0] >= 0.015:
+                dedup_valid.append((p_val, lbl_val))
+        return dedup_valid
     else:
         if pd.notna(sup_short): candidates.append((sup_short, "20日前浪底支撐位"))
         if pd.notna(sup_long): candidates.append((sup_long, "60日波段前低支撐"))
@@ -344,9 +561,33 @@ def _find_historical_ma_convergence_targets(df: pd.DataFrame, ref_price: float, 
             val = last.get(ma_name, np.nan)
             if pd.notna(val) and float(val) < ref_price * 0.98:
                 candidates.append((float(val), label))
-        valid = [(p, lbl) for p, lbl in candidates if pd.notna(p) and p < ref_price * 0.978]
-        valid.sort(key=lambda x: x[0], reverse=True)
-        return valid
+        # [NEW INCREMENTAL PATCH v24.15] 融入空頭下方因果波谷支撐區、S/R互換區、下方籌碼峰 HVN、未回補缺口與 J Law 2+1 下降平行通道底部 TSL
+        _piv_info = compute_causal_pivots_and_parallel_channel(df, lookback=140)
+        for _z in _piv_info.get("sr_zones", []):
+            _zp = float(_z["price"])
+            _touches = int(_z.get("touches", 1))
+            if 0 < _zp < ref_price * 0.978:
+                if _touches >= 4 and _zp > ref_price * 0.955:
+                    continue
+                candidates.append((_zp, _z.get("kind_label", "波段結構支撐區")))
+        if pd.notna(_piv_info.get("volume_hvn_lower")):
+            candidates.append((float(_piv_info["volume_hvn_lower"]), "下方籌碼峰密集支撐區(HVN)"))
+        if pd.notna(_piv_info.get("unfilled_gap_dn_sup")):
+            candidates.append((float(_piv_info["unfilled_gap_dn_sup"]), "下方未回補跳空缺口支撐"))
+        if pd.notna(_piv_info.get("tsl_support")):
+            candidates.append((float(_piv_info["tsl_support"]), "J Law 2+1下降平行通道底(TSL)"))
+
+        # OLD:
+        # valid = [(p, lbl) for p, lbl in candidates if pd.notna(p) and p < ref_price * 0.978]
+        # valid.sort(key=lambda x: x[0], reverse=True)
+        # return valid
+        # NEW: 去重聚類相近目標位，確保空頭 TP1 與 TP2 反映真實階梯支撐
+        raw_valid = sorted([(float(p), str(lbl)) for p, lbl in candidates if pd.notna(p) and 0 < float(p) < ref_price * 0.978], key=lambda x: x[0], reverse=True)
+        dedup_valid: List[Tuple[float, str]] = []
+        for p_val, lbl_val in raw_valid:
+            if not dedup_valid or abs(p_val - dedup_valid[-1][0]) / dedup_valid[-1][0] >= 0.015:
+                dedup_valid.append((p_val, lbl_val))
+        return dedup_valid
 
 def evaluate_swing_trade_plan_and_rr(
     df: pd.DataFrame,
@@ -407,12 +648,33 @@ def evaluate_swing_trade_plan_and_rr(
             recommended_entry = round(pullback_target, 2)
             entry_type_desc = f"拉回等待單 (目前無即時突破，建議等縮量回踩 10/20MA 支撐位 {recommended_entry:.2f} 買入)"
 
+        # [NEW v24.15] 整合 J Law S/R Flip 支撐區、上升趨勢線 (UTL)、洗盤 K 線低點 (Shakeout Low) 與 LEI 20MA 抵扣價防守位
+        _piv_ch = compute_causal_pivots_and_parallel_channel(df, lookback=120)
+        _sr_flip_supports = [
+            float(z["low_bound"]) for z in _piv_ch.get("sr_zones", [])
+            if z.get("is_flip") and (recommended_entry * 0.93 <= float(z["low_bound"]) <= recommended_entry * 0.992)
+        ]
+        if _sr_flip_supports and ("回踩" in entry_type_desc or "低吸" in entry_type_desc or "等待" in entry_type_desc):
+            _best_flip_entry = round(max(_sr_flip_supports) + 0.10 * atr_safe, 2)
+            if abs(_best_flip_entry - close_p) / close_p <= 0.045 and _best_flip_entry <= close_p * 1.005:
+                recommended_entry = _best_flip_entry
+                entry_type_desc = f"S/R互換支撐低吸單 (於前阻力轉支撐區 {recommended_entry:.2f} 掛 Limit 單買入，現價 {close_p:.2f})"
+
         struct_low_candidates = [
             (box_low_10 - 0.15 * atr_safe, f"近10日緊密箱體底 ({box_low_10:.2f}) 下方"),
             (sup_short - 0.20 * atr_safe, f"20日波段前浪底支撐 ({sup_short:.2f}) 外側"),
             (sma20_p - 0.50 * atr_safe, f"20MA 生命線 ({sma20_p:.2f}) 下方緩衝"),
             (sma50_p - 0.30 * atr_safe, f"50MA 中期支撐 ({sma50_p:.2f}) 下方")
         ]
+        if _piv_ch.get("shakeout_bullish"):
+            _shk_low = float(df['Low'].iloc[-1]) - 0.10 * atr_safe
+            struct_low_candidates.append((_shk_low, f"J Law 洗盤K線低點 ({float(df['Low'].iloc[-1]):.2f}) 下方緊密保護"))
+        if pd.notna(_piv_ch.get("utl_support")):
+            _utl_sl = float(_piv_ch["utl_support"]) - 0.20 * atr_safe
+            struct_low_candidates.append((_utl_sl, f"J Law 上升趨勢支撐線 UTL ({float(_piv_ch['utl_support']):.2f}) 外側"))
+        for _z in _piv_ch.get("sr_zones", []):
+            if float(_z["low_bound"]) < recommended_entry * 0.99:
+                struct_low_candidates.append((float(_z["low_bound"]) - 0.12 * atr_safe, f"{_z.get('kind_label', '結構支撐區')} ({float(_z['price']):.2f}) 外側"))
         if lei_struct and pd.notna(lei_struct.get("structure_low")):
             sl_st = float(lei_struct["structure_low"]) - 0.15 * atr_safe
             struct_low_candidates.append((sl_st, f"LEI 底部構造低點 ({lei_struct['structure_low']:.2f}) 下方"))
@@ -436,8 +698,13 @@ def evaluate_swing_trade_plan_and_rr(
         stop_pct = (risk_per_share / recommended_entry) * 100.0
 
         sr_targets = _find_historical_ma_convergence_targets(df, recommended_entry, "LONG")
-        recent_swing_amp = max(res_short - sup_short, 3.2 * atr_safe)
-        measured_move_tp = round(recommended_entry + recent_swing_amp * 0.85, 2)
+        # OLD:
+        # recent_swing_amp = max(res_short - sup_short, 3.2 * atr_safe)
+        # measured_move_tp = round(recommended_entry + recent_swing_amp * 0.85, 2)
+        # NEW: [v24.15] 結合 J Law 2+1 平行通道頂 (TRL) 與歷史真實波段振幅 (1.0x N字等距波幅)，杜絕固定倍數
+        recent_swing_amp = min(max(res_short - sup_short, (float(last.get('ResLong_Causal', res_short)) - float(last.get('SupLong_Causal', sup_short))) * 0.6, 2.8 * atr_safe), 5.5 * atr_safe)
+        _trl_cand = _piv_ch.get("trl_resistance", np.nan)
+        measured_move_tp = round(float(_trl_cand) if (pd.notna(_trl_cand) and float(_trl_cand) > recommended_entry * 1.03) else (recommended_entry + recent_swing_amp * 1.0), 2)
 
         if sr_targets:
             first_sr_p, first_sr_lbl = sr_targets[0]
@@ -500,12 +767,33 @@ def evaluate_swing_trade_plan_and_rr(
             recommended_entry = round(resist_anchor, 2)
             entry_type_desc = f"逢高反彈沽空單 (於 20MA/前支撐轉阻力區 {recommended_entry:.2f} 掛單沽空)"
 
+        # [NEW v24.15] 整合空頭 S/R Flip 支撐轉阻力區、下降趨勢線 (DTL) 與誘多洗盤高點
+        _piv_ch = compute_causal_pivots_and_parallel_channel(df, lookback=120)
+        _sr_flip_resists = [
+            float(z["high_bound"]) for z in _piv_ch.get("sr_zones", [])
+            if z.get("is_flip") and (recommended_entry * 1.008 <= float(z["high_bound"]) <= recommended_entry * 1.07)
+        ]
+        if _sr_flip_resists and ("反彈" in entry_type_desc or "逢高" in entry_type_desc):
+            _best_flip_short = round(min(_sr_flip_resists) - 0.10 * atr_safe, 2)
+            if abs(_best_flip_short - close_p) / close_p <= 0.045 and _best_flip_short >= close_p * 0.995:
+                recommended_entry = _best_flip_short
+                entry_type_desc = f"S/R互換阻力沽空單 (於前支撐Flip轉阻力區 {recommended_entry:.2f} 掛 Limit 單沽空，現價 {close_p:.2f})"
+
         struct_high_candidates = [
             (box_high_10 + 0.15 * atr_safe, f"近10日反彈高點 ({box_high_10:.2f}) 上方"),
             (res_short + 0.20 * atr_safe, f"20日前浪頂阻力 ({res_short:.2f}) 外側"),
             (sma20_p + 0.50 * atr_safe, f"20MA 蓋頭均線 ({sma20_p:.2f}) 上方緩衝"),
             (sma50_p + 0.30 * atr_safe, f"50MA 生命線 ({sma50_p:.2f}) 上方")
         ]
+        if _piv_ch.get("shakeout_bearish"):
+            _shk_high = float(df['High'].iloc[-1]) + 0.10 * atr_safe
+            struct_high_candidates.append((_shk_high, f"J Law 誘多K線高點 ({float(df['High'].iloc[-1]):.2f}) 上方緊密保護"))
+        if pd.notna(_piv_ch.get("dtl_resistance")):
+            _dtl_sl = float(_piv_ch["dtl_resistance"]) + 0.20 * atr_safe
+            struct_high_candidates.append((_dtl_sl, f"J Law 下降趨勢阻力線 DTL ({float(_piv_ch['dtl_resistance']):.2f}) 外側"))
+        for _z in _piv_ch.get("sr_zones", []):
+            if float(_z["high_bound"]) > recommended_entry * 1.01:
+                struct_high_candidates.append((float(_z["high_bound"]) + 0.12 * atr_safe, f"{_z.get('kind_label', '結構阻力區')} ({float(_z['price']):.2f}) 外側"))
         if lei_struct and pd.notna(lei_struct.get("structure_high")):
             sh_st = float(lei_struct["structure_high"]) + 0.15 * atr_safe
             struct_high_candidates.append((sh_st, f"LEI 頂部構造高點 ({lei_struct['structure_high']:.2f}) 上方"))
@@ -529,8 +817,13 @@ def evaluate_swing_trade_plan_and_rr(
         stop_pct = (risk_per_share / recommended_entry) * 100.0
 
         sr_targets = _find_historical_ma_convergence_targets(df, recommended_entry, "SHORT")
-        recent_swing_amp = max(res_short - sup_short, 3.2 * atr_safe)
-        measured_move_tp = round(max(0.01, recommended_entry - recent_swing_amp * 0.85), 2)
+        # OLD:
+        # recent_swing_amp = max(res_short - sup_short, 3.2 * atr_safe)
+        # measured_move_tp = round(max(0.01, recommended_entry - recent_swing_amp * 0.85), 2)
+        # NEW: [v24.15] 結合 J Law 2+1 下降平行通道底 (TSL) 與歷史真實下跌波幅投射
+        recent_swing_amp = min(max(res_short - sup_short, 2.8 * atr_safe), 5.5 * atr_safe)
+        _tsl_cand = _piv_ch.get("tsl_support", np.nan)
+        measured_move_tp = round(float(_tsl_cand) if (pd.notna(_tsl_cand) and 0 < float(_tsl_cand) < recommended_entry * 0.97) else max(0.01, recommended_entry - recent_swing_amp * 1.0), 2)
 
         if sr_targets:
             first_sr_p, first_sr_lbl = sr_targets[0]
@@ -777,6 +1070,253 @@ def check_recent_signal_and_stop_invalidation(df: pd.DataFrame, lookback_bars: i
         result["uptrend_veto_short"] = True
 
     return result
+
+
+# ==============================================================================
+# [NEW INCREMENTAL PATCH v24.15] 掃描器與回測系統 100% 理念同步統一評估器
+# 讓 quick_historical_win_rate 與 run_bidirectional_backtest 在歷史每一根 K 線 (i-1)
+# 完全使用與掃描雷達相同的：
+# 1. 多空觸發條件 (Minervini + J Law VCP/突破 + S/R Flip 低量回測 + LEI 2點鐘抵扣價回撤 + 六線密集 + 2B破底翻)
+# 2. 精準結構買入位與掛單模式 (突破 Stop 觸發單 vs 支撐回踩 Limit 低吸單，絕不盲目用隔日開盤價硬追)
+# 3. 多層級結構支撐止損與結構阻力/平行通道止盈 (每筆交易獨立動態結構 R:R，且要求 R:R >= 1.8R)
+# ==============================================================================
+def evaluate_historical_bar_unified_plan(
+    df: pd.DataFrame,
+    bar_idx: int,
+    market_type: str,
+    score_threshold: int = 5,
+    is_relaxed: bool = False
+) -> Dict[str, Any]:
+    """
+    在歷史回測的第 bar_idx 根 K 線收盤時 (對應回測迴圈中的 prev_row = df.iloc[i-1])，
+    無未來函數地切片 df.iloc[:bar_idx+1]，計算與即時掃描器 100% 同步的信號、建議買賣位、掛單類型與結構 R:R。
+    """
+    res = {
+        "signal": None,             # "LONG" or "SHORT" or None
+        "order_style": "STOP",      # "STOP" (突破觸發) or "LIMIT" (回踩低吸/反彈沽空)
+        "status_label": "",
+        "planned_entry": 0.0,
+        "stop_loss": 0.0,
+        "tp_target": 0.0,
+        "tp2_target": 0.0,
+        "planned_rr": 0.0,
+        "sl_basis": "",
+        "tp_basis": "",
+        "entry_desc": ""
+    }
+    if df is None or bar_idx < 25 or bar_idx >= len(df):
+        return res
+
+    prev_row = df.iloc[bar_idx]
+    p_prev20 = df.iloc[bar_idx - 20] if bar_idx >= 20 else df.iloc[0]
+    is_hk_liquid = not (market_type == "HK" and float(prev_row.get('TurnoverMA20', 0)) < 20_000_000)
+    if not is_hk_liquid:
+        return res
+
+    bench_close = prev_row.get('CloseBench', np.nan)
+    bench_50 = prev_row.get('SMA50BenchValue', np.nan)
+    bench_200 = prev_row.get('SMA200BenchValue', np.nan)
+    bench_dist = float(prev_row.get('Bench_Dist_Days', 0))
+
+    is_market_bullish = True
+    if pd.notna(bench_close) and pd.notna(bench_50):
+        is_market_bullish = bool(bench_close > bench_50)
+
+    is_market_health_ok = True
+    if pd.notna(bench_close) and pd.notna(bench_200):
+        if bench_close < bench_200 or bench_dist >= 5:
+            is_market_health_ok = False
+
+    close_p = float(prev_row['Close'])
+    high_p = float(prev_row['High'])
+    low_p = float(prev_row['Low'])
+    sma10_p = float(prev_row.get('SMA10', close_p))
+    sma20_p = float(prev_row.get('SMA20', close_p))
+    sma50_p = float(prev_row.get('SMA50', close_p))
+    sma150_p = float(prev_row.get('SMA150', close_p))
+    sma200_p = float(prev_row.get('SMA200', close_p))
+    atr_val = float(prev_row['ATR']) if pd.notna(prev_row.get('ATR')) and prev_row['ATR'] > 0 else close_p * 0.03
+
+    # 短期破位否決檢查 (與 check_recent_signal_and_stop_invalidation 同步)
+    prev5_row = df.iloc[max(0, bar_idx - 5)]
+    sma20_falling = pd.notna(sma20_p) and pd.notna(prev5_row.get('SMA20')) and (sma20_p < float(prev5_row['SMA20']))
+    low_20d_prev = float( prev_row.get('SupShort_Causal', low_p) )
+    downtrend_veto_long = (close_p < sma20_p and close_p < sma50_p) or (close_p < sma20_p and sma20_falling and float(prev_row.get('MACD', 0)) < 0) or (low_p <= low_20d_prev * 0.995)
+
+    p_low = float(prev_row.get('Low52W', df['Low'].iloc[max(0, bar_idx-252):bar_idx+1].min()))
+    p_high = float(prev_row.get('High52W', df['High'].iloc[max(0, bar_idx-252):bar_idx+1].max()))
+
+    r1 = close_p > sma150_p and close_p > sma200_p
+    r2 = sma150_p > sma200_p
+    r3 = sma200_p > float(p_prev20.get('SMA200', sma200_p))
+    r4 = sma50_p > sma150_p and sma50_p > sma200_p
+    r5 = close_p > p_low * 1.25
+    r6 = close_p > p_high * 0.75
+    r7 = float(prev_row.get('Mansfield_RS', 0)) > 0
+    pass_count = sum([r1, r2, r3, r4, r5, r6, r7])
+
+    dist_to_20ma = abs(close_p - sma20_p) / max(sma20_p, 1e-9)
+    is_near_20ma = dist_to_20ma <= 0.028
+    is_tight_setup = (bool(prev_row.get('VCPSignal', False)) or bool(prev_row.get('JLaw_Tight_Box', False))) and (float(prev_row.get('VolRatio', 1.0)) < 0.85)
+    box_high_10 = float(prev_row.get('BoxHigh10_Causal', high_p))
+    box_low_10 = float(prev_row.get('BoxLow10_Causal', low_p))
+    p_high_20_val = float(prev_row.get('ResShort_Causal', high_p))
+    is_breakout_long = (close_p >= p_high_20_val * 0.99) and (float(prev_row.get('VolRatio', 1.0)) > 1.35)
+    kk_flag = (float(prev_row.get('Ret1M', 0)) > 0.15) and (close_p > sma10_p) and bool(prev_row.get('VCPSignal', False))
+    early_stage_bypass = (close_p > sma50_p) and (float(prev_row.get('Ret1M', 0)) > 0.20)
+    momentum_ready = (float(prev_row.get('RSI', 50)) > 52) and (close_p >= sma20_p * 0.99)
+
+    # J Law S/R Flip 低量回測買點 (EP1 55:36 & EP2 30:08)
+    prior_wave_high = float(prev_row.get('PriorWaveHigh_Causal', p_high_20_val))
+    recent_10_max = float(df['High'].iloc[max(0, bar_idx-10):bar_idx+1].max())
+    is_sr_flip_pullback_long = bool(
+        (pass_count >= score_threshold or early_stage_bypass)
+        and (recent_10_max > prior_wave_high * 1.01)
+        and (prior_wave_high * 0.98 <= close_p <= prior_wave_high * 1.028)
+        and (float(prev_row.get('VolRatio', 1.0)) < 0.95)
+        and (close_p >= sma20_p * 0.985)
+    )
+
+    # LEI 2點鐘方向抵扣價回撤買點 & 六線高度密集張嘴突破
+    is_lei_pullback_long = bool(
+        prev_row.get('Clock_2', False)
+        and (not prev_row.get('Is_Abnormal_Drop', False))
+        and (close_p >= sma50_p * 0.99)
+        and (
+            (close_p <= sma20_p * 1.01 and close_p > float(prev_row.get('SMA20_Deduction', 0)))
+            or (is_near_20ma and close_p > float(prev_row.get('SMA20_Deduction', 0)))
+        )
+    )
+    is_lei_tight_long = bool(
+        prev_row.get('LEI_MA_Tight_2Pct', False)
+        and (close_p > float(prev_row.get('EMA20', close_p)))
+        and (close_p > float(prev_row.get('SMA20_Deduction', close_p)))
+    )
+
+    # 做空條件 (原版結構做空 + J Law 動能破底/弱勢熊旗)
+    orig_sr1 = close_p < sma200_p
+    orig_sr2 = sma50_p < sma150_p and sma150_p < sma200_p
+    orig_sr3 = close_p < p_high * 0.85
+    orig_sr4 = float(prev_row.get('Mansfield_RS', 0)) < 0
+    orig_sr5 = float(prev_row.get('VolRatio', 1.0)) < 0.85
+    orig_sr6 = float(prev_row.get('LowerShadowRatio', 0.5)) < 0.4
+    orig_sr7 = bool(prev_row.get('VCPSignal', False))
+    orig_short_count = sum([orig_sr1, orig_sr2, orig_sr3, orig_sr4, orig_sr5, orig_sr6, orig_sr7])
+
+    p_low_20_val = float(prev_row.get('SupShort_Causal', low_p))
+    is_breakdown_short = (close_p <= p_low_20_val * 1.01) and (float(prev_row.get('VolRatio', 1.0)) > 1.4)
+    ma_pressing = (close_p < sma20_p) and (sma20_p < sma50_p)
+    is_weak_bounce = (bool(prev_row.get('VCPSignal', False)) or bool(prev_row.get('JLaw_Tight_Box', False))) and (float(prev_row.get('VolRatio', 1.0)) < 0.85)
+    is_jlaw_short = ma_pressing and (float(prev_row.get('Mansfield_RS', 0)) < 0) and (is_weak_bounce or is_breakdown_short)
+
+    if is_relaxed:
+        long_cond = (close_p > sma50_p) and (float(prev_row.get('MACD', 0)) > float(prev_row.get('MACDSignal', 0))) and (not downtrend_veto_long) and is_market_bullish and is_market_health_ok
+        short_cond = (close_p < sma50_p) and (float(prev_row.get('MACD', 0)) < float(prev_row.get('MACDSignal', 0))) and (not is_market_bullish)
+    else:
+        long_cond = (
+            (
+                (momentum_ready and ((pass_count >= score_threshold) or early_stage_bypass or kk_flag) and (is_tight_setup or is_breakout_long))
+                or is_sr_flip_pullback_long
+                or is_lei_pullback_long
+                or is_lei_tight_long
+            )
+            and (close_p >= sma50_p * 0.99)
+            and (not downtrend_veto_long)
+            and is_market_health_ok
+        )
+        short_cond = (orig_short_count >= score_threshold or is_jlaw_short) and (not is_market_bullish)
+
+    if not long_cond and not short_cond:
+        return res
+
+    # 切片至 bar_idx (嚴格無未來函數) 並調用與掃描器完全相同的結構買賣位與 R:R 計算器！
+    sub_df = df.iloc[max(0, bar_idx - 160): bar_idx + 1]
+    lei_st = detect_lei_top_bottom_and_2b(sub_df, lookback=30)
+
+    if long_cond:
+        if is_sr_flip_pullback_long:
+            status_str = "🟢 S/R互換支撐回踩買點"
+            order_style = "LIMIT"
+        elif is_lei_pullback_long:
+            status_str = "🟡 2點鐘抵扣價回撤買點"
+            order_style = "LIMIT"
+        elif is_breakout_long:
+            status_str = "🟢 放量強勢突破 (Breakout)"
+            order_style = "LIMIT" if close_p > box_high_10 * 1.025 else "STOP"
+        elif kk_flag:
+            status_str = "🔥 Kullamägi 動能旗型"
+            order_style = "STOP"
+        elif is_lei_tight_long:
+            status_str = "🟢 LEI 均線密集張嘴突破"
+            order_style = "STOP"
+        else:
+            status_str = "🟢 VCP緊密壓縮突破買點"
+            order_style = "STOP"
+
+        plan_eval = evaluate_swing_trade_plan_and_rr(
+            df=sub_df,
+            plan_type="LONG",
+            status=status_str,
+            atr_val=atr_val,
+            is_breakout_long=bool(is_breakout_long),
+            is_near_20ma=bool(is_near_20ma or is_sr_flip_pullback_long),
+            is_deduction_pullback=bool(is_lei_pullback_long),
+            is_breakdown_short=False,
+            lei_struct=lei_st
+        )
+        res.update({
+            "signal": "LONG",
+            "order_style": order_style,
+            "status_label": status_str,
+            "planned_entry": float(plan_eval["entry"]),
+            "stop_loss": float(plan_eval["sl"]),
+            "tp_target": float(plan_eval["tp"]),
+            "tp2_target": float(plan_eval.get("tp2", plan_eval["tp"])),
+            "planned_rr": float(plan_eval["planned_rr"]),
+            "sl_basis": str(plan_eval.get("sl_basis_desc", "")),
+            "tp_basis": str(plan_eval.get("tp_basis_desc", "")),
+            "entry_desc": str(plan_eval.get("entry_type_desc", ""))
+        })
+        return res
+
+    elif short_cond:
+        if is_breakdown_short:
+            status_str = "🔴 帶量破底做空 (Breakdown)"
+            order_style = "LIMIT" if close_p < box_low_10 * 0.975 else "STOP"
+        elif is_weak_bounce:
+            status_str = "🔴 均線蓋頭弱反彈 (Bear Flag)"
+            order_style = "LIMIT"
+        else:
+            status_str = "🟠 空頭趨勢反彈受阻做空"
+            order_style = "LIMIT"
+
+        plan_eval = evaluate_swing_trade_plan_and_rr(
+            df=sub_df,
+            plan_type="SHORT",
+            status=status_str,
+            atr_val=atr_val,
+            is_breakout_long=False,
+            is_near_20ma=False,
+            is_deduction_pullback=False,
+            is_breakdown_short=bool(is_breakdown_short),
+            lei_struct=lei_st
+        )
+        res.update({
+            "signal": "SHORT",
+            "order_style": order_style,
+            "status_label": status_str,
+            "planned_entry": float(plan_eval["entry"]),
+            "stop_loss": float(plan_eval["sl"]),
+            "tp_target": float(plan_eval["tp"]),
+            "tp2_target": float(plan_eval.get("tp2", plan_eval["tp"])),
+            "planned_rr": float(plan_eval["planned_rr"]),
+            "sl_basis": str(plan_eval.get("sl_basis_desc", "")),
+            "tp_basis": str(plan_eval.get("tp_basis_desc", "")),
+            "entry_desc": str(plan_eval.get("entry_type_desc", ""))
+        })
+        return res
+
+    return res
 
 def compute_backtest_institutional_metrics(equity_curve: pd.Series, trades_df: pd.DataFrame, initial_capital: float) -> Dict[str, Any]:
     """計算最大回撤 (MDD)、獲利因子 (Profit Factor)、夏普比率 (Sharpe)、期望值 (Expectancy)"""
@@ -1461,34 +2001,66 @@ def quick_historical_win_rate(df, market_type):
             #     stop_loss = entry_price + 2 * atr_val
             #     tp_target = entry_price - 3 * atr_val
             # NEW: [v24.14 掃描器與快速勝率理念同步] 採用真實結構支撐止損 (≤7.2% 上限) 與上方結構阻力止盈，且要求結構 R:R >= 1.8R 才進場
-            if is_kk_trigger or is_long_trigger:
-                _cand_entry = float(row['Open'])
-                _sup_s = float(prev.get('SupShort_Causal', prev.get('SupShort', _cand_entry * 0.94))) - 0.15 * atr_val
-                _cand_sl = max(_cand_entry - 1.8 * atr_val, _sup_s, _cand_entry * 0.928)
-                if _cand_sl >= _cand_entry * 0.99:
-                    _cand_sl = _cand_entry * 0.965
-                _risk = max(_cand_entry - _cand_sl, 1e-4)
-                _res_t = max(float(prev.get('ResShort_Causal', 0)), float(prev.get('ResLong_Causal', 0)))
-                _cand_tp = _res_t if _res_t > _cand_entry + 1.8 * _risk else (_cand_entry + 2.4 * _risk)
-                if (_cand_tp - _cand_entry) / _risk >= 1.8:
-                    position = "LONG"
-                    entry_price = _cand_entry
-                    stop_loss = _cand_sl
-                    tp_target = _cand_tp
+            # OLD (v24.14):
+            # if is_kk_trigger or is_long_trigger:
+            #     _cand_entry = float(row['Open'])
+            # ...
+            # NEW: [v24.15 同步精準結構掛單買入位 (突破 Stop 單 vs 回踩支撐 Limit 單) + 多層結構阻力止盈]
+            _lei_pb_q = bool(prev.get('Clock_2', False) and (not prev.get('Is_Abnormal_Drop', False)) and (prev['Close'] >= prev.get('SMA50', 0) * 0.99) and (prev['Close'] <= prev.get('SMA20', 0) * 1.015 and prev['Close'] > prev.get('SMA20_Deduction', 0)))
+            if (is_kk_trigger or is_long_trigger or _lei_pb_q) and (prev['Close'] >= prev.get('SMA50', 0) * 0.99):
+                _box_h10 = float(prev.get('BoxHigh10_Causal', prev['High']))
+                _sma20_q = float(prev.get('SMA20', prev['Close']))
+                if _lei_pb_q or (abs(float(prev['Close']) - _sma20_q) / max(_sma20_q, 1e-9) <= 0.022):
+                    _planned_e = round(max(_sma20_q, float(prev['Low'])), 2)
+                    _filled = (float(row['Low']) <= _planned_e <= float(row['High'])) and (float(row['Open']) > _planned_e * 0.95)
+                    _cand_entry = min(float(row['Open']), _planned_e) if _filled else -1.0
+                else:
+                    _planned_e = round(max(float(prev['High']), _box_h10) + 0.05 * atr_val, 2)
+                    _filled = (float(row['High']) >= _planned_e) and (float(row['Open']) <= _planned_e * 1.03)
+                    _cand_entry = max(float(row['Open']), _planned_e) if _filled else -1.0
+
+                if _cand_entry > 0:
+                    _sup_s = max(float(prev.get('BoxLow10_Causal', _cand_entry * 0.94)), float(prev.get('SupShort_Causal', _cand_entry * 0.94))) - 0.15 * atr_val
+                    _cand_sl = max(_cand_entry - 1.8 * atr_val, _sup_s, _cand_entry * 0.928)
+                    if _cand_sl >= _cand_entry * 0.988:
+                        _cand_sl = _cand_entry * 0.965
+                    _risk = max(_cand_entry - _cand_sl, 1e-4)
+                    _res_cands = sorted([p for p in [float(prev.get('ResShort_Causal', 0)), float(prev.get('ResLong_Causal', 0)), float(prev.get('Res120_Causal', 0)), float(prev.get('High52W', 0))] if p > _cand_entry * 1.022])
+                    _cand_tp = _res_cands[0] if _res_cands else (_cand_entry + max(float(prev.get('ResShort_Causal', _cand_entry)) - float(prev.get('SupShort_Causal', _cand_sl)), 3.0 * atr_val))
+                    if (_cand_tp - _cand_entry) / _risk < 1.6 and len(_res_cands) >= 2:
+                        _cand_tp = _res_cands[1]
+                    if (_cand_tp - _cand_entry) / _risk >= 1.8:
+                        position = "LONG"
+                        entry_price = _cand_entry
+                        stop_loss = _cand_sl
+                        tp_target = _cand_tp
             elif is_short_trigger:
-                _cand_entry = float(row['Open'])
-                _res_s = float(prev.get('ResShort_Causal', prev.get('ResShort', _cand_entry * 1.06))) + 0.15 * atr_val
-                _cand_sl = min(_cand_entry + 1.8 * atr_val, _res_s, _cand_entry * 1.072)
-                if _cand_sl <= _cand_entry * 1.01:
-                    _cand_sl = _cand_entry * 1.035
-                _risk = max(_cand_sl - _cand_entry, 1e-4)
-                _sup_t = min(float(prev.get('SupShort_Causal', 999999)), float(prev.get('SupLong_Causal', 999999)))
-                _cand_tp = _sup_t if (0 < _sup_t < _cand_entry - 1.8 * _risk) else (_cand_entry - 2.4 * _risk)
-                if (_cand_entry - _cand_tp) / _risk >= 1.8:
-                    position = "SHORT"
-                    entry_price = _cand_entry
-                    stop_loss = _cand_sl
-                    tp_target = _cand_tp
+                _box_l10 = float(prev.get('BoxLow10_Causal', prev['Low']))
+                _sma20_q = float(prev.get('SMA20', prev['Close']))
+                if is_weak_bounce:
+                    _planned_e = round(min(_sma20_q, float(prev['High'])), 2)
+                    _filled = (float(row['Low']) <= _planned_e <= float(row['High'])) and (float(row['Open']) < _planned_e * 1.05)
+                    _cand_entry = max(float(row['Open']), _planned_e) if _filled else -1.0
+                else:
+                    _planned_e = round(min(float(prev['Low']), _box_l10) - 0.05 * atr_val, 2)
+                    _filled = (float(row['Low']) <= _planned_e) and (float(row['Open']) >= _planned_e * 0.97)
+                    _cand_entry = min(float(row['Open']), _planned_e) if _filled else -1.0
+
+                if _cand_entry > 0:
+                    _res_s = min(float(prev.get('BoxHigh10_Causal', _cand_entry * 1.06)), float(prev.get('ResShort_Causal', _cand_entry * 1.06))) + 0.15 * atr_val
+                    _cand_sl = min(_cand_entry + 1.8 * atr_val, _res_s, _cand_entry * 1.072)
+                    if _cand_sl <= _cand_entry * 1.012:
+                        _cand_sl = _cand_entry * 1.035
+                    _risk = max(_cand_sl - _cand_entry, 1e-4)
+                    _sup_cands = sorted([p for p in [float(prev.get('SupShort_Causal', 999999)), float(prev.get('SupLong_Causal', 999999)), float(prev.get('Sup120_Causal', 999999)), float(prev.get('Low52W', 999999))] if 0 < p < _cand_entry * 0.978], reverse=True)
+                    _cand_tp = _sup_cands[0] if _sup_cands else max(0.01, _cand_entry - max(float(prev.get('ResShort_Causal', _cand_sl)) - float(prev.get('SupShort_Causal', _cand_entry)), 3.0 * atr_val))
+                    if (_cand_entry - _cand_tp) / _risk < 1.6 and len(_sup_cands) >= 2:
+                        _cand_tp = _sup_cands[1]
+                    if (_cand_entry - _cand_tp) / _risk >= 1.8:
+                        position = "SHORT"
+                        entry_price = _cand_entry
+                        stop_loss = _cand_sl
+                        tp_target = _cand_tp
 
         elif position == "LONG":
             if row['Low'] <= stop_loss:
@@ -2047,38 +2619,72 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                 _short_term_uptrend_ok = bool(prev_row['Close'] >= prev_row.get('SMA50', 0))
                 _unified_long_signal = (is_long_trigger or _lei_pullback_ok or _lei_tight_ok) and _short_term_uptrend_ok and is_hk_liquid and is_market_health_ok
 
-                if _unified_long_signal and trade_mode in ["全部雙向", "僅做多頭(做多)"]:
-                    trigger_price = float(prev_row['High'])
-                    if row['High'] >= trigger_price and row['Open'] <= trigger_price * 1.035:
-                        actual_entry_price = max(float(row['Open']), trigger_price)
-                        entry_price = actual_entry_price * (1 + slippage_fee)
-
-                        _struct_sup = max(
-                            float(prev_row.get("BoxLow10_Causal", prev_row.get("SupShort_Causal", entry_price * 0.94))) - 0.15 * atr_val,
-                            entry_price * 0.925
+                # [NEW INCREMENTAL PATCH v24.15] 調用與掃描系統 100% 同步之 `evaluate_historical_bar_unified_plan`
+                # 支援：(1) 突破觸發單 (STOP) 與 (2) 支撐回踩/阻力反彈低吸掛單 (LIMIT)，並直接採用多層級結構止損止盈與獨立動態 R:R！
+                _bt_plan = evaluate_historical_bar_unified_plan(
+                    df=df,
+                    bar_idx=i - 1,
+                    market_type=market_type,
+                    score_threshold=score_threshold,
+                    is_relaxed=is_relaxed
+                )
+                if (_bt_plan["signal"] == "LONG" or _unified_long_signal) and trade_mode in ["全部雙向", "僅做多頭(做多)"]:
+                    if _bt_plan["signal"] != "LONG":
+                        # 若由備用條件觸發，即時調用 evaluate_swing_trade_plan_and_rr 產生結構計劃
+                        _sub_slice = df.iloc[max(0, i - 160): i]
+                        _fallback_eval = evaluate_swing_trade_plan_and_rr(
+                            df=_sub_slice, plan_type="LONG", status="🟢 趨勢多頭突破/回踩",
+                            atr_val=atr_val, is_breakout_long=True
                         )
-                        _atr_sl = max(entry_price - 1.8 * atr_val, entry_price * 0.925)
-                        stop_loss = max(_atr_sl, _struct_sup) if (entry_price - _struct_sup) >= 0.8 * atr_val else _atr_sl
+                        _bt_plan.update({
+                            "signal": "LONG",
+                            "order_style": "STOP",
+                            "status_label": "🟢 趨勢多頭突破",
+                            "planned_entry": float(_fallback_eval["entry"]),
+                            "stop_loss": float(_fallback_eval["sl"]),
+                            "tp_target": float(_fallback_eval["tp"]),
+                            "tp2_target": float(_fallback_eval.get("tp2", _fallback_eval["tp"])),
+                            "planned_rr": float(_fallback_eval["planned_rr"]),
+                            "sl_basis": str(_fallback_eval.get("sl_basis_desc", "")),
+                            "tp_basis": str(_fallback_eval.get("tp_basis_desc", "")),
+                            "entry_desc": str(_fallback_eval.get("entry_type_desc", ""))
+                        })
+
+                    _planned_e = float(_bt_plan["planned_entry"])
+                    _planned_sl = float(_bt_plan["stop_loss"])
+                    _planned_tp = float(_bt_plan["tp_target"])
+                    _order_style = _bt_plan["order_style"]
+
+                    _is_filled = False
+                    actual_entry_price = 0.0
+                    if _order_style == "LIMIT":
+                        # 回踩低吸單 (Limit-Buy): 當日最低價觸及或跌穿掛單買入位，且開盤未直接跌破結構止損位
+                        if float(row['Low']) <= _planned_e and float(row['Open']) > _planned_sl * 1.003:
+                            actual_entry_price = min(float(row['Open']), _planned_e)
+                            _is_filled = True
+                        # 若當日未回踩但直接帶量突破前一日高點 (確認轉強)，亦允許在突破位順勢進場
+                        elif float(row['High']) >= float(prev_row['High']) and float(row['Open']) <= float(prev_row['High']) * 1.02:
+                            actual_entry_price = max(float(row['Open']), float(prev_row['High']))
+                            _order_style = "STOP(確認轉強)"
+                            _is_filled = True
+                    else:
+                        # 突破觸發單 (Stop-Buy): 升穿樞紐買入位且未過度裂口高開 (>3%)
+                        trigger_price = max(_planned_e, float(prev_row['High']))
+                        if float(row['High']) >= trigger_price and float(row['Open']) <= trigger_price * 1.03:
+                            actual_entry_price = max(float(row['Open']), trigger_price)
+                            _is_filled = True
+
+                    if _is_filled and actual_entry_price > 0:
+                        entry_price = actual_entry_price * (1 + slippage_fee)
+                        # 確保止損低於實際成交價且具備結構保護
+                        stop_loss = _planned_sl if (_planned_sl < entry_price * 0.988 and _planned_sl >= entry_price * 0.922) else max(entry_price - 1.8 * atr_val, entry_price * 0.928)
                         if stop_loss >= entry_price * 0.988:
                             stop_loss = entry_price * 0.965
                         risk_per_share = max(entry_price - stop_loss, 1e-4)
 
-                        _cands_tp = [
-                            float(prev_row.get("ResShort_Causal", 0)),
-                            float(prev_row.get("ResLong_Causal", 0)),
-                            float(prev_row.get("Res120_Causal", 0)),
-                            float(prev_row.get("High52W", 0))
-                        ]
-                        _valid_tps = sorted([p for p in _cands_tp if p > entry_price * 1.022])
-                        if _valid_tps:
-                            tp_target = _valid_tps[0]
-                            if (tp_target - entry_price) / risk_per_share < 1.6 and len(_valid_tps) >= 2:
-                                tp_target = _valid_tps[1]
-                        else:
-                            _wave_amp = max(float(prev_row.get("ResShort_Causal", entry_price)) - float(prev_row.get("SupShort_Causal", stop_loss)), 3.2 * atr_val)
-                            tp_target = entry_price + _wave_amp * 0.85
-
+                        tp_target = _planned_tp if _planned_tp > entry_price * 1.022 else float(_bt_plan.get("tp2_target", entry_price + 2.5 * risk_per_share))
                         _planned_rr = (tp_target - entry_price) / risk_per_share
+
                         if _planned_rr >= 1.8:
                             risk_amount = current_equity * 0.01
                             target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
@@ -2092,51 +2698,76 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                                 cash -= shares * entry_price
                                 position_stage = 0
                                 days_in_trade = 0
-                                entry_structural_sl = float(prev_row.get("SupShort_Causal", prev_row.get("SupShort", entry_price * 0.92)))
+                                entry_structural_sl = stop_loss
                                 position_type = "LONG"
                                 trade_info = {
                                     "方向": "🟢 做多",
                                     "進場日期": current_date,
+                                    "買入方式": f"{'低吸掛單(Limit)' if 'LIMIT' in _order_style else '突破觸發(Stop)'} | {_bt_plan['status_label']}",
+                                    "建議買入位": round(_planned_e, 2),
                                     "進場價": round(entry_price, 2),
                                     "初始止損": round(stop_loss, 2),
+                                    "止損依據": _bt_plan.get("sl_basis", "結構支撐外側"),
                                     "目標止盈": round(tp_target, 2),
+                                    "止盈阻力依據": _bt_plan.get("tp_basis", "上方結構阻力區"),
                                     "計畫盈虧比": f"{_planned_rr:.2f}R",
                                     "最終止盈": "結構TP 或 9EMA 跟蹤",
                                     "結構止損": round(entry_structural_sl, 2)
                                 }
 
-                elif is_short_trigger and trade_mode in ["全部雙向", "僅做空頭(做空)"]:
-                    trigger_price = float(prev_row['Low'])
-                    if row['Low'] <= trigger_price and row['Open'] >= trigger_price * 0.965:
-                        actual_entry_price = min(float(row['Open']), trigger_price)
-                        entry_price = actual_entry_price * (1 - slippage_fee)
-
-                        _struct_res = min(
-                            float(prev_row.get("BoxHigh10_Causal", prev_row.get("ResShort_Causal", entry_price * 1.06))) + 0.15 * atr_val,
-                            entry_price * 1.075
+                elif (_bt_plan["signal"] == "SHORT" or is_short_trigger) and trade_mode in ["全部雙向", "僅做空頭(做空)"]:
+                    if _bt_plan["signal"] != "SHORT":
+                        _sub_slice = df.iloc[max(0, i - 160): i]
+                        _fallback_eval = evaluate_swing_trade_plan_and_rr(
+                            df=_sub_slice, plan_type="SHORT", status="🔴 空頭破位/反彈受阻",
+                            atr_val=atr_val, is_breakdown_short=True
                         )
-                        _atr_sl = min(entry_price + 1.8 * atr_val, entry_price * 1.075)
-                        stop_loss = min(_atr_sl, _struct_res) if (_struct_res - entry_price) >= 0.8 * atr_val else _atr_sl
+                        _bt_plan.update({
+                            "signal": "SHORT",
+                            "order_style": "STOP",
+                            "status_label": "🔴 空頭破位做空",
+                            "planned_entry": float(_fallback_eval["entry"]),
+                            "stop_loss": float(_fallback_eval["sl"]),
+                            "tp_target": float(_fallback_eval["tp"]),
+                            "tp2_target": float(_fallback_eval.get("tp2", _fallback_eval["tp"])),
+                            "planned_rr": float(_fallback_eval["planned_rr"]),
+                            "sl_basis": str(_fallback_eval.get("sl_basis_desc", "")),
+                            "tp_basis": str(_fallback_eval.get("tp_basis_desc", "")),
+                            "entry_desc": str(_fallback_eval.get("entry_type_desc", ""))
+                        })
+
+                    _planned_e = float(_bt_plan["planned_entry"])
+                    _planned_sl = float(_bt_plan["stop_loss"])
+                    _planned_tp = float(_bt_plan["tp_target"])
+                    _order_style = _bt_plan["order_style"]
+
+                    _is_filled = False
+                    actual_entry_price = 0.0
+                    if _order_style == "LIMIT":
+                        # 反彈逢高沽空單 (Limit-Sell): 當日最高價觸及阻力掛單區，且開盤未直接升穿空頭止損
+                        if float(row['High']) >= _planned_e and float(row['Open']) < _planned_sl * 0.997:
+                            actual_entry_price = max(float(row['Open']), _planned_e)
+                            _is_filled = True
+                        elif float(row['Low']) <= float(prev_row['Low']) and float(row['Open']) >= float(prev_row['Low']) * 0.98:
+                            actual_entry_price = min(float(row['Open']), float(prev_row['Low']))
+                            _order_style = "STOP(破底追空)"
+                            _is_filled = True
+                    else:
+                        trigger_price = min(_planned_e, float(prev_row['Low']))
+                        if float(row['Low']) <= trigger_price and float(row['Open']) >= trigger_price * 0.97:
+                            actual_entry_price = min(float(row['Open']), trigger_price)
+                            _is_filled = True
+
+                    if _is_filled and actual_entry_price > 0:
+                        entry_price = actual_entry_price * (1 - slippage_fee)
+                        stop_loss = _planned_sl if (_planned_sl > entry_price * 1.012 and _planned_sl <= entry_price * 1.078) else min(entry_price + 1.8 * atr_val, entry_price * 1.072)
                         if stop_loss <= entry_price * 1.012:
                             stop_loss = entry_price * 1.035
                         risk_per_share = max(stop_loss - entry_price, 1e-4)
 
-                        _cands_tp = [
-                            float(prev_row.get("SupShort_Causal", 999999)),
-                            float(prev_row.get("SupLong_Causal", 999999)),
-                            float(prev_row.get("Sup120_Causal", 999999)),
-                            float(prev_row.get("Low52W", 999999))
-                        ]
-                        _valid_tps = sorted([p for p in _cands_tp if 0 < p < entry_price * 0.978], reverse=True)
-                        if _valid_tps:
-                            tp_target = _valid_tps[0]
-                            if (entry_price - tp_target) / risk_per_share < 1.6 and len(_valid_tps) >= 2:
-                                tp_target = _valid_tps[1]
-                        else:
-                            _wave_amp = max(float(prev_row.get("ResShort_Causal", stop_loss)) - float(prev_row.get("SupShort_Causal", entry_price)), 3.2 * atr_val)
-                            tp_target = max(0.01, entry_price - _wave_amp * 0.85)
-
+                        tp_target = _planned_tp if (0 < _planned_tp < entry_price * 0.978) else float(_bt_plan.get("tp2_target", max(0.01, entry_price - 2.5 * risk_per_share)))
                         _planned_rr = (entry_price - tp_target) / risk_per_share
+
                         if _planned_rr >= 1.8:
                             risk_amount = current_equity * 0.01
                             target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
@@ -2149,14 +2780,18 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                                 shares = target_shares
                                 position_stage = 0
                                 days_in_trade = 0
-                                entry_structural_sl = float(prev_row.get("ResShort_Causal", prev_row.get("ResShort", entry_price * 1.08)))
+                                entry_structural_sl = stop_loss
                                 position_type = "SHORT"
                                 trade_info = {
                                     "方向": "🔴 做空",
                                     "進場日期": current_date,
+                                    "買入方式": f"{'逢高沽空(Limit)' if 'LIMIT' in _order_style else '破底觸發(Stop)'} | {_bt_plan['status_label']}",
+                                    "建議買入位": round(_planned_e, 2),
                                     "進場價": round(entry_price, 2),
                                     "初始止損": round(stop_loss, 2),
+                                    "止損依據": _bt_plan.get("sl_basis", "結構阻力外側"),
                                     "目標止盈": round(tp_target, 2),
+                                    "止盈阻力依據": _bt_plan.get("tp_basis", "下方結構支撐區"),
                                     "計畫盈虧比": f"{_planned_rr:.2f}R",
                                     "最終止盈": "結構TP 或 9EMA 跟蹤",
                                     "結構止損": round(entry_structural_sl, 2)
@@ -3246,10 +3881,27 @@ elif mode == mode_options[1]:
                 ema9_val = last.get('EMA9', 0)
                 
                 if pos_dir == "做多 (Long)":
-                    fixed_sl = actual_entry - 2 * entry_atr
-                    
-                    # 止盈優先取「前阻力位」，但若距離太近，強制拉大到 4 ATR (確保 2R 盈虧比)
-                    fixed_tp = max(last.get('ResShort', actual_entry * 1.08), actual_entry + 4 * entry_atr)
+                    # OLD:
+                    # fixed_sl = actual_entry - 2 * entry_atr
+                    # fixed_tp = max(last.get('ResShort', actual_entry * 1.08), actual_entry + 4 * entry_atr)
+                    # NEW: [v24.15] 根據用戶輸入之實際買入價，結合下方真實結構支撐位與上方多層級結構阻力位/平行通道動態計算 SL、TP 與專屬盈虧比！
+                    _user_sr_targets = _find_historical_ma_convergence_targets(df, actual_entry, "LONG")
+                    _user_sup_cands = [
+                        float(last.get('BoxLow10_Causal', actual_entry * 0.95)) - 0.15 * entry_atr,
+                        float(last.get('SupShort_Causal', actual_entry * 0.94)) - 0.20 * entry_atr,
+                        float(last.get('SMA20', actual_entry * 0.95)) - 0.45 * entry_atr
+                    ]
+                    _valid_user_sls = [s for s in _user_sup_cands if actual_entry * 0.925 <= s <= actual_entry * 0.988]
+                    fixed_sl = round(max(_valid_user_sls) if _valid_user_sls else max(actual_entry - 1.8 * entry_atr, actual_entry * 0.928), 2)
+                    _user_risk = max(actual_entry - fixed_sl, 1e-4)
+                    if _user_sr_targets:
+                        fixed_tp = round(_user_sr_targets[0][0], 2)
+                        if (fixed_tp - actual_entry) / _user_risk < 1.6 and len(_user_sr_targets) >= 2:
+                            fixed_tp = round(_user_sr_targets[1][0], 2)
+                    else:
+                        fixed_tp = round(max(last.get('ResShort_Causal', actual_entry * 1.08), actual_entry + 3.2 * entry_atr), 2)
+                    _user_rr = (fixed_tp - actual_entry) / _user_risk
+                    st.caption(f"📐 **基於實際買入價 ({actual_entry:.2f}) 之動態結構測算**：結構止損 **{fixed_sl:.2f}** (風險 -{(actual_entry-fixed_sl)/actual_entry*100:.2f}%) ｜ 結構阻力目標 **{fixed_tp:.2f}** ｜ **真實結構盈虧比：{_user_rr:.2f} R**")
                     
                     is_trending = pd.notna(bench_close) and bench_close > bench_sma50 * 1.015
                     breakeven_triggered = ema9_val > actual_entry
@@ -3274,8 +3926,27 @@ elif mode == mode_options[1]:
                     
                     chart_entry, chart_sl, chart_tp, chart_plan = actual_entry, current_sl, fixed_tp, "LONG"
                 else:
-                    fixed_sl = actual_entry + 2 * entry_atr
-                    fixed_tp = min(last.get('SupShort', actual_entry * 0.92), actual_entry - 4 * entry_atr)
+                    # OLD:
+                    # fixed_sl = actual_entry + 2 * entry_atr
+                    # fixed_tp = min(last.get('SupShort', actual_entry * 0.92), actual_entry - 4 * entry_atr)
+                    # NEW: [v24.15] 根據用戶輸入之實際沽空價，結合上方真實結構阻力位與下方多層級結構支撐位動態計算 SL、TP 與專屬盈虧比！
+                    _user_sr_targets = _find_historical_ma_convergence_targets(df, actual_entry, "SHORT")
+                    _user_res_cands = [
+                        float(last.get('BoxHigh10_Causal', actual_entry * 1.05)) + 0.15 * entry_atr,
+                        float(last.get('ResShort_Causal', actual_entry * 1.06)) + 0.20 * entry_atr,
+                        float(last.get('SMA20', actual_entry * 1.05)) + 0.45 * entry_atr
+                    ]
+                    _valid_user_sls = [s for s in _user_res_cands if actual_entry * 1.012 <= s <= actual_entry * 1.075]
+                    fixed_sl = round(min(_valid_user_sls) if _valid_user_sls else min(actual_entry + 1.8 * entry_atr, actual_entry * 1.072), 2)
+                    _user_risk = max(fixed_sl - actual_entry, 1e-4)
+                    if _user_sr_targets:
+                        fixed_tp = round(_user_sr_targets[0][0], 2)
+                        if (actual_entry - fixed_tp) / _user_risk < 1.6 and len(_user_sr_targets) >= 2:
+                            fixed_tp = round(_user_sr_targets[1][0], 2)
+                    else:
+                        fixed_tp = round(min(last.get('SupShort_Causal', actual_entry * 0.92), actual_entry - 3.2 * entry_atr), 2)
+                    _user_rr = (actual_entry - fixed_tp) / _user_risk
+                    st.caption(f"📐 **基於實際沽空價 ({actual_entry:.2f}) 之動態結構測算**：結構止損 **{fixed_sl:.2f}** (風險 +{(fixed_sl-actual_entry)/actual_entry*100:.2f}%) ｜ 結構支撐目標 **{fixed_tp:.2f}** ｜ **真實結構盈虧比：{_user_rr:.2f} R**")
                     
                     is_trending = pd.notna(bench_close) and bench_close < bench_sma50 * 0.985
                     breakeven_triggered = ema9_val < actual_entry
@@ -3630,7 +4301,9 @@ elif mode == mode_options[1]:
                 with cqbt2:
                     btmodeq = st.selectbox("方向", ["全部雙向", "僅做多頭(做多)", "僅做空頭(做空)"], key="btmodeq")
                 with cqbt3:
-                    btrelaxq = st.checkbox("寬鬆模式", value=True, help="較重視 SMA50 / MACD 與大盤方向", key="btrelaxq")
+                    # OLD: btrelaxq = st.checkbox("寬鬆模式", value=True, help="較重視 SMA50 / MACD 與大盤方向", key="btrelaxq")
+                    # NEW: [v24.15] 預設關閉寬鬆模式 (value=False)，確保回測預設 100% 採用與掃描雷達相同的 J Law × LEI 大師結構選股與動態盈虧比邏輯
+                    btrelaxq = st.checkbox("寬鬆模式 (關閉則 100% 同步掃描雷達嚴格結構邏輯)", value=False, help="預設關閉以確保回測與掃描雷達理念 100% 一致；勾選則僅用 50MA+MACD", key="btrelaxq")
 
                 cqdate1, cqdate2 = st.columns(2)
                 with cqdate1:
@@ -3691,7 +4364,9 @@ elif mode == mode_options[3]:
     with cbt3:
         bt_mode = st.selectbox("交易方向", ["全部雙向", "僅做多頭(做多)", "僅做空頭(做空)"])
     with cbt4:
-        bt_relaxed = st.checkbox("寬鬆模式", value=True, help="偏重 SMA50 / MACD 與大盤濾網")
+        # OLD: bt_relaxed = st.checkbox("寬鬆模式", value=True, help="偏重 SMA50 / MACD 與大盤濾網")
+        # NEW: [v24.15] 預設關閉寬鬆模式 (value=False)，讓回測系統與掃描系統理念 100% 對齊
+        bt_relaxed = st.checkbox("寬鬆模式 (關閉則 100% 同步掃描雷達嚴格結構邏輯)", value=False, help="預設關閉以確保回測與掃描雷達理念 100% 一致；勾選則僅用 50MA+MACD")
 
     cdate1, cdate2 = st.columns(2)
     with cdate1:
@@ -3874,38 +4549,72 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                 _short_term_uptrend_ok = bool(prev_row['Close'] >= prev_row.get('SMA50', 0))
                 _unified_long_signal = (is_long_trigger or _lei_pullback_ok or _lei_tight_ok) and _short_term_uptrend_ok and is_hk_liquid and is_market_health_ok
 
-                if _unified_long_signal and trade_mode in ["全部雙向", "僅做多頭(做多)"]:
-                    trigger_price = float(prev_row['High'])
-                    if row['High'] >= trigger_price and row['Open'] <= trigger_price * 1.035:
-                        actual_entry_price = max(float(row['Open']), trigger_price)
-                        entry_price = actual_entry_price * (1 + slippage_fee)
-
-                        _struct_sup = max(
-                            float(prev_row.get("BoxLow10_Causal", prev_row.get("SupShort_Causal", entry_price * 0.94))) - 0.15 * atr_val,
-                            entry_price * 0.925
+                # [NEW INCREMENTAL PATCH v24.15] 調用與掃描系統 100% 同步之 `evaluate_historical_bar_unified_plan`
+                # 支援：(1) 突破觸發單 (STOP) 與 (2) 支撐回踩/阻力反彈低吸掛單 (LIMIT)，並直接採用多層級結構止損止盈與獨立動態 R:R！
+                _bt_plan = evaluate_historical_bar_unified_plan(
+                    df=df,
+                    bar_idx=i - 1,
+                    market_type=market_type,
+                    score_threshold=score_threshold,
+                    is_relaxed=is_relaxed
+                )
+                if (_bt_plan["signal"] == "LONG" or _unified_long_signal) and trade_mode in ["全部雙向", "僅做多頭(做多)"]:
+                    if _bt_plan["signal"] != "LONG":
+                        # 若由備用條件觸發，即時調用 evaluate_swing_trade_plan_and_rr 產生結構計劃
+                        _sub_slice = df.iloc[max(0, i - 160): i]
+                        _fallback_eval = evaluate_swing_trade_plan_and_rr(
+                            df=_sub_slice, plan_type="LONG", status="🟢 趨勢多頭突破/回踩",
+                            atr_val=atr_val, is_breakout_long=True
                         )
-                        _atr_sl = max(entry_price - 1.8 * atr_val, entry_price * 0.925)
-                        stop_loss = max(_atr_sl, _struct_sup) if (entry_price - _struct_sup) >= 0.8 * atr_val else _atr_sl
+                        _bt_plan.update({
+                            "signal": "LONG",
+                            "order_style": "STOP",
+                            "status_label": "🟢 趨勢多頭突破",
+                            "planned_entry": float(_fallback_eval["entry"]),
+                            "stop_loss": float(_fallback_eval["sl"]),
+                            "tp_target": float(_fallback_eval["tp"]),
+                            "tp2_target": float(_fallback_eval.get("tp2", _fallback_eval["tp"])),
+                            "planned_rr": float(_fallback_eval["planned_rr"]),
+                            "sl_basis": str(_fallback_eval.get("sl_basis_desc", "")),
+                            "tp_basis": str(_fallback_eval.get("tp_basis_desc", "")),
+                            "entry_desc": str(_fallback_eval.get("entry_type_desc", ""))
+                        })
+
+                    _planned_e = float(_bt_plan["planned_entry"])
+                    _planned_sl = float(_bt_plan["stop_loss"])
+                    _planned_tp = float(_bt_plan["tp_target"])
+                    _order_style = _bt_plan["order_style"]
+
+                    _is_filled = False
+                    actual_entry_price = 0.0
+                    if _order_style == "LIMIT":
+                        # 回踩低吸單 (Limit-Buy): 當日最低價觸及或跌穿掛單買入位，且開盤未直接跌破結構止損位
+                        if float(row['Low']) <= _planned_e and float(row['Open']) > _planned_sl * 1.003:
+                            actual_entry_price = min(float(row['Open']), _planned_e)
+                            _is_filled = True
+                        # 若當日未回踩但直接帶量突破前一日高點 (確認轉強)，亦允許在突破位順勢進場
+                        elif float(row['High']) >= float(prev_row['High']) and float(row['Open']) <= float(prev_row['High']) * 1.02:
+                            actual_entry_price = max(float(row['Open']), float(prev_row['High']))
+                            _order_style = "STOP(確認轉強)"
+                            _is_filled = True
+                    else:
+                        # 突破觸發單 (Stop-Buy): 升穿樞紐買入位且未過度裂口高開 (>3%)
+                        trigger_price = max(_planned_e, float(prev_row['High']))
+                        if float(row['High']) >= trigger_price and float(row['Open']) <= trigger_price * 1.03:
+                            actual_entry_price = max(float(row['Open']), trigger_price)
+                            _is_filled = True
+
+                    if _is_filled and actual_entry_price > 0:
+                        entry_price = actual_entry_price * (1 + slippage_fee)
+                        # 確保止損低於實際成交價且具備結構保護
+                        stop_loss = _planned_sl if (_planned_sl < entry_price * 0.988 and _planned_sl >= entry_price * 0.922) else max(entry_price - 1.8 * atr_val, entry_price * 0.928)
                         if stop_loss >= entry_price * 0.988:
                             stop_loss = entry_price * 0.965
                         risk_per_share = max(entry_price - stop_loss, 1e-4)
 
-                        _cands_tp = [
-                            float(prev_row.get("ResShort_Causal", 0)),
-                            float(prev_row.get("ResLong_Causal", 0)),
-                            float(prev_row.get("Res120_Causal", 0)),
-                            float(prev_row.get("High52W", 0))
-                        ]
-                        _valid_tps = sorted([p for p in _cands_tp if p > entry_price * 1.022])
-                        if _valid_tps:
-                            tp_target = _valid_tps[0]
-                            if (tp_target - entry_price) / risk_per_share < 1.6 and len(_valid_tps) >= 2:
-                                tp_target = _valid_tps[1]
-                        else:
-                            _wave_amp = max(float(prev_row.get("ResShort_Causal", entry_price)) - float(prev_row.get("SupShort_Causal", stop_loss)), 3.2 * atr_val)
-                            tp_target = entry_price + _wave_amp * 0.85
-
+                        tp_target = _planned_tp if _planned_tp > entry_price * 1.022 else float(_bt_plan.get("tp2_target", entry_price + 2.5 * risk_per_share))
                         _planned_rr = (tp_target - entry_price) / risk_per_share
+
                         if _planned_rr >= 1.8:
                             risk_amount = current_equity * 0.01
                             target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
@@ -3919,51 +4628,76 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                                 cash -= shares * entry_price
                                 position_stage = 0
                                 days_in_trade = 0
-                                entry_structural_sl = float(prev_row.get("SupShort_Causal", prev_row.get("SupShort", entry_price * 0.92)))
+                                entry_structural_sl = stop_loss
                                 position_type = "LONG"
                                 trade_info = {
                                     "方向": "🟢 做多",
                                     "進場日期": current_date,
+                                    "買入方式": f"{'低吸掛單(Limit)' if 'LIMIT' in _order_style else '突破觸發(Stop)'} | {_bt_plan['status_label']}",
+                                    "建議買入位": round(_planned_e, 2),
                                     "進場價": round(entry_price, 2),
                                     "初始止損": round(stop_loss, 2),
+                                    "止損依據": _bt_plan.get("sl_basis", "結構支撐外側"),
                                     "目標止盈": round(tp_target, 2),
+                                    "止盈阻力依據": _bt_plan.get("tp_basis", "上方結構阻力區"),
                                     "計畫盈虧比": f"{_planned_rr:.2f}R",
                                     "最終止盈": "結構TP 或 9EMA 跟蹤",
                                     "結構止損": round(entry_structural_sl, 2)
                                 }
 
-                elif is_short_trigger and trade_mode in ["全部雙向", "僅做空頭(做空)"]:
-                    trigger_price = float(prev_row['Low'])
-                    if row['Low'] <= trigger_price and row['Open'] >= trigger_price * 0.965:
-                        actual_entry_price = min(float(row['Open']), trigger_price)
-                        entry_price = actual_entry_price * (1 - slippage_fee)
-
-                        _struct_res = min(
-                            float(prev_row.get("BoxHigh10_Causal", prev_row.get("ResShort_Causal", entry_price * 1.06))) + 0.15 * atr_val,
-                            entry_price * 1.075
+                elif (_bt_plan["signal"] == "SHORT" or is_short_trigger) and trade_mode in ["全部雙向", "僅做空頭(做空)"]:
+                    if _bt_plan["signal"] != "SHORT":
+                        _sub_slice = df.iloc[max(0, i - 160): i]
+                        _fallback_eval = evaluate_swing_trade_plan_and_rr(
+                            df=_sub_slice, plan_type="SHORT", status="🔴 空頭破位/反彈受阻",
+                            atr_val=atr_val, is_breakdown_short=True
                         )
-                        _atr_sl = min(entry_price + 1.8 * atr_val, entry_price * 1.075)
-                        stop_loss = min(_atr_sl, _struct_res) if (_struct_res - entry_price) >= 0.8 * atr_val else _atr_sl
+                        _bt_plan.update({
+                            "signal": "SHORT",
+                            "order_style": "STOP",
+                            "status_label": "🔴 空頭破位做空",
+                            "planned_entry": float(_fallback_eval["entry"]),
+                            "stop_loss": float(_fallback_eval["sl"]),
+                            "tp_target": float(_fallback_eval["tp"]),
+                            "tp2_target": float(_fallback_eval.get("tp2", _fallback_eval["tp"])),
+                            "planned_rr": float(_fallback_eval["planned_rr"]),
+                            "sl_basis": str(_fallback_eval.get("sl_basis_desc", "")),
+                            "tp_basis": str(_fallback_eval.get("tp_basis_desc", "")),
+                            "entry_desc": str(_fallback_eval.get("entry_type_desc", ""))
+                        })
+
+                    _planned_e = float(_bt_plan["planned_entry"])
+                    _planned_sl = float(_bt_plan["stop_loss"])
+                    _planned_tp = float(_bt_plan["tp_target"])
+                    _order_style = _bt_plan["order_style"]
+
+                    _is_filled = False
+                    actual_entry_price = 0.0
+                    if _order_style == "LIMIT":
+                        # 反彈逢高沽空單 (Limit-Sell): 當日最高價觸及阻力掛單區，且開盤未直接升穿空頭止損
+                        if float(row['High']) >= _planned_e and float(row['Open']) < _planned_sl * 0.997:
+                            actual_entry_price = max(float(row['Open']), _planned_e)
+                            _is_filled = True
+                        elif float(row['Low']) <= float(prev_row['Low']) and float(row['Open']) >= float(prev_row['Low']) * 0.98:
+                            actual_entry_price = min(float(row['Open']), float(prev_row['Low']))
+                            _order_style = "STOP(破底追空)"
+                            _is_filled = True
+                    else:
+                        trigger_price = min(_planned_e, float(prev_row['Low']))
+                        if float(row['Low']) <= trigger_price and float(row['Open']) >= trigger_price * 0.97:
+                            actual_entry_price = min(float(row['Open']), trigger_price)
+                            _is_filled = True
+
+                    if _is_filled and actual_entry_price > 0:
+                        entry_price = actual_entry_price * (1 - slippage_fee)
+                        stop_loss = _planned_sl if (_planned_sl > entry_price * 1.012 and _planned_sl <= entry_price * 1.078) else min(entry_price + 1.8 * atr_val, entry_price * 1.072)
                         if stop_loss <= entry_price * 1.012:
                             stop_loss = entry_price * 1.035
                         risk_per_share = max(stop_loss - entry_price, 1e-4)
 
-                        _cands_tp = [
-                            float(prev_row.get("SupShort_Causal", 999999)),
-                            float(prev_row.get("SupLong_Causal", 999999)),
-                            float(prev_row.get("Sup120_Causal", 999999)),
-                            float(prev_row.get("Low52W", 999999))
-                        ]
-                        _valid_tps = sorted([p for p in _cands_tp if 0 < p < entry_price * 0.978], reverse=True)
-                        if _valid_tps:
-                            tp_target = _valid_tps[0]
-                            if (entry_price - tp_target) / risk_per_share < 1.6 and len(_valid_tps) >= 2:
-                                tp_target = _valid_tps[1]
-                        else:
-                            _wave_amp = max(float(prev_row.get("ResShort_Causal", stop_loss)) - float(prev_row.get("SupShort_Causal", entry_price)), 3.2 * atr_val)
-                            tp_target = max(0.01, entry_price - _wave_amp * 0.85)
-
+                        tp_target = _planned_tp if (0 < _planned_tp < entry_price * 0.978) else float(_bt_plan.get("tp2_target", max(0.01, entry_price - 2.5 * risk_per_share)))
                         _planned_rr = (entry_price - tp_target) / risk_per_share
+
                         if _planned_rr >= 1.8:
                             risk_amount = current_equity * 0.01
                             target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
@@ -3976,14 +4710,18 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                                 shares = target_shares
                                 position_stage = 0
                                 days_in_trade = 0
-                                entry_structural_sl = float(prev_row.get("ResShort_Causal", prev_row.get("ResShort", entry_price * 1.08)))
+                                entry_structural_sl = stop_loss
                                 position_type = "SHORT"
                                 trade_info = {
                                     "方向": "🔴 做空",
                                     "進場日期": current_date,
+                                    "買入方式": f"{'逢高沽空(Limit)' if 'LIMIT' in _order_style else '破底觸發(Stop)'} | {_bt_plan['status_label']}",
+                                    "建議買入位": round(_planned_e, 2),
                                     "進場價": round(entry_price, 2),
                                     "初始止損": round(stop_loss, 2),
+                                    "止損依據": _bt_plan.get("sl_basis", "結構阻力外側"),
                                     "目標止盈": round(tp_target, 2),
+                                    "止盈阻力依據": _bt_plan.get("tp_basis", "下方結構支撐區"),
                                     "計畫盈虧比": f"{_planned_rr:.2f}R",
                                     "最終止盈": "結構TP 或 9EMA 跟蹤",
                                     "結構止損": round(entry_structural_sl, 2)
