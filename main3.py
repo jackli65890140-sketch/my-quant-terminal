@@ -91,7 +91,99 @@ RADAR_CACHE_TTL_SECONDS = 1800  # 雷達結果預設 30 分鐘自動過期重算
 # 4) 修復回測系統 IMMEDIATE 訂單標籤誤判與 LIMIT 單進場當日收長下影陽線仍被誤判止損之邏輯缺陷；
 # 5) 新增「🚀 RS 相對強弱線領先價格創高 (RS Line New High Before Price)」與「🔥 偏離 20MA 過熱高潮延伸主動減倉位 (Climax Extension Profit-Lock)」；
 # 6) 新增「🏆 機構級 8 維度交易品質評級 (S級 / A+級 / A級 / B級 / C級) 與動態建議倉位權重引擎 (evaluate_holistic_setup_grade_and_edge)」，最大化實戰資金運用成功率！
-CURRENT_SCHEMA_VERSION = "v30.0"
+# OLD: CURRENT_SCHEMA_VERSION = "v30.0"
+# NEW: [v31.0 專業機構級多空雙向語義對齊 × 跨用戶Session隔離 × 財報跳空預警 × 空頭融券成本終極版]
+# 1) 徹底修復做空視角 (SHORT View / dir=SHORT) 出現做多字眼與指標顛倒之漏洞：
+#    - 修復 evaluate_holistic_setup_grade_and_edge 將空頭 RS 創 20 日新低誤標為「🚀 RS率先創20日新高 / 機構逆勢掃貨指標」及高潮延伸減倉位字眼；
+#    - 升級 compute_deepchart_orderflow_absorption 與 compute_vbp_profile_and_vsa_engine 支援多空雙向獨立診斷（空頭顯示「🩸 空頭壓制與破底動能分」、「📉 下方籌碼通道性質 (LVN暴跌真空區)」、「📈 反彈買盤枯竭度 (No-Demand)」與空頭專屬戰術導航）；
+#    - 修復切換「強制做空/做多視角」時 holistic_grade_info 未即時重算之緩存漏洞，並全面對齊 Martin Luk R倍數、抵扣價防假突破、富途一手沽空成本與交易計劃 Delta 顏色方向；
+# 2) 新增「📅 財報/業績跳空黑天鵝風險檢測器 (detect_earnings_and_gap_risk)」與「📉 空頭融券借券利息 + 維持保證金強平模擬」；
+# 3) 新增「🔒 多用戶 Session 隔離與線程安全快取鎖 (Thread-Safe Session State Isolation)」及 URL 參數白名單消毒，解決 Streamlit Cloud 公網部署下跨用戶持倉互相覆蓋漏洞；
+# 4) 新增「📋 已鎖定持倉組合實時監控看板與 CSV 交易日誌匯出 (render_locked_portfolio_summary_and_export)」。
+CURRENT_SCHEMA_VERSION = "v31.0"
+import threading as _threading_lib
+_CACHE_LOCK = _threading_lib.Lock()
+
+def sanitize_ticker_input(raw_ticker: str, default_val: str = "0700.HK") -> str:
+    """[v31.0 安全加固] 對 URL Query Params 或輸入框代碼進行白名單正則消毒，防止跨站或異常字符注入"""
+    if not raw_ticker or not isinstance(raw_ticker, str):
+        return default_val
+    cleaned = re.sub(r"[^A-Za-z0-9.\^=-]", "", raw_ticker.strip().upper())
+    return cleaned[:15] if cleaned else default_val
+
+def detect_earnings_and_gap_risk(df: pd.DataFrame, ticker: str = "") -> Dict[str, Any]:
+    """
+    [v31.0 新增：財報/事件跳空黑天鵝預警引擎 (Earnings & Event Gap Risk Detector)]
+    統計過去 1 年歷史隔夜跳空 (|Open/PrevClose - 1| >= 4.5%) 頻率、最大隔夜跳空幅度與近期異常波動，
+    提醒 Swing Trader 切勿在無利潤墊 (<1.5R) 下重倉跨越財報或高跳空風險窗口！
+    """
+    res = {
+        "gap_events_1y": 0,
+        "max_overnight_gap_pct": 0.0,
+        "recent_gap_shock": False,
+        "days_to_earnings": None,
+        "gap_risk_level": "LOW",
+        "gap_warning_msg": ""
+    }
+    if df is None or len(df) < 25:
+        return res
+    try:
+        sub = df.tail(min(len(df), 252))
+        prev_c = sub['Close'].shift(1)
+        overnight_gaps = ((sub['Open'] / (prev_c + 1e-9)) - 1.0).abs() * 100.0
+        overnight_gaps = overnight_gaps.dropna()
+        if not overnight_gaps.empty:
+            res["gap_events_1y"] = int((overnight_gaps >= 4.5).sum())
+            res["max_overnight_gap_pct"] = round(float(overnight_gaps.max()), 2)
+            res["recent_gap_shock"] = bool(float(overnight_gaps.tail(5).max()) >= 5.0)
+        if res["max_overnight_gap_pct"] >= 10.0 or res["gap_events_1y"] >= 4:
+            res["gap_risk_level"] = "HIGH"
+            res["gap_warning_msg"] = (
+                f"⚡ **【隔夜跳空 / 財報黑天鵝高風險標的】**：過去一年曾出現 **{res['gap_events_1y']} 次** ≥4.5% 隔夜跳空"
+                f"（最大單日隔夜跳空 **{res['max_overnight_gap_pct']:.1f}%**）。持倉跨越業績公佈日或重大事件前，"
+                f"若浮盈未達 **+1.5R~2.0R 利潤墊**，強烈建議先減倉一半或收緊單倉市值上限至 ≤20%！"
+            )
+    except Exception:
+        pass
+    return res
+
+def render_locked_portfolio_summary_and_export(persistent_dict: dict) -> None:
+    """[v31.0 新增：已鎖定持倉組合實時監控看板與 CSV 交易日誌匯出]"""
+    locked_map = persistent_dict.get("user_locked_positions", {})
+    if not locked_map:
+        return
+    with st.expander(f"📋 已鎖定實戰持倉組合監控看板 ({len(locked_map)} 筆持倉) & 一鍵匯出 CSV 交易日誌", expanded=False):
+        rows = []
+        for sym, p in locked_map.items():
+            if not isinstance(p, dict):
+                continue
+            rows.append({
+                "代碼": sym,
+                "板塊": get_ticker_sector(sym),
+                "方向": "🔴 做空" if p.get("dir_code") == "SHORT" else "🟢 做多",
+                "開倉錨定日": p.get("anchor_date", "-"),
+                "進場價": p.get("entry", 0.0),
+                "鎖定硬止損": p.get("fixed_sl", 0.0),
+                "收盤軟止損": p.get("soft_closing_sl", p.get("fixed_sl", 0.0)),
+                "第一目標(TP1)": p.get("fixed_tp", 0.0),
+                "次級目標(TP2)": p.get("tp2_price", 0.0),
+                "鎖定初始R:R": f"{float(p.get('initial_rr', 0.0)):.2f}R",
+                "當前實現R": f"{float(p.get('current_r', 0.0)):+.2f}R",
+                "實時浮盈(%)": f"{float(p.get('unrealized_pnl_pct', 0.0)):+.2f}%",
+                "富途打和價": p.get("be_price", 0.0),
+                "狀態": "🚨 已觸及止損" if p.get("stop_hit_since_entry") else ("🛡️ 可移至保本" if float(p.get("current_r", 0.0)) >= 1.0 else "🌱 持倉發酵中")
+            })
+        if rows:
+            port_df = pd.DataFrame(rows)
+            st.dataframe(port_df, use_container_width=True, hide_index=True)
+            csv_bytes = port_df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                label="📥 匯出已鎖定持倉交易日誌 (CSV)",
+                data=csv_bytes,
+                file_name=f"swing_trade_journal_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                key="dl_locked_portfolio_csv"
+            )
 
 def evaluate_holistic_setup_grade_and_edge(
     df: pd.DataFrame,
@@ -144,18 +236,34 @@ def evaluate_holistic_setup_grade_and_edge(
     if not pd.notna(atr_v) or atr_v <= 0:
         atr_v = curr_c * 0.03
 
-    # 計算 RS Line 是否率先創 20 日新高 (RS Line New High Before Price Breakout)
-    rs_leads = False
+    # 計算 RS Line 是否率先創 20 日新高 (多頭) 或率先創 20 日新低 (空頭)
+    # OLD:
+    # rs_leads = False
+    # if 'CloseBench' in df.columns and df['CloseBench'].notna().sum() >= 25:
+    #     rs_line = df['Close'] / (df['CloseBench'] + 1e-9)
+    #     rs_now = float(rs_line.iloc[-1])
+    #     rs_max20 = float(rs_line.iloc[-22:-1].max())
+    #     rs_min20 = float(rs_line.iloc[-22:-1].min())
+    #     if plan_type == "LONG" and rs_now >= rs_max20 * 0.998:
+    #         rs_leads = True
+    #     elif plan_type == "SHORT" and rs_now <= rs_min20 * 1.002:
+    #         rs_leads = True
+    # out["rs_leads_price"] = rs_leads
+    # NEW: [v31.0 修復做空時將 RS 創 20 日新低誤判為「RS率先創20日新高 / 機構逆勢掃貨」之嚴重漏洞]
+    rs_leads_bull = False
+    rs_leads_bear = False
     if 'CloseBench' in df.columns and df['CloseBench'].notna().sum() >= 25:
         rs_line = df['Close'] / (df['CloseBench'] + 1e-9)
         rs_now = float(rs_line.iloc[-1])
         rs_max20 = float(rs_line.iloc[-22:-1].max())
         rs_min20 = float(rs_line.iloc[-22:-1].min())
-        if plan_type == "LONG" and rs_now >= rs_max20 * 0.998:
-            rs_leads = True
-        elif plan_type == "SHORT" and rs_now <= rs_min20 * 1.002:
-            rs_leads = True
-    out["rs_leads_price"] = rs_leads
+        if rs_now >= rs_max20 * 0.998:
+            rs_leads_bull = True
+        if rs_now <= rs_min20 * 1.002:
+            rs_leads_bear = True
+    rs_leads = rs_leads_bull if plan_type == "LONG" else rs_leads_bear
+    out["rs_leads_price"] = rs_leads_bull
+    out["rs_leads_bear"] = rs_leads_bear
 
     # 計算「🔥 高潮延伸主動鎖潤位 (Climax Extension TP)」：當偏離 20MA 達 3.2x ATR (或偏離 10MA 達 2.3x ATR) 時主動賣出 1/3~1/2
     if plan_type == "LONG":
@@ -182,17 +290,30 @@ def evaluate_holistic_setup_grade_and_edge(
         missing.append(f"① 結構盈虧比偏低 ({planned_rr:.2f}R < 1.8R)")
 
     # 維度 2：RS 相對強弱領先性 (15分)
-    if rs_leads or (jlaw_meta_info.get("rs_1m_outperform") and jlaw_meta_info.get("rs_6m_outperform")):
-        score += 15.0
-        passed.append("② RS 相對強弱領先創高 / 雙週期 Alpha 領頭羊")
-    elif float(last.get('Mansfield_RS', 0)) > 0 and plan_type == "LONG":
-        score += 9.0
-        passed.append("② Mansfield RS 跑贏大盤")
-    elif float(last.get('Mansfield_RS', 0)) < 0 and plan_type == "SHORT":
-        score += 12.0
-        passed.append("② RS 顯著弱於大盤 (空頭標的)")
+    # OLD:
+    # if rs_leads or (jlaw_meta_info.get("rs_1m_outperform") and jlaw_meta_info.get("rs_6m_outperform")):
+    #     score += 15.0
+    #     passed.append("② RS 相對強弱領先創高 / 雙週期 Alpha 領頭羊")
+    # elif float(last.get('Mansfield_RS', 0)) > 0 and plan_type == "LONG": ...
+    # NEW: [v31.0 嚴格區分做多與做空之 RS 評語，杜絕做空時顯示「領先創高 / Alpha 領頭羊」]
+    if plan_type == "LONG":
+        if rs_leads_bull or (jlaw_meta_info.get("rs_1m_outperform") and jlaw_meta_info.get("rs_6m_outperform")):
+            score += 15.0
+            passed.append("② RS 相對強弱領先創高 / 雙週期 Alpha 領頭羊")
+        elif float(last.get('Mansfield_RS', 0)) > 0:
+            score += 9.0
+            passed.append("② Mansfield RS 跑贏大盤")
+        else:
+            missing.append("② RS 相對強弱未顯著領先大盤")
     else:
-        missing.append("② RS 相對強弱未顯著領先")
+        if rs_leads_bear and float(last.get('Mansfield_RS', 0)) <= 0:
+            score += 15.0
+            passed.append("② RS 相對強弱率先破底創20日新低 (機構持續派發之空頭領跌股)")
+        elif float(last.get('Mansfield_RS', 0)) < 0 or rs_leads_bear:
+            score += 12.0
+            passed.append("② Mansfield RS 顯著弱於大盤 (空頭弱勢標的)")
+        else:
+            missing.append("② 個股 RS 仍強於大盤 (逆勢做空強勢股風險較高)")
 
     # 維度 3：DeepChart 前高空單消化度 (15分)
     dc_score = float(deepchart_info.get("absorption_score", 50.0))
@@ -272,13 +393,24 @@ def evaluate_holistic_setup_grade_and_edge(
             score += 8.0
             passed.append("⑦ 下跌放量、反彈縮量 (空頭量價配合)")
 
-    # 維度 8：進場時機與防過熱檢查 (5分)
+    # 維度 8：進場時機與防過熱/超賣檢查 (5分)
+    # OLD:
+    # if is_overext:
+    #     score -= 15.0
+    #     missing.append("⑧ 短線已嚴重過熱延伸 (偏離20MA > 3x ATR，嚴禁追高)")
+    # elif str(trade_plan_eval.get("action_timeliness", "")).startswith("⚡"):
+    #     score += 5.0
+    #     passed.append("⑧ 正處於 ⚡ 即時入場黃金擊球區")
+    # NEW: [v31.0 多空雙向語義對齊]
     if is_overext:
         score -= 15.0
-        missing.append("⑧ 短線已嚴重過熱延伸 (偏離20MA > 3x ATR，嚴禁追高)")
+        if plan_type == "LONG":
+            missing.append("⑧ 多頭短線已嚴重過熱延伸 (偏離20MA > 3x ATR，嚴禁追高)")
+        else:
+            missing.append("⑧ 空頭短線已極度超賣延伸 (低於20MA逾 3x ATR 或 RSI≤22，嚴禁低位追空)")
     elif str(trade_plan_eval.get("action_timeliness", "")).startswith("⚡"):
         score += 5.0
-        passed.append("⑧ 正處於 ⚡ 即時入場黃金擊球區")
+        passed.append("⑧ 正處於 ⚡ 即時入場黃金擊球區" if plan_type == "LONG" else "⑧ 正處於 ⚡ 即時沽空黃金擊球區")
     else:
         score += 3.0
 
@@ -287,31 +419,64 @@ def evaluate_holistic_setup_grade_and_edge(
     out["eight_pillars_passed"] = passed
     out["eight_pillars_missing"] = missing
 
+    if plan_type == "LONG":
+        out["rs_metric_title"] = "🚀 RS 相對強弱線創高"
+        out["rs_metric_val"] = "🔥 RS率先創20日新高" if rs_leads_bull else "⚪ 常規隨勢運行"
+        out["rs_metric_delta"] = "機構逆勢掃貨指標" if rs_leads_bull else "觀察相對大盤強弱"
+        out["climax_metric_title"] = "💰 高潮延伸主動減倉位"
+        out["climax_metric_delta"] = "⚠️ 現價已過熱勿追" if is_overext else "偏離20MA達+3.2x ATR鎖潤位"
+    else:
+        out["rs_metric_title"] = "📉 RS 相對強弱線破底"
+        out["rs_metric_val"] = "🩸 RS率先創20日新低" if rs_leads_bear else ("🔻 RS弱於大盤" if float(last.get('Mansfield_RS', 0)) < 0 else "⚪ 常規隨勢運行")
+        out["rs_metric_delta"] = "機構領跌派發指標 (利於做空)" if (rs_leads_bear or float(last.get('Mansfield_RS', 0)) < 0) else "⚠️ 個股相對抗跌"
+        out["climax_metric_title"] = "💰 急跌超賣主動回補位"
+        out["climax_metric_delta"] = "⚠️ 短線已超賣勿追空" if is_overext else "偏離20MA達-3.2x ATR回補鎖潤位"
+
     if score >= 85.0 and planned_rr >= 2.0 and not is_overext:
-        out["setup_grade"] = "🏆 S 級 (聖杯滿貫機會)"
+        out["setup_grade"] = "🏆 S 級 (聖杯滿貫機會)" if plan_type == "LONG" else "🏆 S 級 (空頭滿貫機會)"
         out["grade_code"] = "S"
         out["sizing_multiplier"] = 1.25
-        out["sizing_advice"] = "🔥 **S 級頂尖共振（建議 100%~125% 標準風險倉位，即 0.50%~0.75% 總資金風險）**：八大機構維度全面共振，籌碼清空且空間充裕！"
+        out["sizing_advice"] = (
+            "🔥 **S 級多頭頂尖共振（建議 100%~125% 標準風險倉位，即 0.50%~0.75% 總資金風險）**：八大機構維度全面共振，上方套牢清空且上漲空間充裕！"
+            if plan_type == "LONG" else
+            "🔥 **S 級空頭頂尖共振（建議 100%~125% 標準風險倉位，即 0.50%~0.75% 總資金風險）**：空頭八大維度全面共振，上方套牢反壓沉重、下方支撐薄弱且下跌空間充裕！"
+        )
     elif score >= 74.0 and planned_rr >= 1.8 and not is_overext:
-        out["setup_grade"] = "💎 A+ 級 (機構高勝率機會)"
+        out["setup_grade"] = "💎 A+ 級 (機構高勝率機會)" if plan_type == "LONG" else "💎 A+ 級 (高勝率做空機會)"
         out["grade_code"] = "A+"
         out["sizing_multiplier"] = 1.0
-        out["sizing_advice"] = "✅ **A+ 級核心機會（建議 100% 標準風險倉位，即 0.50% 總資金風險）**：量價、籌碼與盈虧比高度配合，可按計劃標準執行。"
+        out["sizing_advice"] = (
+            "✅ **A+ 級多頭核心機會（建議 100% 標準風險倉位，即 0.50% 總資金風險）**：量價、籌碼與盈虧比高度配合，可按計劃標準買入。"
+            if plan_type == "LONG" else
+            "✅ **A+ 級空頭核心機會（建議 100% 標準風險倉位，即 0.50% 總資金風險）**：空頭反壓、賣壓訂單流與下跌盈虧比高度配合，可按計劃標準沽空。"
+        )
     elif score >= 62.0 and planned_rr >= 1.8:
-        out["setup_grade"] = "🟢 A 級 (標準波段機會)"
+        out["setup_grade"] = "🟢 A 級 (標準波段機會)" if plan_type == "LONG" else "🔴 A 級 (標準波段做空)"
         out["grade_code"] = "A"
         out["sizing_multiplier"] = 0.75
-        out["sizing_advice"] = "🟢 **A 級合格機會（建議 75% 倉位或先入半倉試水溫，約 0.35% 風險）**：主趨勢與空間達標，請嚴格配合 1H/15m 右側扳機進場。"
+        out["sizing_advice"] = (
+            "🟢 **A 級合格做多機會（建議 75% 倉位或先入半倉試水溫，約 0.35% 風險）**：主趨勢與空間達標，請嚴格配合 1H/15m 右側扳機買入。"
+            if plan_type == "LONG" else
+            "🔴 **A 級合格做空機會（建議 75% 倉位或先入半倉試水溫，約 0.35% 風險）**：空頭趨勢與下跌空間達標，請嚴格配合 1H/15m 反抽受阻或破底扳機沽空。"
+        )
     elif score >= 48.0:
         out["setup_grade"] = "🟡 B 級 (次級/等待確認)"
         out["grade_code"] = "B"
         out["sizing_multiplier"] = 0.50
-        out["sizing_advice"] = "🟡 **B 級觀察機會（建議最多 50% 輕倉或掛單等待回調，約 0.25% 風險）**：部分籌碼或量價條件尚未完美，切勿重倉勉強出手。"
+        out["sizing_advice"] = (
+            "🟡 **B 級觀察機會（建議最多 50% 輕倉或掛單等待回調，約 0.25% 風險）**：部分籌碼或量價條件尚未完美，切勿重倉勉強買入。"
+            if plan_type == "LONG" else
+            "🟡 **B 級空頭觀察機會（建議最多 50% 輕倉或掛單等待反抽阻力，約 0.25% 風險）**：部分空頭條件尚未完美，切勿在支撐位重倉勉強追空。"
+        )
     else:
         out["setup_grade"] = "⚪ C 級 (勝率偏低/放棄)"
         out["grade_code"] = "C"
         out["sizing_multiplier"] = 0.0
-        out["sizing_advice"] = "🛑 **C 級低勝率（建議放棄或純觀望）**：盈虧比不足、上方套牢沉重或短線過度延伸，保留資金等待 A+/S 級機會！"
+        out["sizing_advice"] = (
+            "🛑 **C 級低勝率（建議放棄或純觀望）**：盈虧比不足、上方套牢沉重或短線過度延伸，保留資金等待 A+/S 級做多機會！"
+            if plan_type == "LONG" else
+            "🛑 **C 級空頭低勝率（建議放棄做空或純觀望）**：下跌盈虧比不足、下方買盤承接過強或短線已極度超賣，保留資金等待 A+/S 級做空機會！"
+        )
 
     return out
 from zoneinfo import ZoneInfo
@@ -490,7 +655,12 @@ def compute_mtf_execution_and_exit_sniper(
         res["has_intraday"] = True
         last_day_date = df_15m.index[-1].date()
         today_15m = df_15m[df_15m.index.date == last_day_date]
-        if len(today_15m) < 2:
+        # OLD:
+        # if len(today_15m) < 2:
+        #     today_15m = df_15m.tail(16)
+        # NEW: [v31.0 修復開盤首 15 分鐘將昨日下午 K 線混入今日 ORB 開盤區間之漏洞]
+        # 若當日僅有 1 根 15m K 線，直接以該根 K 線作為當日初始 ORB 與日內 VWAP，絕不把昨日尾盤當作今日開盤高低點！
+        if len(today_15m) == 0:
             today_15m = df_15m.tail(16)
 
         tp_15 = (today_15m['High'] + today_15m['Low'] + today_15m['Close']) / 3.0
@@ -869,6 +1039,51 @@ def compute_vbp_profile_and_vsa_engine(df: pd.DataFrame, lookback: int = 120, nu
         res["vbp_position_label"] = f"🟡 處於籌碼價值區下沿 (POC: {poc_price:.2f} ｜ VAL: {val_price:.2f})"
         res["vbp_tactical_advice"] = f"關注價值區下沿 VAL ({val_price:.2f}) 支撐承接力，若跌穿 VAL 將進入下方籌碼斷層，需嚴守止損。"
 
+    # [v31.0 新增：空頭專屬 VBP 下方籌碼通道性質 (Downside LVN Vacuum vs HVN Support) 與 Wyckoff No-Demand 無需求反抽信號]
+    downside_support_pct = round(max(0.0, 100.0 - overhead_supply_pct), 1)
+    res["downside_support_pct"] = downside_support_pct
+    lower_zone_mask = (bin_centers < curr_c * 0.997) & (bin_centers >= curr_c - 2.2 * atr_v)
+    is_downside_lvn = False
+    is_downside_hvn = False
+    if np.any(lower_zone_mask):
+        near_lower_mean_vol = float(np.mean(vbp_hist[lower_zone_mask]))
+        near_lower_max_vol = float(np.max(vbp_hist[lower_zone_mask]))
+        if near_lower_mean_vol <= avg_bin_vol * 0.62 or downside_support_pct <= 12.0:
+            is_downside_lvn = True
+        elif near_lower_max_vol >= avg_bin_vol * 1.65 and curr_c > poc_price * 1.005:
+            is_downside_hvn = True
+    else:
+        is_downside_lvn = True
+    res["is_downside_lvn_vacuum"] = is_downside_lvn
+    res["is_supported_by_downside_hvn"] = is_downside_hvn
+
+    # Wyckoff VSA No-Demand Bar (空頭無需求反彈測試：小陽線或上影線、成交量低於前兩日且 <0.85x 均量、收盤在區間中下部)
+    vsa_no_demand = False
+    if n_bars >= 5:
+        spread_now = highs[-1] - lows[-1]
+        vol_sma20 = float(np.mean(vols[-20:])) if n_bars >= 20 else float(np.mean(vols))
+        if (vols[-1] < vols[-2] and vols[-1] < vols[-3] and vols[-1] < vol_sma20 * 0.85 and (highs[-1] - closes[-1]) >= 0.35 * max(spread_now, 1e-6)):
+            vsa_no_demand = True
+    res["vsa_no_demand"] = vsa_no_demand
+
+    if curr_c < val_price and is_downside_lvn:
+        res["short_vbp_position_label"] = f"🩸 跌穿價值區底 VAL ({val_price:.2f}) 墜入下方 LVN 籌碼真空暴跌區 (上方套牢高達 {overhead_supply_pct:.1f}%)"
+        res["short_vbp_tactical_advice"] = (
+            f"現價已跌破 70% 籌碼價值區下沿 VAL ({val_price:.2f})，頭頂堆積 **{overhead_supply_pct:.1f}%** 歷史套牢賣壓，"
+            f"且下方支撐籌碼僅佔 **{downside_support_pct:.1f}%**（屬 LVN 籌碼斷層真空區），多頭毫無承接，最利於【⚡ 順勢破底做空】或反抽 VAL ({val_price:.2f}) 加空！"
+        )
+    elif curr_c <= poc_price:
+        res["short_vbp_position_label"] = f"🔴 受制於最大籌碼峰 POC ({poc_price:.2f}) 蓋頭反壓之下 (上方套牢壓制佔 {overhead_supply_pct:.1f}%)"
+        res["short_vbp_tactical_advice"] = (
+            f"最大籌碼共識峰 POC ({poc_price:.2f}) 與上方 **{overhead_supply_pct:.1f}%** 套牢盤已形成沉重蓋頭反壓！"
+            f"目前逼近價值區下沿 VAL ({val_price:.2f})，反抽 POC ({poc_price:.2f}) 出現無量受阻或放量跌穿 VAL ({val_price:.2f}) 將觸發主跌段。"
+        )
+    else:
+        res["short_vbp_position_label"] = f"⚠️ 仍處於最大籌碼峰 POC ({poc_price:.2f}) 支撐上方 (下方承接籌碼佔 {downside_support_pct:.1f}%)"
+        res["short_vbp_tactical_advice"] = (
+            f"目前股價仍在最大籌碼峰 POC ({poc_price:.2f}) 之上，下方 {val_price:.2f}~{poc_price:.2f} 尚有密集籌碼承接，做空宜等實質跌破 POC ({poc_price:.2f}) 後再順勢出擊。"
+        )
+
     return res
 
 
@@ -1098,6 +1313,77 @@ def compute_deepchart_orderflow_absorption(df: pd.DataFrame, lookback: int = 60)
         out["deepchart_detail"] = (
             f"🟡 **前高阻力 ({prior_res_p:.2f}) 空單消化進行中 ({total_score:.0f}/100分)**："
             f"已測試 {tests_cnt} 次（換手消化率 **{out['absorption_ratio_pct']:.0f}%**），建議配合突破放量或回踩支撐分批進場。"
+        )
+
+    # [v31.0 新增：空頭視角專屬「空頭供應壓制與前低多單支撐擊穿引擎 (Short Supply Dominance & Support Breakdown)」]
+    # 解決做空股票時卻顯示「⚠️ 前高空單未消化 / 防假突破」多頭提示之矛盾！
+    valley_rel_idx = int(np.argmin(lows[:search_end]))
+    prior_sup_p = float(lows[valley_rel_idx])
+    out["prior_sup_price"] = round(prior_sup_p, 2)
+    sup_zone_high = prior_sup_p + max(0.8 * atr_v, prior_sup_p * 0.025)
+    sup_init_s = max(0, valley_rel_idx - 2)
+    sup_init_e = min(search_end, valley_rel_idx + 3)
+    init_demand_vol = max(float(np.sum(vols[sup_init_s:sup_init_e])) / max(1, (sup_init_e - sup_init_s)) * 2.0, float(np.mean(vols)) * 1.3, 1.0)
+
+    attack_sup_vol = 0.0
+    sup_tests_cnt = 0
+    in_sup_cluster = False
+    for idx in range(valley_rel_idx + 2, n):
+        if lows[idx] <= sup_zone_high:
+            if not in_sup_cluster:
+                sup_tests_cnt += 1
+                in_sup_cluster = True
+            rng_s = max(highs[idx] - lows[idx], 1e-6)
+            clv_s = ((closes[idx] - lows[idx]) - (highs[idx] - closes[idx])) / rng_s
+            sell_weight = 1.30 if (closes[idx] <= opens[idx] or clv_s <= -0.1) else 0.55
+            attack_sup_vol += vols[idx] * sell_weight
+        else:
+            if lows[idx] > sup_zone_high + 0.4 * atr_v:
+                in_sup_cluster = False
+    if curr_c < prior_sup_p * 0.998:
+        attack_sup_vol += float(vols[-1]) * 1.40
+
+    sup_breakdown_ratio = round(min(250.0, (attack_sup_vol / init_demand_vol) * 100.0), 1)
+    out["support_breakdown_ratio_pct"] = sup_breakdown_ratio
+    out["support_tests_count"] = int(sup_tests_cnt)
+
+    recent10_up_vols = [vols[k] for k in range(max(0, n - 10), n) if closes[k] > opens[k]]
+    avg_recent_up_vol = float(np.mean(recent10_up_vols)) if recent10_up_vols else vol_sma20 * 0.5
+    buyer_exhausted = bool(avg_recent_up_vol < vol_sma20 * 0.88)
+    out["buyer_exhaustion_ok"] = buyer_exhausted
+
+    max_up_vol_10d = max([vols[k] for k in range(max(0, n - 11), n - 1) if closes[k] > closes[max(0, k - 1)]] + [0.0])
+    dist_spike_10d = bool(
+        (closes[-1] < opens[-1] and vols[-1] > max_up_vol_10d and max_up_vol_10d > 0)
+        or any(closes[k] < opens[k] and vols[k] > max_up_vol_10d for k in range(max(0, n - 3), n) if max_up_vol_10d > 0)
+    )
+    out["distribution_spike_10d"] = dist_spike_10d
+
+    # 空頭壓制總分 (0~100分，越高代表上方套牢重、反彈無量、空頭砸盤與破底動能越強)
+    short_dom_score = round(min(99.0, max(5.0, (100.0 - total_score) * 0.65 + min(22.0, (sup_breakdown_ratio / 100.0) * 16.0) + (10.0 if buyer_exhausted else 0.0) + (8.0 if dist_spike_10d else 0.0))), 1)
+    out["short_dominance_score"] = short_dom_score
+    out["short_supply_dominant"] = bool(short_dom_score >= 58.0)
+
+    if out["short_supply_dominant"]:
+        out["short_deepchart_badge"] = f"🩸 空頭壓制強勁 ({short_dom_score:.0f}分｜破底換手{sup_breakdown_ratio:.0f}%)"
+        out["short_deepchart_detail"] = (
+            f"🩸 **空頭賣壓主導且前低多頭防線 ({prior_sup_p:.2f}) 搖搖欲墜 ({short_dom_score:.0f}/100分)**："
+            f"上方前高 ({prior_res_p:.2f}) 累積沉重套牢盤（多頭消化率僅 {out['absorption_ratio_pct']:.0f}%），"
+            f"下方支撐已受衝擊 {sup_tests_cnt} 次（空頭擊穿換手率 **{sup_breakdown_ratio:.0f}%**），"
+            f"{'反彈買盤枯竭 (無量反抽) + ' if buyer_exhausted else ''}"
+            f"{'近10日訂單流淨賣壓主導 (CVD<0)' if not out['cvd_10d_positive'] else '空頭結構完整'}，極利於逢高做空或破底順勢追空！"
+        )
+    elif short_dom_score < 42.0:
+        out["short_deepchart_badge"] = f"⚠️ 低位買盤承接強 ({short_dom_score:.0f}分｜防逼空反彈)"
+        out["short_deepchart_detail"] = (
+            f"⚠️ **下方支撐 ({prior_sup_p:.2f}) 買盤承接較強 ({short_dom_score:.0f}/100分)**："
+            f"近10日出現買盤吸收且空頭擊穿動能不足，直接低位追空易遭遇 Short Squeeze 逼空反彈，建議耐心等反抽阻力位受阻再佈局！"
+        )
+    else:
+        out["short_deepchart_badge"] = f"🟠 空頭測試支撐中 ({short_dom_score:.0f}分｜破底換手{sup_breakdown_ratio:.0f}%)"
+        out["short_deepchart_detail"] = (
+            f"🟠 **空頭正逐步消耗下方支撐 ({prior_sup_p:.2f}) 承接盤 ({short_dom_score:.0f}/100分)**："
+            f"上方套牢賣壓仍存，下方支撐已測試 {sup_tests_cnt} 次（空頭擊穿換手率 **{sup_breakdown_ratio:.0f}%**），可於反抽均線受阻或放量跌穿 {prior_sup_p:.2f} 時沽空。"
         )
     return out
 
@@ -2092,6 +2378,17 @@ def analyze_lei_deduction_forecast(df: pd.DataFrame) -> Dict[str, Any]:
     else:
         out["forecast_60_label"] = f"⚠️ 現價低於未來10日 60MA 抵扣均值 ({ded60_next10_mean:.2f})，季線仍有下壓阻力"
 
+    # [v31.0 新增：空頭視角專屬抵扣價推演標籤 (高抵扣價 = 20MA/60MA 持續下彎蓋頭助跌)]
+    if close_now < ded20_next10_mean and close_now < ded20_next5_max:
+        out["short_forecast_20_label"] = f"🩸 現價遠低於未來5~10日 20MA 抵扣高點 ({ded20_next5_max:.2f} / 均值 {ded20_next10_mean:.2f})，20MA 將持續下彎蓋頭助跌（極利做空）"
+    else:
+        out["short_forecast_20_label"] = f"⚠️ 現價高於未來 20MA 抵扣均值 ({ded20_next10_mean:.2f})，20MA 短線有走平托底傾向，做空勿急追低"
+
+    if close_now < ded60_next10_mean:
+        out["short_forecast_60_label"] = f"🩸 現價低於未來10日 60MA 季線抵扣均值 ({ded60_next10_mean:.2f})，季線維持向下壓制助跌"
+    else:
+        out["short_forecast_60_label"] = f"⚠️ 現價仍在 60MA 抵扣均值 ({ded60_next10_mean:.2f}) 之上，中期季線尚未下彎"
+
     return out
 
 
@@ -2807,13 +3104,21 @@ def evaluate_swing_trade_plan_and_rr(
         if close_p < recommended_entry * 0.975:
             warnings.append(f"⏳ 現價 ({close_p:.2f}) 低於理想沽空位 ({recommended_entry:.2f})，請耐心等待反彈至阻力位再沽空")
 
+        # OLD:
+        # "deepchart_score": _dc_score,
+        # "deepchart_badge": _dc_info.get("deepchart_badge", "-"),
+        # "deepchart_detail": _dc_info.get("deepchart_detail", ""),
+        # NEW: [v31.0 空頭計劃綁定空頭專屬 DeepChart 壓制分數與標籤]
+        _short_dc_score = float(_dc_info.get("short_dominance_score", round(100.0 - _dc_score, 1)))
+        if _short_dc_score < 42.0:
+            warnings.append(_dc_info.get("short_deepchart_detail", "⚠️ 下方支撐買盤承接仍強，慎防逼空反彈"))
         return {
             "entry": recommended_entry,
             "entry_type_desc": entry_type_desc,
             "action_timeliness": _action_timeliness,
-            "deepchart_score": _dc_score,
-            "deepchart_badge": _dc_info.get("deepchart_badge", "-"),
-            "deepchart_detail": _dc_info.get("deepchart_detail", ""),
+            "deepchart_score": _short_dc_score,
+            "deepchart_badge": _dc_info.get("short_deepchart_badge", _dc_info.get("deepchart_badge", "-")),
+            "deepchart_detail": _dc_info.get("short_deepchart_detail", _dc_info.get("deepchart_detail", "")),
             "sl": stop_loss,
             "sl_basis_desc": sl_basis_desc,
             "tp": take_profit,
@@ -3617,7 +3922,9 @@ if "watchlist_radar_results" not in st.session_state:
 # 讀取網址路由參數
 qp = st.query_params
 default_mode_val = qp.get("mode", "")
-target_ticker = qp.get("ticker", "0700.HK")
+# OLD: target_ticker = qp.get("ticker", "0700.HK")
+# NEW: [v31.0 安全加固] 對 URL Query Params 代碼進行白名單正則消毒
+target_ticker = sanitize_ticker_input(qp.get("ticker", "0700.HK"), default_val="0700.HK")
 # [NEW INCREMENTAL PATCH 修復 Bug 1C] 讀取跳轉時攜帶的雷達方向與嚴格度參數，防止跳轉後因側欄預設值不同而變換多空方向
 target_dir_from_radar = qp.get("dir", "")
 target_strict_from_radar = qp.get("strict", "")
@@ -5979,7 +6286,9 @@ def run_all_inclusive_radar(stock_list):
             _dc_badge_str = str(_tp_eval.get("deepchart_badge", df.attrs.get("deepchart_info", {}).get("deepchart_badge", "-")))
             _dc_score_num = float(_tp_eval.get("deepchart_score", df.attrs.get("deepchart_info", {}).get("absorption_score", 50.0)))
             _immediate_bonus = 8.0 if _action_time_str.startswith("⚡") else 0.0
-            _dc_bonus = 5.0 if (_dc_score_num >= 65.0 and ptype == "LONG") else (-8.0 if (_dc_score_num < 40.0 and ptype == "LONG") else 0.0)
+            # OLD: _dc_bonus = 5.0 if (_dc_score_num >= 65.0 and ptype == "LONG") else (-8.0 if (_dc_score_num < 40.0 and ptype == "LONG") else 0.0)
+            # NEW: [v31.0 多空雙向 DeepChart 加減分同步]
+            _dc_bonus = 5.0 if (_dc_score_num >= 62.0 and ptype in ["LONG", "SHORT"]) else (-8.0 if (_dc_score_num < 40.0 and ptype in ["LONG", "SHORT"]) else 0.0)
             _rr_bonus = min(max(_planned_rr, 0.0), 6.0) * 4.5
             _fresh_bonus = 25.0 if _is_fresh_trigger else 0.0
             _meta_bonus = _meta_score_val * 7.0
@@ -6701,16 +7010,20 @@ elif mode == mode_options[1]:
             _lei_ded = df.attrs.get("lei_ded_forecast", {})
             _jlaw_m = df.attrs.get("jlaw_meta_info", {})
 
-            # [NEW INCREMENTAL PATCH v25.0] Martin Luk (@martinlukkt) USIC 冠軍實戰診斷、拋物線 R 倍數與資金曲線反饋面板
+            # [NEW INCREMENTAL PATCH v25.0 / v31.0 多空雙向語義對齊] Martin Luk (@martinlukkt) USIC 冠軍實戰診斷、拋物線 R 倍數與資金曲線反饋面板
+            render_locked_portfolio_summary_and_export(persistent_data)
             _ml_diag = df.attrs.get("martin_luk_info", {})
+            _is_short_view = (plan_type == "SHORT")
             st.markdown("### 🏆 Martin Luk (@martinlukkt) USIC 冠軍體系診斷 (9/21/50 EMA雲帶 × 前高AVWAP × 極緊止損拋物線效應)")
             # OLD:
             # if _ml_diag.get("index_filter_warning"):
             #     st.warning(_ml_diag["index_filter_warning"])
             # NEW: [v25.6 固定預留槽位] 避免條件式插入改變後續節點索引
             _ml_idx_warn_slot = st.empty()
-            if _ml_diag.get("index_filter_warning"):
+            if _ml_diag.get("index_filter_warning") and not _is_short_view:
                 render_atomic_alert(_ml_diag["index_filter_warning"], "warning", slot=_ml_idx_warn_slot)
+            elif _ml_diag.get("index_at_declining_ema_resistance") and _is_short_view:
+                render_atomic_alert("🏴‍☠️ **Martin Luk 大盤空頭順風確認**：大盤指數目前處於 9EMA < 21EMA 或受制於下彎 21/50 EMA 阻力，順勢做空弱勢股勝率顯著提升！", "success", slot=_ml_idx_warn_slot)
             ml_c1, ml_c2, ml_c3, ml_c4 = st.columns(4)
             ml_c1.metric(
                 "☁️ Martin 9/21/50 EMA 雲帶",
@@ -6725,13 +7038,21 @@ elif mode == mode_options[1]:
             ml_c3.metric(
                 "🎯 Martin Luk 實戰設置",
                 _ml_diag.get("martin_setup_badge", "-")[:18],
-                f"1M/3M/6M領先: {'是' if _ml_diag.get('is_leader_1m_3m_6m') else '否'}"
+                f"空頭反壓匯聚: {len(_ml_diag.get('confluence_resistances', []))}重" if _is_short_view else f"1M/3M/6M領先: {'是' if _ml_diag.get('is_leader_1m_3m_6m') else '否'}"
             )
-            ml_c4.metric(
-                "🚀 波段 R 倍數潛力 (以中線結構止損計)",
-                f"+25%漲幅 ≈ {_ml_diag.get('parabolic_r_25pct', 0):.1f}R",
-                f"+50%漲幅 ≈ {_ml_diag.get('parabolic_r_50pct', 0):.1f}R (波段止損 {_ml_diag.get('stop_width_pct', 0):.1f}%)"
-            )
+            _active_stop_w_pct = max(float(_tp_eval.get("stop_pct", _ml_diag.get("stop_width_pct", 4.0))), 0.8)
+            if _is_short_view:
+                ml_c4.metric(
+                    "📉 空頭波段 R 倍數潛力 (以空頭止損計)",
+                    f"-15%跌幅 ≈ {15.0 / _active_stop_w_pct:.1f}R",
+                    f"-30%跌幅 ≈ {30.0 / _active_stop_w_pct:.1f}R (空頭止損 {_active_stop_w_pct:.1f}%)"
+                )
+            else:
+                ml_c4.metric(
+                    "🚀 波段 R 倍數潛力 (以中線結構止損計)",
+                    f"+25%漲幅 ≈ {_ml_diag.get('parabolic_r_25pct', 0):.1f}R",
+                    f"+50%漲幅 ≈ {_ml_diag.get('parabolic_r_50pct', 0):.1f}R (波段止損 {_ml_diag.get('stop_width_pct', 0):.1f}%)"
+                )
             _ml_conf_lines = []
             if _ml_diag.get("confluence_supports"):
                 _ml_conf_lines.append("🛡️ **Martin Luk 下方多重支撐匯聚 (Stacked Support Confluence)**：" + " ＋ ".join(_ml_diag["confluence_supports"]))
@@ -6760,52 +7081,103 @@ elif mode == mode_options[1]:
                 )
                 _ml_sz_alerts = [("error" if _ml_sizing["no_trade_today"] else "info", _ml_sizing["regime_note"])]
                 if _ml_sizing.get("lot_trap_warning"):
-                    _ml_sz_alerts.append(("warning", _ml_sizing["lot_trap_warning"]))
+                    _lot_warn_msg = _ml_sizing["lot_trap_warning"].replace("買入", "沽空") if _is_short_view else _ml_sizing["lot_trap_warning"]
+                    _ml_sz_alerts.append(("warning", _lot_warn_msg))
                 render_atomic_alert_group(_ml_sz_alerts)
                 sz1, sz2, sz3, sz4, sz5 = st.columns(5)
                 sz1.metric("建議單筆風險 (含富途費)", f"{_ml_sizing['recommended_risk_pct']:.2f}%", f"含費實質風險 {_ml_sizing['actual_risk_pct']:.2f}%")
-                sz2.metric("建議買入股數", f"{_ml_sizing['final_shares']:,} 股", f"約 {_ml_sizing['final_lots']} 手")
-                sz3.metric("持倉總市值", f"{_ml_sizing['position_value']:,.0f} {currency}", f"佔總資金 {_ml_sizing['actual_pos_pct']:.1f}%")
+                sz2.metric("建議沽空股數" if _is_short_view else "建議買入股數", f"{_ml_sizing['final_shares']:,} 股", f"約 {_ml_sizing['final_lots']} 手")
+                sz3.metric("沽空倉位總市值" if _is_short_view else "持倉總市值", f"{_ml_sizing['position_value']:,.0f} {currency}", f"佔總資金 {_ml_sizing['actual_pos_pct']:.1f}%")
                 sz4.metric("富途雙邊總費用 (含印花稅)", f"{_ml_sizing['futu_round_trip_fee']:,.2f} {currency}", f"佔倉位 {_ml_sizing['futu_fee_pct']:.3f}%")
-                sz5.metric("富途實戰打和價", f"{_ml_sizing['futu_breakeven_long'] if plan_type != 'SHORT' else _ml_sizing['futu_breakeven_short']:.2f} {currency}", "⚠️ 已觸發單倉上限保護" if _ml_sizing["capped_by_notional"] else f"單倉上限 ≤ {_ml_sizing['max_pos_pct_cap']:.0f}%")
+                sz5.metric("富途空頭打和價" if _is_short_view else "富途實戰打和價", f"{_ml_sizing['futu_breakeven_long'] if not _is_short_view else _ml_sizing['futu_breakeven_short']:.2f} {currency}", "⚠️ 已觸發單倉上限保護" if _ml_sizing["capped_by_notional"] else f"單倉上限 ≤ {_ml_sizing['max_pos_pct_cap']:.0f}%")
 
             _dc_diag = df.attrs.get("deepchart_info") or compute_deepchart_orderflow_absorption(df, lookback=60)
             _vbp_diag = df.attrs.get("vbp_vsa_info") or compute_vbp_profile_and_vsa_engine(df, lookback=120, num_bins=40)
             _heat_diag = evaluate_portfolio_heat_and_sector_risk(persistent_data, fmt_ticker, candidate_risk_pct=0.50)
+            _gap_diag = detect_earnings_and_gap_risk(df, fmt_ticker)
 
-            st.markdown("### 🧠 機構級 Volume-by-Price (VBP) 籌碼分佈、Wyckoff VSA 與前高空單消化診斷 (v27.0)")
-            render_atomic_alert(_heat_diag["status_msg"], _heat_diag["alert_level"])
+            # OLD:
+            # st.markdown("### 🧠 機構級 Volume-by-Price (VBP) 籌碼分佈、Wyckoff VSA 與前高空單消化診斷 (v27.0)")
+            # ... (原本無論做多或做空均顯示「前高空單消化總分」、「阻力區賣壓枯竭度」、「防假突破」與「關注 VAL 支撐承接力，若跌穿需嚴守止損」)
+            # NEW: [v31.0 多空雙向獨立渲染 VBP 籌碼分佈、Wyckoff VSA 與 DeepChart 訂單流診斷]
+            if _is_short_view:
+                st.markdown("### 🧠 機構級 Volume-by-Price (VBP) 籌碼分佈、Wyckoff VSA 與空頭壓制/支撐擊穿診斷 (v31.0 空頭專版)")
+            else:
+                st.markdown("### 🧠 機構級 Volume-by-Price (VBP) 籌碼分佈、Wyckoff VSA 與前高空單消化診斷 (v31.0)")
+            _heat_and_gap_alerts = [(_heat_diag["alert_level"], _heat_diag["status_msg"])]
+            if _gap_diag.get("gap_warning_msg"):
+                _heat_and_gap_alerts.append(("warning", _gap_diag["gap_warning_msg"]))
+            render_atomic_alert_group(_heat_and_gap_alerts)
+
             dc_c1, dc_c2, dc_c3, dc_c4 = st.columns(4)
-            dc_c1.metric("🧠 前高空單消化總分", f"{_dc_diag.get('absorption_score', 50.0):.0f} / 100分", _dc_diag.get("deepchart_badge", "-"))
-            dc_c2.metric("🔄 右側換手消化率", f"{_dc_diag.get('absorption_ratio_pct', 0.0):.1f}%", f"前高阻力 {float(_dc_diag.get('prior_res_price', 0.0)):.2f} 測試 {_dc_diag.get('tests_count', 0)} 次")
-            dc_c3.metric("📉 阻力區賣壓枯竭度", "✅ 賣壓已枯竭" if _dc_diag.get("seller_exhaustion_ok") else "⚠️ 賣壓仍存", "VCP縮量測試確認" if _dc_diag.get("seller_exhaustion_ok") else "需防空單砸盤")
-            dc_c4.metric("📊 訂單流微結構 (CVD & 口袋支點)", "🟢 淨買盤吸收" if _dc_diag.get("cvd_10d_positive") else "🔴 淨賣壓偏重", "🔥 出現口袋支點" if _dc_diag.get("pocket_pivot_10d") else "常規量能")
             vbp_c1, vbp_c2, vbp_c3, vbp_c4 = st.columns(4)
-            vbp_c1.metric("🎯 VBP 籌碼共識中心 (POC)", f"{float(_vbp_diag.get('poc_price', 0.0)):.2f} {currency}", f"所屬板塊: {_heat_diag['candidate_sector']}")
-            vbp_c2.metric("📐 70% 價值區 (VAL ~ VAH)", f"{float(_vbp_diag.get('val_price', 0.0)):.2f} ~ {float(_vbp_diag.get('vah_price', 0.0)):.2f}", f"上方套牢佔比 {_vbp_diag.get('overhead_supply_pct', 0.0):.1f}%")
-            vbp_c3.metric("🚀 上方籌碼通道性質", "⚡ LVN 籌碼真空加速區" if _vbp_diag.get("is_in_lvn_vacuum") else ("🧱 HVN 套牢密集阻力" if _vbp_diag.get("is_blocked_by_hvn") else "🟡 常規籌碼區"), _vbp_diag.get("vbp_position_label", "")[:18])
-            _vsa_tag = "🟢 No-Supply縮量無供給" if _vbp_diag.get("vsa_no_supply") else ("🔥 Spring洗盤吸收" if _vbp_diag.get("vsa_spring_absorption") else ("🔴 Upthrust派發" if _vbp_diag.get("vsa_upthrust_distribution") else "⚪ 量價常規"))
-            vbp_c4.metric("🔬 Wyckoff VSA 量價散度", _vsa_tag, "空頭賣壓枯竭確認" if _vbp_diag.get("vsa_no_supply") else "觀察量價配合")
-            render_atomic_alert_group([
-                ("success" if _dc_diag.get("shorts_absorbed") else ("error" if _dc_diag.get("heavy_overhead_supply") else "warning"), _dc_diag.get("deepchart_detail", "")),
-                ("info", f"📊 **VBP 籌碼分佈戰術導航**：{_vbp_diag.get('vbp_position_label', '')} — {_vbp_diag.get('vbp_tactical_advice', '')}")
-            ])
+            if _is_short_view:
+                _s_dom = float(_dc_diag.get("short_dominance_score", 100.0 - float(_dc_diag.get("absorption_score", 50.0))))
+                dc_c1.metric("🧠 空頭壓制與破底動能分", f"{_s_dom:.0f} / 100分", _dc_diag.get("short_deepchart_badge", "-"))
+                dc_c2.metric("🔄 前低支撐測試與擊穿率", f"{_dc_diag.get('support_breakdown_ratio_pct', 0.0):.1f}%", f"前低支撐 {float(_dc_diag.get('prior_sup_price', 0.0)):.2f} 測試 {_dc_diag.get('support_tests_count', 0)} 次")
+                dc_c3.metric("📈 反彈買盤枯竭度 (No-Demand)", "✅ 反彈買盤枯竭" if _dc_diag.get("buyer_exhaustion_ok") else "⚠️ 低位仍有抄底盤", "無量反抽確認 (利於做空)" if _dc_diag.get("buyer_exhaustion_ok") else "需防短線逼空反抽")
+                dc_c4.metric("📊 訂單流微結構 (CVD & 派發)", "🩸 淨賣壓主導 (利於做空)" if not _dc_diag.get("cvd_10d_positive") else "🟢 淨買盤吸收 (逆風)", "🔻 出現機構放量派發日" if _dc_diag.get("distribution_spike_10d") else "常規空頭量能")
 
-            _hol_diag = df.attrs.get("holistic_grade_info") or evaluate_holistic_setup_grade_and_edge(
-                df=df, plan_type=plan_type, trade_plan_eval=_tp_eval, jlaw_meta_info=_jlaw_m,
+                vbp_c1.metric("🎯 VBP 籌碼共識蓋頭 (POC)", f"{float(_vbp_diag.get('poc_price', 0.0)):.2f} {currency}", f"所屬板塊: {_heat_diag['candidate_sector']}")
+                vbp_c2.metric("📐 70% 價值區 (VAL ~ VAH)", f"{float(_vbp_diag.get('val_price', 0.0)):.2f} ~ {float(_vbp_diag.get('vah_price', 0.0)):.2f}", f"上方套牢反壓 {_vbp_diag.get('overhead_supply_pct', 0.0):.1f}% (下方僅 {_vbp_diag.get('downside_support_pct', 0.0):.1f}%)")
+                vbp_c3.metric("📉 下方籌碼通道性質", "🩸 下方 LVN 籌碼真空暴跌區" if _vbp_diag.get("is_downside_lvn_vacuum") else ("🧱 下方 HVN 密集支撐區" if _vbp_diag.get("is_supported_by_downside_hvn") else "🟠 常規籌碼區"), _vbp_diag.get("short_vbp_position_label", "")[:18])
+                _vsa_short_tag = "🔴 Upthrust誘多派發" if _vbp_diag.get("vsa_upthrust_distribution") else ("🩸 No-Demand無需求反抽" if _vbp_diag.get("vsa_no_demand") else ("⚠️ Spring底部吸收(防反彈)" if _vbp_diag.get("vsa_spring_absorption") else "⚪ 空頭量價常規"))
+                vbp_c4.metric("🔬 Wyckoff VSA 空頭量價", _vsa_short_tag, "多頭買盤無力確認" if (_vbp_diag.get("vsa_upthrust_distribution") or _vbp_diag.get("vsa_no_demand")) else "觀察反抽量能")
+                render_atomic_alert_group([
+                    ("success" if _dc_diag.get("short_supply_dominant") else ("error" if _s_dom < 42.0 else "warning"), _dc_diag.get("short_deepchart_detail", "")),
+                    ("info", f"📊 **VBP 空頭籌碼戰術導航**：{_vbp_diag.get('short_vbp_position_label', '')} — {_vbp_diag.get('short_vbp_tactical_advice', '')}")
+                ])
+            else:
+                dc_c1.metric("🧠 前高空單消化總分", f"{_dc_diag.get('absorption_score', 50.0):.0f} / 100分", _dc_diag.get("deepchart_badge", "-"))
+                dc_c2.metric("🔄 右側換手消化率", f"{_dc_diag.get('absorption_ratio_pct', 0.0):.1f}%", f"前高阻力 {float(_dc_diag.get('prior_res_price', 0.0)):.2f} 測試 {_dc_diag.get('tests_count', 0)} 次")
+                dc_c3.metric("📉 阻力區賣壓枯竭度", "✅ 賣壓已枯竭" if _dc_diag.get("seller_exhaustion_ok") else "⚠️ 賣壓仍存", "VCP縮量測試確認" if _dc_diag.get("seller_exhaustion_ok") else "需防空單砸盤")
+                dc_c4.metric("📊 訂單流微結構 (CVD & 口袋支點)", "🟢 淨買盤吸收" if _dc_diag.get("cvd_10d_positive") else "🔴 淨賣壓偏重", "🔥 出現口袋支點" if _dc_diag.get("pocket_pivot_10d") else "常規量能")
+
+                vbp_c1.metric("🎯 VBP 籌碼共識中心 (POC)", f"{float(_vbp_diag.get('poc_price', 0.0)):.2f} {currency}", f"所屬板塊: {_heat_diag['candidate_sector']}")
+                vbp_c2.metric("📐 70% 價值區 (VAL ~ VAH)", f"{float(_vbp_diag.get('val_price', 0.0)):.2f} ~ {float(_vbp_diag.get('vah_price', 0.0)):.2f}", f"上方套牢佔比 {_vbp_diag.get('overhead_supply_pct', 0.0):.1f}%")
+                vbp_c3.metric("🚀 上方籌碼通道性質", "⚡ LVN 籌碼真空加速區" if _vbp_diag.get("is_in_lvn_vacuum") else ("🧱 HVN 套牢密集阻力" if _vbp_diag.get("is_blocked_by_hvn") else "🟡 常規籌碼區"), _vbp_diag.get("vbp_position_label", "")[:18])
+                _vsa_tag = "🟢 No-Supply縮量無供給" if _vbp_diag.get("vsa_no_supply") else ("🔥 Spring洗盤吸收" if _vbp_diag.get("vsa_spring_absorption") else ("🔴 Upthrust派發" if _vbp_diag.get("vsa_upthrust_distribution") else "⚪ 量價常規"))
+                vbp_c4.metric("🔬 Wyckoff VSA 量價散度", _vsa_tag, "空頭賣壓枯竭確認" if _vbp_diag.get("vsa_no_supply") else "觀察量價配合")
+                render_atomic_alert_group([
+                    ("success" if _dc_diag.get("shorts_absorbed") else ("error" if _dc_diag.get("heavy_overhead_supply") else "warning"), _dc_diag.get("deepchart_detail", "")),
+                    ("info", f"📊 **VBP 籌碼分佈戰術導航**：{_vbp_diag.get('vbp_position_label', '')} — {_vbp_diag.get('vbp_tactical_advice', '')}")
+                ])
+
+            # OLD:
+            # _hol_diag = df.attrs.get("holistic_grade_info") or evaluate_holistic_setup_grade_and_edge(...)
+            # NEW: [v31.0 強制根據當前生效之 plan_type 與 _tp_eval 即時重算 8 維度評級，徹底解決視角切換時緩存不更新漏洞]
+            _hol_diag = evaluate_holistic_setup_grade_and_edge(
+                df=df, plan_type=plan_type if plan_type in ["LONG", "SHORT"] else ("SHORT" if _is_short_view else "LONG"),
+                trade_plan_eval=_tp_eval, jlaw_meta_info=_jlaw_m,
                 lei_struct_info=_lei_st, lei_ded_forecast=_lei_ded, martin_luk_info=_ml_diag,
                 deepchart_info=_dc_diag, vbp_vsa_info=_vbp_diag, invalidation_info=_inv_info
             )
-            st.markdown("### 🏆 機構級 8 維度交易品質評級 (Setup Grade) 與高潮延伸主動鎖潤導航 (v30.0)")
+            df.attrs["holistic_grade_info"] = _hol_diag
+            if _is_short_view:
+                st.markdown("### 🏆 機構級 8 維度空頭品質評級 (Short Setup Grade) 與急跌超賣回補導航 (v31.0 空頭專版)")
+            else:
+                st.markdown("### 🏆 機構級 8 維度交易品質評級 (Setup Grade) 與高潮延伸主動鎖潤導航 (v31.0)")
             hg1, hg2, hg3, hg4 = st.columns(4)
             hg1.metric("🏆 綜合交易品質評級", _hol_diag.get("setup_grade", "-"), f"信心指數 {_hol_diag.get('conviction_score', 0):.1f}/100")
             hg2.metric("⚖️ 建議動態倉位權重", f"{_hol_diag.get('sizing_multiplier', 0)*100:.0f}% 標準倉", "S/A+級集中火力，B/C級防守")
-            hg3.metric("🚀 RS 相對強弱線創高", "🔥 RS率先創20日新高" if _hol_diag.get("rs_leads_price") else "⚪ 常規隨勢運行", "機構逆勢掃貨指標")
-            hg4.metric("💰 高潮延伸主動減倉位", f"{_hol_diag.get('climax_extension_tp', 0):.2f} {currency}" if pd.notna(_hol_diag.get("climax_extension_tp")) else "-", "⚠️ 現價已過熱勿追" if _hol_diag.get("is_overextended_now") else "偏離20MA達3.2x ATR鎖潤位")
+            # OLD:
+            # hg3.metric("🚀 RS 相對強弱線創高", "🔥 RS率先創20日新高" if _hol_diag.get("rs_leads_price") else "⚪ 常規隨勢運行", "機構逆勢掃貨指標")
+            # hg4.metric("💰 高潮延伸主動減倉位", f"{_hol_diag.get('climax_extension_tp', 0):.2f} {currency}" if pd.notna(_hol_diag.get("climax_extension_tp")) else "-", "⚠️ 現價已過熱勿追" if _hol_diag.get("is_overextended_now") else "偏離20MA達3.2x ATR鎖潤位")
+            # NEW: [v31.0 動態渲染多空專屬 RS 創高/破底與高潮減倉/超賣回補指標卡]
+            hg3.metric(
+                _hol_diag.get("rs_metric_title", "🚀 RS 相對強弱線創高"),
+                _hol_diag.get("rs_metric_val", "⚪ 常規隨勢運行"),
+                _hol_diag.get("rs_metric_delta", "觀察相對大盤強弱")
+            )
+            hg4.metric(
+                _hol_diag.get("climax_metric_title", "💰 高潮延伸主動減倉位"),
+                f"{_hol_diag.get('climax_extension_tp', 0):.2f} {currency}" if pd.notna(_hol_diag.get("climax_extension_tp")) else "-",
+                _hol_diag.get("climax_metric_delta", "偏離20MA達3.2x ATR鎖潤位")
+            )
             _pillars_txt = " ｜ ".join(_hol_diag.get("eight_pillars_passed", [])) if _hol_diag.get("eight_pillars_passed") else "暫無達標維度"
             _missing_txt = ("<br>⚠️ **待補強維度**：" + " ｜ ".join(_hol_diag.get("eight_pillars_missing", []))) if _hol_diag.get("eight_pillars_missing") else ""
             render_atomic_alert(
-                f"{_hol_diag.get('sizing_advice', '')}\n\n✅ **已達成之機構級優勢**：{_pillars_txt}{_missing_txt}",
+                f"{_hol_diag.get('sizing_advice', '')}\n\n✅ **已達成之機構級{'空頭' if _is_short_view else '多頭'}優勢**：{_pillars_txt}{_missing_txt}",
                 "success" if _hol_diag.get("grade_code") in ["S", "A+"] else ("info" if _hol_diag.get("grade_code") == "A" else "warning")
             )
 
@@ -6895,24 +7267,37 @@ elif mode == mode_options[1]:
             m4.metric("短線阻力", f"{last['ResShort']:.2f}")
             m5.metric("MACD 柱體", f"{last['MACDHist']:.3f}")
 
-            # 抵扣價防禦判定顯示
-            st.markdown("### 🧱 支撐阻力與抵扣價分析 (防假跌破)")
-            st.caption("判斷真假跌破的秘訣：只要【現價】大於【抵扣價】，即使股價跌破均線，該均線未來仍會繼續向上發散。")
+            # 抵扣價防禦判定顯示 (v31.0 多空雙向語義對齊)
+            if _is_short_view:
+                st.markdown("### 🧱 支撐阻力與抵扣價分析 (空頭防假突破 & 均線助跌診斷)")
+                st.caption("空頭判斷真假反抽的秘訣：只要【現價】低於高企的【抵扣價】，即使股價短暫反彈刺穿均線，該均線未來仍會繼續下彎蓋頭助跌（假突破真壓制）。")
+            else:
+                st.markdown("### 🧱 支撐阻力與抵扣價分析 (防假跌破)")
+                st.caption("判斷真假跌破的秘訣：只要【現價】大於【抵扣價】，即使股價跌破均線，該均線未來仍會繼續向上發散。")
             sr1, sr2, sr3, sr4, sr5 = st.columns(5)
             
             deduct_20 = last.get('SMA20_Deduction', 0)
-            status_20 = "✅ 均線向上" if last['Close'] > deduct_20 else "❌ 均線下彎"
+            if _is_short_view:
+                status_20 = "🩸 均線下彎助跌" if last['Close'] < deduct_20 else "⚠️ 均線上翹托底"
+            else:
+                status_20 = "✅ 均線向上" if last['Close'] > deduct_20 else "❌ 均線下彎"
             sr1.metric("🟢 短期支撐 (20日)", f"{last['SupShort']:.2f}", f"20日抵扣: {deduct_20:.2f} ({status_20})")
             
             sr2.metric("🔴 短期阻力 (20日)", f"{last['ResShort']:.2f}")
             
             deduct_50 = last.get('SMA50_Deduction', 0)
-            status_50 = "✅ 均線向上" if last['Close'] > deduct_50 else "❌ 均線下彎"
-            sr3.metric("🟢 中期支撐 (50日)", f"{last['SMA50']:.2f}", f"50日抵扣: {deduct_50:.2f} ({status_50})")
+            if _is_short_view:
+                status_50 = "🩸 均線下彎助跌" if last['Close'] < deduct_50 else "⚠️ 均線上翹托底"
+            else:
+                status_50 = "✅ 均線向上" if last['Close'] > deduct_50 else "❌ 均線下彎"
+            sr3.metric("🟢 中期50MA均線位", f"{last['SMA50']:.2f}", f"50日抵扣: {deduct_50:.2f} ({status_50})")
             
             sr4.metric("🟢 長期支撐 (60日低點)", f"{last['SupLong']:.2f}", f"60MA抵扣: {float(last.get('SMA60_Deduction', 0)):.2f}")
             sr5.metric("🔴 長期阻力 (60日高點)", f"{last['ResLong']:.2f}", f"5日箱體波幅: {float(last.get('Tight_Box_5d_Pct', 0)):.1f}%")
-            st.caption(f"🔮 **LEI 未來兩週抵扣價方框推演**：20MA → {_lei_ded.get('forecast_20_label', '')} ｜ 60MA → {_lei_ded.get('forecast_60_label', '')}")
+            if _is_short_view:
+                st.caption(f"🔮 **LEI 未來兩週空頭抵扣價推演**：20MA → {_lei_ded.get('short_forecast_20_label', _lei_ded.get('forecast_20_label', ''))} ｜ 60MA → {_lei_ded.get('short_forecast_60_label', _lei_ded.get('forecast_60_label', ''))}")
+            else:
+                st.caption(f"🔮 **LEI 未來兩週抵扣價方框推演**：20MA → {_lei_ded.get('forecast_20_label', '')} ｜ 60MA → {_lei_ded.get('forecast_60_label', '')}")
 
             st.markdown("### 💰 富途牛牛 (Futu) 實戰投資門檻與交易成本試算")
             col_lot1, col_lot2, col_lot3, col_lot4 = st.columns(4)
@@ -6923,15 +7308,18 @@ elif mode == mode_options[1]:
                 lot_size = st.number_input("一手股數 (自動匹配/手動修改):", min_value=1, value=default_lot, step=100 if market_type == "HK" else 1)
             
             min_invest_amount = lot_size * last['Close']
-            _lot_futu_fee = compute_futu_real_fees(market_type=market_type, price=float(last['Close']), shares=int(lot_size))
+            _lot_futu_fee = compute_futu_real_fees(market_type=market_type, price=float(last['Close']), shares=int(lot_size), is_sell=_is_short_view)
             _one_lot_risk = lot_size * abs(float(target_entry) - float(stop_loss)) + _lot_futu_fee["round_trip_fee"]
             
             with col_lot2:
-                st.metric("一手買入金額", f"{min_invest_amount:,.2f} {currency}", f"富途打和價 {_lot_futu_fee['breakeven_long_price']:.2f}")
+                if _is_short_view:
+                    st.metric("一手沽空市值", f"{min_invest_amount:,.2f} {currency}", f"富途空頭打和價 {_lot_futu_fee['breakeven_short_price']:.2f}")
+                else:
+                    st.metric("一手買入金額", f"{min_invest_amount:,.2f} {currency}", f"富途打和價 {_lot_futu_fee['breakeven_long_price']:.2f}")
             with col_lot3:
                 st.metric("一手富途買賣雙邊總費用", f"{_lot_futu_fee['round_trip_fee']:,.2f} {currency}", f"摩擦成本 {_lot_futu_fee['round_trip_pct']:.2f}% (含印花稅/平台費)")
             with col_lot4:
-                st.metric("買入 1 手建議最低總本金 (1% 風險)", f"{(_one_lot_risk * 100.0):,.0f} {currency}", help="按『1手止損金額 + 富途雙邊手續費 = 總資金 1%』精算之最低帳戶規模")
+                st.metric("沽空 1 手建議最低總本金 (1% 風險)" if _is_short_view else "買入 1 手建議最低總本金 (1% 風險)", f"{(_one_lot_risk * 100.0):,.0f} {currency}", help="按『1手止損金額 + 富途雙邊手續費 = 總資金 1%』精算之最低帳戶規模")
             
             st.markdown("---")
 
@@ -6988,11 +7376,17 @@ elif mode == mode_options[1]:
                 p5.metric("交易方向", "⚪ 觀望")
             else:
                 _entry_diff_pct = (target_entry - last['Close']) / last['Close'] * 100.0
-                p1.metric("🎯 建議掛單進場位", f"{target_entry:.2f} {currency}", delta=f"距現價 {_entry_diff_pct:+.2f}%")
+                p1.metric("🎯 建議沽空掛單位" if plan_type == "SHORT" else "🎯 建議買入掛單位", f"{target_entry:.2f} {currency}", delta=f"距現價 {_entry_diff_pct:+.2f}%")
                 sl_diff = stop_loss - target_entry
-                p2.metric("🛡️ 結構防守止損位", f"{stop_loss:.2f} {currency}", delta=f"{sl_diff:+.2f} (-{_tp_eval.get('stop_pct', 0):.1f}%)", delta_color="inverse")
-                tp_diff = take_profit - target_entry
-                p3.metric("💰 第一結構止盈 (TP1)", f"{take_profit:.2f} {currency}", delta=f"{tp_diff:+.2f}")
+                if plan_type == "SHORT":
+                    p2.metric("🛡️ 空頭防守止損位", f"{stop_loss:.2f} {currency}", delta=f"+{abs(sl_diff):.2f} (風險 -{_tp_eval.get('stop_pct', 0):.1f}%)", delta_color="inverse")
+                    tp_diff = take_profit - target_entry
+                    _tp_drop_pct = abs(tp_diff) / max(target_entry, 1e-6) * 100.0
+                    p3.metric("💰 第一空頭回補目標 (TP1)", f"{take_profit:.2f} {currency}", delta=f"{tp_diff:+.2f} (目標獲利 +{_tp_drop_pct:.1f}%)", delta_color="inverse")
+                else:
+                    p2.metric("🛡️ 結構防守止損位", f"{stop_loss:.2f} {currency}", delta=f"{sl_diff:+.2f} (-{_tp_eval.get('stop_pct', 0):.1f}%)", delta_color="inverse")
+                    tp_diff = take_profit - target_entry
+                    p3.metric("💰 第一結構止盈 (TP1)", f"{take_profit:.2f} {currency}", delta=f"{tp_diff:+.2f}")
                 p4.metric("⚖️ 真實結構盈虧比", f"{_tp_eval.get('planned_rr', 0):.2f} R", delta=f"次級目標 {_tp_eval.get('tp2_rr', 0):.2f} R")
                 p5.metric("🔄 交易方向", "🟢 做多" if plan_type == "LONG" else "🔴 做空")
 
