@@ -336,13 +336,72 @@ def compute_ma_slope_and_pullback_trigger(df: pd.DataFrame) -> Dict[str, Any]:
 import urllib.request as _urllib_req
 import urllib.parse as _urllib_parse
 import xml.etree.ElementTree as _xml_et
+import ssl as _ssl
+import json as _json
+import re as _re
+import html as _html
 
-@st.cache_data(ttl=21600)
+try:
+    import requests as _requests
+    import urllib3 as _urllib3
+    _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)
+    _HAS_REQUESTS = True
+except Exception:
+    _HAS_REQUESTS = False
+
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
+    "Accept-Language": "zh-HK,zh-TW;q=0.9,zh;q=0.8,en-US;q=0.7,en;q=0.6",
+    "Cache-Control": "no-cache",
+}
+
+def _safe_http_get_bytes(url: str, timeout: float = 4.5, extra_headers: Optional[Dict[str, str]] = None) -> Tuple[Optional[bytes], str]:
+    """
+    [v37.1 跨平台防 SSL 憑證報錯與防反爬蟲 HTTP 讀取器]
+    解決 macOS / Windows Python 執行 urllib.request.urlopen 時因缺乏根憑證拋出
+    `[SSL: CERTIFICATE_VERIFY_FAILED]` 以及單純 User-Agent: Mozilla/5.0 被 Google/Yahoo 403 攔截之問題。
+    優先使用 requests (自動支援 certifi 與 verify=False 容錯)，再以 unverified SSL context 之 urllib 兜底。
+    """
+    hdrs = dict(_BROWSER_HEADERS)
+    if extra_headers:
+        hdrs.update(extra_headers)
+    last_err = ""
+    if _HAS_REQUESTS:
+        for verify_ssl in (True, False):
+            try:
+                resp = _requests.get(url, headers=hdrs, timeout=timeout, verify=verify_ssl)
+                if resp.status_code == 200 and resp.content:
+                    return resp.content, ""
+                last_err = f"HTTP {resp.status_code}"
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {str(e)[:80]}"
+    try:
+        ctx = _ssl._create_unverified_context()
+        req = _urllib_req.Request(url, headers=hdrs)
+        with _urllib_req.urlopen(req, timeout=timeout, context=ctx) as resp:
+            data = resp.read()
+            if data:
+                return data, ""
+    except Exception as e:
+        last_err = f"{type(e).__name__}: {str(e)[:80]}"
+    return None, last_err
+
+_CORP_EVENTS_MEM_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
 def _fetch_corporate_events_calendar(ticker: str) -> Dict[str, Any]:
     """
-    [v37.0 三層財報日期與除淨日提取器]
-    支援從 yfinance Ticker.calendar (Dict 或 DataFrame)、Ticker.info (earningsTimestamp / exDividendDate)
-    及 Ticker.get_earnings_dates 提取確切業績公佈日期 (YYYY-MM-DD)、距離天數與除淨日。
+    [v37.1 四層財報日期與除淨日提取器 — 防空結果緩存污染]
+    支援從：
+    1) yfinance Ticker.calendar (Dict 或 DataFrame)
+    2) yfinance Ticker.info (earningsTimestamp / exDividendDate)
+    3) yfinance Ticker.get_earnings_dates(limit=8) (專治港股與部分美股 calendar 為空)
+    4) Yahoo Finance quoteSummary API 直接查詢兜底
+    提取確切業績公佈日期 (YYYY-MM-DD)、距離天數與除淨日。
     """
     out = {
         "earnings_date_str": None,
@@ -352,6 +411,11 @@ def _fetch_corporate_events_calendar(ticker: str) -> Dict[str, Any]:
     }
     if not ticker:
         return out
+    now_ts = time.time()
+    cached = _CORP_EVENTS_MEM_CACHE.get(ticker)
+    if cached and (now_ts - cached[0] < 21600):
+        return dict(cached[1])
+
     today_d = datetime.now().date()
     cand_dates = []
     try:
@@ -360,7 +424,7 @@ def _fetch_corporate_events_calendar(ticker: str) -> Dict[str, Any]:
         try:
             cal = t.calendar
             if isinstance(cal, dict):
-                ed_raw = cal.get("Earnings Date") or cal.get("Earnings High")
+                ed_raw = cal.get("Earnings Date") or cal.get("Earnings High") or cal.get("Earnings Low")
                 if isinstance(ed_raw, (list, tuple)):
                     for item in ed_raw:
                         cand_dates.append(pd.to_datetime(item).date())
@@ -394,12 +458,28 @@ def _fetch_corporate_events_calendar(ticker: str) -> Dict[str, Any]:
         except Exception:
             pass
 
-        # Pick nearest upcoming or very recent (-2 to +90 days) earnings date
-        valid_future = sorted([d for d in set(cand_dates) if -2 <= (d - today_d).days <= 90])
+        # Layer 3: t.get_earnings_dates(limit=8) (當 Layer 1/2 皆空時調用)
+        if not cand_dates:
+            try:
+                ed_df = t.get_earnings_dates(limit=8)
+                if isinstance(ed_df, pd.DataFrame) and not ed_df.empty:
+                    for idx_val in ed_df.index:
+                        try:
+                            cand_dates.append(pd.to_datetime(idx_val).date())
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # Pick nearest upcoming or very recent (-3 to +120 days) earnings date
+        valid_future = sorted([d for d in set(cand_dates) if 0 <= (d - today_d).days <= 120])
+        if not valid_future:
+            valid_future = sorted([d for d in set(cand_dates) if -5 <= (d - today_d).days < 0], reverse=True)
         if valid_future:
             best_d = valid_future[0]
             out["earnings_date_str"] = best_d.strftime("%Y-%m-%d")
             out["days_to_earnings"] = int((best_d - today_d).days)
+            _CORP_EVENTS_MEM_CACHE[ticker] = (now_ts, dict(out))
     except Exception:
         pass
     return out
@@ -512,25 +592,37 @@ def detect_earnings_and_gap_risk(df: pd.DataFrame, ticker: str = "") -> Dict[str
 
 def _classify_single_news_headline(title: str, summary: str = "") -> Dict[str, Any]:
     """
-    [v37.0 雙語金融 NLP 催化劑分類與利好/利空評分器]
-    支援繁/簡體中文與英文財經新聞標題及摘要，識別 6 大波段催化劑類別與正負面情緒權重，並處理否定詞反轉。
+    [v37.1 雙語金融 NLP 催化劑分類與利好/利空評分器 (高靈敏度實戰版)]
+    支援繁/簡體中文與英文財經新聞標題及摘要，涵蓋強催化劑與日常多空方向詞彙，識別 6 大波段催化劑類別與正負面情緒權重，並處理否定詞反轉。
     """
     text = f"{title} {summary}".lower()
     bull_keywords = [
+        # 強催化劑 (+20 ~ +38)
         ("盈喜", 35, "📊 業績財測"), ("扭虧", 35, "📊 業績財測"), ("純利增", 28, "📊 業績財測"), ("利潤增", 28, "📊 業績財測"),
-        ("超預期", 30, "📊 業績財測"), ("勝預期", 30, "📊 業績財測"), ("創新高", 22, "🚀 業務與動能"), ("突破", 18, "🚀 業務與動能"),
+        ("超預期", 30, "📊 業績財測"), ("勝預期", 30, "📊 業績財測"), ("創新高", 24, "🚀 業務與動能"), ("破頂", 24, "🚀 業務與動能"),
         ("回購", 26, "💎 回購與派息"), ("增持", 26, "💎 回購與派息"), ("特別息", 25, "💎 回購與派息"), ("派息增", 24, "💎 回購與派息"),
         ("上調目標價", 28, "🏦 機構評級"), ("升目標價", 28, "🏦 機構評級"), ("籲買入", 24, "🏦 機構評級"), ("首予買入", 25, "🏦 機構評級"),
         ("跑贏大市", 22, "🏦 機構評級"), ("獲批", 28, "🚀 業務與動能"), ("中標", 26, "🚀 業務與動能"), ("戰略合作", 20, "🚀 業務與動能"),
-        ("大漲", 18, "🚀 業務與動能"), ("飆升", 20, "🚀 業務與動能"), ("急升", 18, "🚀 業務與動能"),
+        ("大漲", 20, "🚀 業務與動能"), ("飆升", 22, "🚀 業務與動能"), ("急升", 20, "🚀 業務與動能"), ("暴漲", 22, "🚀 業務與動能"),
         ("beat", 28, "📊 業績財測"), ("beats", 28, "📊 業績財測"), ("surges", 22, "🚀 業務與動能"), ("soars", 24, "🚀 業務與動能"),
         ("jumps", 20, "🚀 業務與動能"), ("rallies", 20, "🚀 業務與動能"), ("upgrade", 28, "🏦 機構評級"), ("upgraded", 28, "🏦 機構評級"),
         ("raises target", 28, "🏦 機構評級"), ("price target raised", 28, "🏦 機構評級"), ("outperform", 22, "🏦 機構評級"),
         ("overweight", 20, "🏦 機構評級"), ("buyback", 26, "💎 回購與派息"), ("repurchase", 24, "💎 回購與派息"),
         ("raises guidance", 32, "📊 業績財測"), ("strong demand", 24, "🚀 業務與動能"), ("record revenue", 28, "📊 業績財測"),
-        ("fda approval", 32, "🚀 業務與動能"), ("contract win", 26, "🚀 業務與動能"), ("partnership", 18, "🚀 業務與動能")
+        ("fda approval", 32, "🚀 業務與動能"), ("contract win", 26, "🚀 業務與動能"), ("partnership", 18, "🚀 業務與動能"),
+        # 中度正向動能與利好詞彙 (+12 ~ +18)
+        ("利好", 18, "🚀 業務與動能"), ("唱好", 18, "🏦 機構評級"), ("看好", 16, "🏦 機構評級"), ("買入", 15, "🏦 機構評級"),
+        ("突破", 16, "🚀 業務與動能"), ("造好", 15, "🚀 業務與動能"), ("向好", 15, "🚀 業務與動能"), ("回升", 14, "🚀 業務與動能"),
+        ("反彈", 14, "🚀 業務與動能"), ("走高", 15, "🚀 業務與動能"), ("上揚", 15, "🚀 業務與動能"), ("強勁", 16, "📊 業績財測"),
+        ("增長", 14, "📊 業績財測"), ("營收增", 22, "📊 業績財測"), ("多賺", 24, "📊 業績財測"), ("吸納", 16, "💎 回購與派息"),
+        ("北水掃貨", 20, "💎 回購與派息"), ("淨流入", 18, "💎 回購與派息"), ("訂單", 15, "🚀 業務與動能"), ("量產", 18, "🚀 業務與動能"),
+        ("bullish", 18, "🏦 機構評級"), ("buy", 14, "🏦 機構評級"), ("top pick", 22, "🏦 機構評級"), ("gains", 15, "🚀 業務與動能"),
+        ("rises", 14, "🚀 業務與動能"), ("climbs", 15, "🚀 業務與動能"), ("higher", 12, "🚀 業務與動能"), ("growth", 14, "📊 業績財測"),
+        ("strong", 15, "📊 業績財測"), ("positive", 14, "🚀 業務與動能"), ("record high", 24, "🚀 業務與動能"), ("breakout", 18, "🚀 業務與動能"),
+        ("ai demand", 20, "🚀 業務與動能"), ("dividend", 14, "💎 回購與派息"), ("profit rises", 24, "📊 業績財測")
     ]
     bear_keywords = [
+        # 強利空與黑天鵝 (-22 ~ -40)
         ("盈警", -38, "📊 業績財測"), ("轉虧", -36, "📊 業績財測"), ("虧損擴大", -35, "📊 業績財測"), ("純利跌", -28, "📊 業績財測"),
         ("遜預期", -30, "📊 業績財測"), ("低於預期", -30, "📊 業績財測"), ("差過預期", -30, "📊 業績財測"),
         ("配股", -36, "🩸 配股抽水/減持"), ("折讓", -32, "🩸 配股抽水/減持"), ("抽水", -36, "🩸 配股抽水/減持"), ("先舊後新", -34, "🩸 配股抽水/減持"),
@@ -543,7 +635,16 @@ def _classify_single_news_headline(title: str, summary: str = "") -> Dict[str, A
         ("downgrade", -28, "🏦 機構評級"), ("downgraded", -28, "🏦 機構評級"), ("cuts target", -26, "🏦 機構評級"), ("underperform", -24, "🏦 機構評級"),
         ("sec probe", -36, "⚖️ 監管與黑天鵝"), ("investigation", -32, "⚖️ 監管與黑天鵝"), ("lawsuit", -28, "⚖️ 監管與黑天鵝"),
         ("short seller", -35, "⚖️ 監管與黑天鵝"), ("secondary offering", -32, "🩸 配股抽水/減持"), ("dilution", -30, "🩸 配股抽水/減持"),
-        ("insider selling", -24, "🩸 配股抽水/減持"), ("plunges", -26, "📉 市場異動"), ("tumbles", -24, "📉 市場異動"), ("slumps", -24, "📉 市場異動")
+        ("insider selling", -24, "🩸 配股抽水/減持"), ("plunges", -26, "📉 市場異動"), ("tumbles", -24, "📉 市場異動"), ("slumps", -24, "📉 市場異動"),
+        # 中度負向與風險詞彙 (-12 ~ -20)
+        ("利淡", -18, "📉 市場異動"), ("利空", -18, "📉 市場異動"), ("看淡", -16, "🏦 機構評級"), ("唱淡", -18, "🏦 機構評級"),
+        ("下跌", -14, "📉 市場異動"), ("受壓", -15, "📉 市場異動"), ("走弱", -15, "📉 市場異動"), ("回落", -12, "📉 市場異動"),
+        ("少賺", -22, "📊 業績財測"), ("倒退", -20, "📊 業績財測"), ("虧損", -22, "📊 業績財測"), ("裁員", -18, "📉 市場異動"),
+        ("關稅", -16, "⚖️ 監管與黑天鵝"), ("制裁", -28, "⚖️ 監管與黑天鵝"), ("禁令", -26, "⚖️ 監管與黑天鵝"), ("沽壓", -18, "📉 市場異動"),
+        ("bearish", -18, "🏦 機構評級"), ("sell", -14, "🏦 機構評級"), ("falls", -14, "📉 市場異動"), ("drops", -15, "📉 市場異動"),
+        ("slides", -15, "📉 市場異動"), ("declines", -14, "📉 市場異動"), ("lower", -12, "📉 市場異動"), ("weak", -15, "📊 業績財測"),
+        ("loss", -18, "📊 業績財測"), ("warning", -20, "📊 業績財測"), ("tariff", -16, "⚖️ 監管與黑天鵝"), ("sanction", -26, "⚖️ 監管與黑天鵝"),
+        ("delay", -18, "🚀 業務與動能"), ("layoffs", -16, "📉 市場異動"), ("pullback", -12, "📉 市場異動")
     ]
 
     score = 0
@@ -552,31 +653,41 @@ def _classify_single_news_headline(title: str, summary: str = "") -> Dict[str, A
 
     for kw, w, cat in bull_keywords:
         if kw in text:
-            # 檢查否定詞 (如 "未超預期", "無回購")
-            neg_check = any(neg + kw in text for neg in ["不", "未", "無", "難", "not ", "no ", "fails to "])
+            neg_check = any(neg + kw in text for neg in ["不", "未", "無", "難", "not ", "no ", "fails to ", "never "])
             if neg_check:
                 score -= int(w * 0.8)
                 matched_terms.append(f"否定:{kw}")
             else:
                 score += w
-                detected_cat = cat
+                if detected_cat == "📰 綜合市場消息" or w >= 22:
+                    detected_cat = cat
                 matched_terms.append(kw)
 
     for kw, w, cat in bear_keywords:
         if kw in text:
-            score += w  # w is negative
-            detected_cat = cat
-            matched_terms.append(kw)
+            neg_check = any(neg + kw in text for neg in ["不", "未", "無", "難", "not ", "no "])
+            if neg_check:
+                score += int(abs(w) * 0.5)
+            else:
+                score += w  # w is negative
+                if detected_cat == "📰 綜合市場消息" or abs(w) >= 22:
+                    detected_cat = cat
+                matched_terms.append(kw)
 
     score = max(-100, min(100, score))
-    is_black_swan = any(k in text for k in ["盈警", "配股", "抽水", "調查", "停牌", "做空報告", "沽空機構", "cuts guidance", "sec probe", "short seller", "secondary offering"])
-    if is_black_swan and score <= -20:
+    is_black_swan = any(
+        k in text for k in [
+            "盈警", "配股", "抽水", "調查", "停牌", "退市", "做空報告", "沽空機構", "制裁",
+            "cuts guidance", "sec probe", "short seller", "secondary offering", "delist"
+        ]
+    )
+    if is_black_swan and score <= -15:
         label = "🚨 重大利空/黑天鵝"
         kind = "error"
-    elif score >= 15:
+    elif score >= 10:
         label = "🟢 利好 (Bullish)"
         kind = "success"
-    elif score <= -15:
+    elif score <= -10:
         label = "🔴 利空 (Bearish)"
         kind = "error"
     else:
@@ -592,19 +703,149 @@ def _classify_single_news_headline(title: str, summary: str = "") -> Dict[str, A
         "matched_terms": matched_terms[:3]
     }
 
-@st.cache_data(ttl=900)
+
+def _clean_stock_query_terms(ticker: str, stock_name: str, market_type: str) -> Dict[str, str]:
+    """
+    [v37.1 搜尋關鍵字淨化器 — 根治 Google News `-W` / `-SW` 負向排除語法 Bug]
+    原因：港股名稱如「小米集團-W」、「美團-W」、「阿里巴巴-W」、「京東集團-SW」含有 `-W` 或 `-SW`，
+    直接丟入 Google Search (`q=小米集團-W`) 會被 Google 當成布林減號運算符 (`NOT W`)，或因名稱過長導致 0 結果！
+    """
+    raw_t = str(ticker or "").strip().upper()
+    base_symbol = raw_t.replace(".HK", "")
+    hk_num_no_zero = base_symbol.lstrip("0") or "0"
+    hk_num_4d = f"{int(hk_num_no_zero):04d}" if hk_num_no_zero.isdigit() else base_symbol
+
+    # 移除會觸發 Google Search 排除語法或干擾匹配的尾綴
+    clean_name = str(stock_name or "").strip()
+    clean_name = _re.sub(r"-(W|SW|S|B|R|SS|H)", "", clean_name, flags=_re.IGNORECASE)
+    for noise in [
+        "股份有限公司", "控股有限公司", "集團有限公司", "有限公司", "控股", "集團", "股份",
+        "Corporation", "Incorporated", "Holdings", "Limited", "Company",
+        "Corp.", "Corp", "Inc.", "Inc", "Ltd.", "Ltd", "PLC", "plc", "ADR", "Class A", "Class B", "Class C", ","
+    ]:
+        clean_name = _re.sub(_re.escape(noise), " ", clean_name, flags=_re.IGNORECASE)
+    clean_name = _re.sub(r"\s+", " ", clean_name).strip()
+    if not clean_name or clean_name.upper() == raw_t:
+        clean_name = base_symbol
+
+    # 針對熱門美股/港股補充中英文對照別名，大幅提升新聞召回率
+    us_cn_alias_map = {
+        "NVDA": "輝達 英偉達 NVIDIA", "TSLA": "特斯拉 Tesla", "AAPL": "蘋果 Apple",
+        "MSFT": "微軟 Microsoft", "META": "Meta Facebook", "GOOGL": "Google Alphabet",
+        "AMZN": "亞馬遜 Amazon", "AMD": "超微 AMD", "TSM": "台積電 TSMC",
+        "SNOW": "Snowflake", "CRWD": "CrowdStrike", "MU": "美光 Micron",
+        "DDOG": "Datadog", "PLTR": "Palantir", "SMCI": "美超微 Super Micro",
+        "AVGO": "博通 Broadcom", "NFLX": "Netflix", "COIN": "Coinbase", "MSTR": "MicroStrategy",
+        "ARM": "Arm Holdings", "ASML": "ASML 阿斯麥", "INTC": "英特爾 Intel", "QCOM": "高通 Qualcomm"
+    }
+    if market_type == "HK":
+        # 港股中文搜尋詞：例如 `"騰訊" OR "0700"`、`"小米" OR "1810"`
+        zh_q = f"{clean_name} {hk_num_4d}" if clean_name != base_symbol else f"{hk_num_4d}.HK 港股"
+        en_q = f"{hk_num_4d}.HK {clean_name} stock"
+        bing_q = f"{clean_name} {hk_num_4d} 港股"
+    else:
+        cn_alias = us_cn_alias_map.get(base_symbol, clean_name)
+        zh_q = f"{base_symbol} {cn_alias} 美股"
+        en_q = f"{base_symbol} {clean_name} stock" if clean_name.upper() != base_symbol else f"{base_symbol} stock"
+        bing_q = f"{base_symbol} {clean_name} stock news"
+
+    return {
+        "raw_ticker": raw_t,
+        "base_symbol": base_symbol,
+        "hk_num_4d": hk_num_4d,
+        "clean_name": clean_name,
+        "zh_query": zh_q,
+        "en_query": en_q,
+        "bing_query": bing_q
+    }
+
+
+def _parse_rss_xml_items(xml_bytes: bytes, default_source: str, max_items: int = 8) -> List[Dict[str, str]]:
+    """通用 RSS 2.0 / Atom XML 新聞解析器 (相容 Google News / Yahoo Finance RSS / Bing News RSS)"""
+    parsed = []
+    if not xml_bytes:
+        return parsed
+    try:
+        xml_str = xml_bytes.decode("utf-8", errors="ignore").strip()
+        root = _xml_et.fromstring(xml_str)
+        for item_el in root.findall(".//item")[:max_items]:
+            t_el = item_el.find("title")
+            l_el = item_el.find("link")
+            p_el = item_el.find("pubDate")
+            s_el = item_el.find("source")
+            d_el = item_el.find("description")
+
+            title_txt = _html.unescape(t_el.text.strip()) if (t_el is not None and t_el.text) else ""
+            if not title_txt:
+                continue
+            # Google News 標題常帶有 " - 媒體名稱" 後綴，拆分出媒體與乾淨標題
+            src_txt = s_el.text.strip() if (s_el is not None and s_el.text) else ""
+            if not src_txt and " - " in title_txt:
+                parts = title_txt.rsplit(" - ", 1)
+                if len(parts[1]) <= 25:
+                    title_txt, src_txt = parts[0].strip(), parts[1].strip()
+            if not src_txt:
+                src_txt = default_source
+
+            link_txt = l_el.text.strip() if (l_el is not None and l_el.text) else ""
+            pub_raw = p_el.text.strip() if (p_el is not None and p_el.text) else ""
+            pub_txt = pub_raw[:16] if pub_raw else "近期"
+            try:
+                if pub_raw:
+                    pub_dt = pd.to_datetime(pub_raw, utc=True)
+                    pub_txt = pub_dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+
+            desc_txt = ""
+            if d_el is not None and d_el.text:
+                # 去除 HTML tag
+                raw_desc = _html.unescape(_re.sub(r"<[^>]+>", " ", d_el.text))
+                raw_desc = _re.sub(r"\s+", " ", raw_desc).strip()
+                if raw_desc and raw_desc[:40] not in title_txt:
+                    desc_txt = raw_desc[:160]
+
+            parsed.append({
+                "title": title_txt,
+                "summary": desc_txt,
+                "pub_date": pub_txt,
+                "publisher": src_txt,
+                "link": link_txt
+            })
+    except Exception:
+        pass
+    return parsed
+
+
+_NEWS_MEM_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
 def fetch_and_analyze_stock_news_intelligence(
     ticker: str,
     stock_name: str = "",
-    market_type: str = "US/Global"
+    market_type: str = "US/Global",
+    force_refresh: bool = False
 ) -> Dict[str, Any]:
     """
-    [v37.0 雙源實時新聞搜尋與 AI 利好/利空情報分析引擎]
-    結合：
-    1) yfinance 官方新聞流 (yf.Ticker(ticker).news，自動相容新舊版 schema)
-    2) Google News RSS 實時搜尋 (支援港股繁體中文股票名稱搜尋與美股代碼搜尋，3.5秒超時保護)
-    對每則新聞進行催化劑分類、利好/利空評分，並匯總整體消息面傾向與黑天鵝警報！
+    [v37.1 六源容錯實時新聞搜尋與 AI 利好/利空情報分析引擎 — 徹底修復「全部股票 0 則新聞」問題]
+    修復重點：
+    1) 移除 @st.cache_data 對空結果 `[]` 的 15 分鐘緩存鎖死；僅在成功抓到新聞時寫入記憶體緩存 (_NEWS_MEM_CACHE)！
+    2) 透過 _safe_http_get_bytes 自動處理 macOS/Windows Python SSL 憑證錯誤 (`CERTIFICATE_VERIFY_FAILED`) 與模擬真實 Chrome Header。
+    3) 淨化港股 `-W` / `-SW` / `-S` 後綴，避免觸發 Google News 負向排除語法 (`NOT W`)。
+    4) 六源併聯檢索管道：
+       - 管道 1：Google News RSS (繁體中文 zh-HK，針對港股或美股中文報導)
+       - 管道 2：Google News RSS (英文 en-US，針對美股或國際大行報告)
+       - 管道 3：Yahoo Finance Search JSON API (`query2.finance.yahoo.com/v1/finance/search`)
+       - 管道 4：Yahoo Finance 官方個股 RSS (`feeds.finance.yahoo.com/rss/2.0/headline`)
+       - 管道 5：Bing News RSS 全球免憑證備援 (`www.bing.com/news/search?format=rss`)
+       - 管道 6：yfinance 原生 Ticker.news / Search.news (相容所有版本 schema)
     """
+    cache_key = f"{ticker}_{market_type}"
+    now_ts = time.time()
+    if not force_refresh and cache_key in _NEWS_MEM_CACHE:
+        ts_saved, cached_data = _NEWS_MEM_CACHE[cache_key]
+        if (now_ts - ts_saved < 600) and cached_data.get("news_items"):
+            return dict(cached_data)
+
     out = {
         "news_items": [],
         "overall_score": 0.0,
@@ -613,87 +854,162 @@ def fetch_and_analyze_stock_news_intelligence(
         "bear_count": 0,
         "neutral_count": 0,
         "has_black_swan_news": False,
-        "black_swan_headlines": []
+        "black_swan_headlines": [],
+        "active_sources": [],
+        "debug_notes": []
     }
-    raw_articles = []
+    raw_articles: List[Dict[str, str]] = []
     seen_titles = set()
+    q_info = _clean_stock_query_terms(ticker, stock_name, market_type)
 
-    # 來源 1：yfinance Ticker.news
+    def _add_article(art: Dict[str, str], source_tag: str):
+        t_clean = str(art.get("title") or "").strip()
+        if not t_clean or len(t_clean) < 4:
+            return
+        # 以標題前 28 字元去重
+        dedup_key = _re.sub(r"\W+", "", t_clean.lower())[:28]
+        if not dedup_key or dedup_key in seen_titles:
+            return
+        seen_titles.add(dedup_key)
+        raw_articles.append(art)
+        if source_tag not in out["active_sources"]:
+            out["active_sources"].append(source_tag)
+
+    # 管道 1：Google News RSS (香港繁體中文 zh-HK — 港股主力、美股中文快訊)
     try:
-        yf_news = yf.Ticker(ticker).news or []
-        for item in yf_news[:10]:
-            if not isinstance(item, dict):
-                continue
-            # 相容新版 yfinance (item["content"]) 與舊版
-            content = item.get("content") if isinstance(item.get("content"), dict) else item
-            title = str(content.get("title") or item.get("title") or "").strip()
-            if not title or title in seen_titles:
-                continue
-            summary = str(content.get("summary") or content.get("description") or "").strip()
-            pub_str = ""
-            if content.get("pubDate"):
-                pub_str = str(content.get("pubDate"))[:16].replace("T", " ")
-            elif item.get("providerPublishTime"):
-                try:
-                    pub_str = datetime.fromtimestamp(int(item["providerPublishTime"])).strftime("%Y-%m-%d %H:%M")
-                except Exception:
-                    pass
-            link = ""
-            if isinstance(content.get("canonicalUrl"), dict):
-                link = str(content["canonicalUrl"].get("url", ""))
-            elif item.get("link"):
-                link = str(item.get("link", ""))
-            publisher = ""
-            if isinstance(content.get("provider"), dict):
-                publisher = str(content["provider"].get("displayName", "Yahoo Finance"))
-            else:
-                publisher = str(item.get("publisher", "Yahoo Finance"))
+        enc_zh = _urllib_parse.quote(q_info["zh_query"])
+        gnews_hk_url = f"https://news.google.com/rss/search?q={enc_zh}&hl=zh-HK&gl=HK&ceid=HK:zh-Hant"
+        xml_b, err_msg = _safe_http_get_bytes(gnews_hk_url, timeout=4.0)
+        if xml_b:
+            for item in _parse_rss_xml_items(xml_b, "Google News (HK)", max_items=8):
+                _add_article(item, "Google News (中文)")
+        elif err_msg:
+            out["debug_notes"].append(f"GNews-HK:{err_msg}")
+    except Exception as e:
+        out["debug_notes"].append(f"GNews-HK:{type(e).__name__}")
 
-            seen_titles.add(title)
-            raw_articles.append({
-                "title": title,
-                "summary": summary[:180],
-                "pub_date": pub_str or "近期",
-                "publisher": publisher or "財經媒體",
-                "link": link
-            })
-    except Exception:
-        pass
+    # 管道 2：Google News RSS (美國英文 en-US — 美股主力、港股外資大行報告)
+    if len(raw_articles) < 10:
+        try:
+            enc_en = _urllib_parse.quote(q_info["en_query"])
+            gnews_us_url = f"https://news.google.com/rss/search?q={enc_en}&hl=en-US&gl=US&ceid=US:en"
+            xml_b, err_msg = _safe_http_get_bytes(gnews_us_url, timeout=4.0)
+            if xml_b:
+                for item in _parse_rss_xml_items(xml_b, "Google News (US)", max_items=8):
+                    _add_article(item, "Google News (EN)")
+            elif err_msg:
+                out["debug_notes"].append(f"GNews-US:{err_msg}")
+        except Exception as e:
+            out["debug_notes"].append(f"GNews-US:{type(e).__name__}")
 
-    # 來源 2：Google News RSS 實時檢索 (補充港股中文新聞或最新動態)
+    # 管道 3：Yahoo Finance Search JSON API (直接 HTTP JSON 請求，不依賴 yfinance 版本)
+    if len(raw_articles) < 10:
+        for q_candidate in ([ticker, q_info["clean_name"]] if q_info["clean_name"] != ticker else [ticker]):
+            try:
+                enc_yf = _urllib_parse.quote(q_candidate)
+                yf_json_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={enc_yf}&quotesCount=1&newsCount=10"
+                json_b, err_msg = _safe_http_get_bytes(yf_json_url, timeout=3.8)
+                if json_b:
+                    payload = _json.loads(json_b.decode("utf-8", errors="ignore"))
+                    for n_item in (payload.get("news") or [])[:10]:
+                        if not isinstance(n_item, dict):
+                            continue
+                        t_txt = str(n_item.get("title") or "").strip()
+                        if not t_txt:
+                            continue
+                        pub_ts = n_item.get("providerPublishTime")
+                        pub_str = "近期"
+                        if pub_ts:
+                            try:
+                                pub_str = datetime.fromtimestamp(int(pub_ts)).strftime("%Y-%m-%d %H:%M")
+                            except Exception:
+                                pass
+                        _add_article({
+                            "title": t_txt,
+                            "summary": "",
+                            "pub_date": pub_str,
+                            "publisher": str(n_item.get("publisher") or "Yahoo Finance"),
+                            "link": str(n_item.get("link") or "")
+                        }, "Yahoo Finance API")
+                if len(raw_articles) >= 8:
+                    break
+            except Exception as e:
+                out["debug_notes"].append(f"YF-API:{type(e).__name__}")
+
+    # 管道 4：Yahoo Finance 官方 Headline RSS Feed
     if len(raw_articles) < 8:
         try:
-            clean_num = ticker.replace(".HK", "").lstrip("0") if market_type == "HK" else ticker
-            q_str = f"{stock_name} {clean_num} 港股" if (market_type == "HK" and stock_name and stock_name != ticker) else f"{ticker} {stock_name} stock"
-            encoded_q = _urllib_parse.quote(q_str)
-            rss_url = (
-                f"https://news.google.com/rss/search?q={encoded_q}&hl=zh-HK&gl=HK&ceid=HK:zh-Hant"
-                if market_type == "HK"
-                else f"https://news.google.com/rss/search?q={encoded_q}&hl=en-US&gl=US&ceid=US:en"
-            )
-            req = _urllib_req.Request(rss_url, headers={"User-Agent": "Mozilla/5.0"})
-            with _urllib_req.urlopen(req, timeout=3.5) as resp:
-                xml_bytes = resp.read()
-            root = _xml_et.fromstring(xml_bytes)
-            for item_el in root.findall(".//item")[:8]:
-                t_el = item_el.find("title")
-                l_el = item_el.find("link")
-                p_el = item_el.find("pubDate")
-                s_el = item_el.find("source")
-                title_txt = t_el.text.strip() if (t_el is not None and t_el.text) else ""
-                if not title_txt or title_txt in seen_titles:
+            reg_str = "HK&lang=zh-Hant-HK" if market_type == "HK" else "US&lang=en-US"
+            yf_rss_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={_urllib_parse.quote(ticker)}&region={reg_str}"
+            xml_b, _ = _safe_http_get_bytes(yf_rss_url, timeout=3.8)
+            if xml_b:
+                for item in _parse_rss_xml_items(xml_b, "Yahoo Finance RSS", max_items=8):
+                    _add_article(item, "Yahoo RSS")
+        except Exception:
+            pass
+
+    # 管道 5：Bing News RSS (全球高可用備援，極少封鎖 IP)
+    if len(raw_articles) < 8:
+        try:
+            enc_bing = _urllib_parse.quote(q_info["bing_query"])
+            bing_url = f"https://www.bing.com/news/search?q={enc_bing}&format=rss"
+            xml_b, _ = _safe_http_get_bytes(bing_url, timeout=4.0)
+            if xml_b:
+                for item in _parse_rss_xml_items(xml_b, "Bing News", max_items=8):
+                    _add_article(item, "Bing News")
+        except Exception:
+            pass
+
+    # 管道 6：yfinance 原生 Ticker(ticker).news 及 yf.Search
+    if len(raw_articles) < 8:
+        try:
+            t_obj = yf.Ticker(ticker)
+            yf_news = []
+            try:
+                yf_news = t_obj.news or []
+            except Exception:
+                pass
+            if not yf_news and hasattr(yf, "Search"):
+                try:
+                    yf_news = yf.Search(ticker, news_count=8).news or []
+                except Exception:
+                    pass
+            for item in yf_news[:10]:
+                if not isinstance(item, dict):
                     continue
-                seen_titles.add(title_txt)
-                pub_txt = p_el.text[:16] if (p_el is not None and p_el.text) else "近期"
-                src_txt = s_el.text.strip() if (s_el is not None and s_el.text) else "Google News"
-                link_txt = l_el.text.strip() if (l_el is not None and l_el.text) else ""
-                raw_articles.append({
-                    "title": title_txt,
-                    "summary": "",
-                    "pub_date": pub_txt,
-                    "publisher": src_txt,
-                    "link": link_txt
-                })
+                content = item.get("content") if isinstance(item.get("content"), dict) else item
+                title = str(content.get("title") or item.get("title") or "").strip()
+                if not title:
+                    continue
+                summary = str(content.get("summary") or content.get("description") or "").strip()
+                pub_str = ""
+                if content.get("pubDate"):
+                    pub_str = str(content.get("pubDate"))[:16].replace("T", " ")
+                elif item.get("providerPublishTime"):
+                    try:
+                        pub_str = datetime.fromtimestamp(int(item["providerPublishTime"])).strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        pass
+                link = ""
+                if isinstance(content.get("canonicalUrl"), dict):
+                    link = str(content["canonicalUrl"].get("url", ""))
+                elif isinstance(content.get("clickThroughUrl"), dict):
+                    link = str(content["clickThroughUrl"].get("url", ""))
+                elif item.get("link"):
+                    link = str(item.get("link", ""))
+                publisher = ""
+                if isinstance(content.get("provider"), dict):
+                    publisher = str(content["provider"].get("displayName", "Yahoo Finance"))
+                else:
+                    publisher = str(item.get("publisher", "Yahoo Finance"))
+
+                _add_article({
+                    "title": title,
+                    "summary": summary[:180],
+                    "pub_date": pub_str or "近期",
+                    "publisher": publisher or "Yahoo Finance",
+                    "link": link
+                }, "yfinance")
         except Exception:
             pass
 
@@ -702,14 +1018,14 @@ def fetch_and_analyze_stock_news_intelligence(
 
     analyzed_list = []
     scores = []
-    for art in raw_articles[:10]:
+    for art in raw_articles[:12]:
         cls_info = _classify_single_news_headline(art["title"], art["summary"])
         art_enriched = {**art, **cls_info}
         analyzed_list.append(art_enriched)
         scores.append(cls_info["score"])
-        if cls_info["score"] >= 15:
+        if cls_info["score"] >= 10:
             out["bull_count"] += 1
-        elif cls_info["score"] <= -15:
+        elif cls_info["score"] <= -10:
             out["bear_count"] += 1
         else:
             out["neutral_count"] += 1
@@ -722,13 +1038,15 @@ def fetch_and_analyze_stock_news_intelligence(
     out["overall_score"] = avg_sc
     if out["has_black_swan_news"]:
         out["overall_verdict"] = f"🚨 偵測到潛在黑天鵝/重大利空消息 (利空 {out['bear_count']} 則 vs 利好 {out['bull_count']} 則)"
-    elif avg_sc >= 12 or out["bull_count"] >= out["bear_count"] + 2:
+    elif avg_sc >= 8 or out["bull_count"] > out["bear_count"]:
         out["overall_verdict"] = f"🟢 消息面整體偏利好 (利好 {out['bull_count']} 則 ／ 利空 {out['bear_count']} 則 ／ 中性 {out['neutral_count']} 則)"
-    elif avg_sc <= -12 or out["bear_count"] >= out["bull_count"] + 2:
+    elif avg_sc <= -8 or out["bear_count"] > out["bull_count"]:
         out["overall_verdict"] = f"🔴 消息面整體偏利空 (利空 {out['bear_count']} 則 ／ 利好 {out['bull_count']} 則 ／ 中性 {out['neutral_count']} 則)"
     else:
         out["overall_verdict"] = f"⚪ 消息面多空均衡/中性 (利好 {out['bull_count']} 則 ／ 利空 {out['bear_count']} 則 ／ 中性 {out['neutral_count']} 則)"
 
+    # 僅在成功抓取到新聞時才寫入記憶體緩存，徹底杜絕緩存空結果！
+    _NEWS_MEM_CACHE[cache_key] = (now_ts, dict(out))
     return out
 
 def evaluate_news_price_divergence(news_intel: Dict[str, Any], df: pd.DataFrame) -> Dict[str, str]:
@@ -8705,14 +9023,25 @@ elif mode == mode_options[1]:
                 _top_event_alerts.append(("error" if _gap_diag.get("gap_risk_level") == "CRITICAL" else "warning", _gap_diag["gap_warning_msg"]))
             render_atomic_alert_group(_top_event_alerts)
 
-            st.markdown("### 📰 實時新聞情報搜尋與 AI 利好/利空 × 量價反應診斷 (News & Catalyst Intelligence)")
-            _news_intel = fetch_and_analyze_stock_news_intelligence(fmt_ticker, stock_name=name, market_type=market_type)
+            nw_hdr_col1, nw_hdr_col2 = st.columns([4.2, 1.2])
+            with nw_hdr_col1:
+                st.markdown("### 📰 實時新聞情報搜尋與 AI 利好/利空 × 量價反應診斷 (News & Catalyst Intelligence)")
+            with nw_hdr_col2:
+                st.write("")
+                _force_refresh_news = st.button("🔄 重新抓取最新新聞", key=f"btn_refresh_news_{fmt_ticker}", use_container_width=True)
+
+            _news_intel = fetch_and_analyze_stock_news_intelligence(
+                fmt_ticker,
+                stock_name=name,
+                market_type=market_type,
+                force_refresh=bool(_force_refresh_news)
+            )
             _news_px_div = evaluate_news_price_divergence(_news_intel, df)
             nw_c1, nw_c2, nw_c3 = st.columns(3)
             nw_c1.metric(
                 "🧭 消息面綜合情緒評分",
                 f"{_news_intel.get('overall_score', 0.0):+.1f} 分",
-                f"利好 {_news_intel.get('bull_count', 0)} 則 ｜ 利空 {_news_intel.get('bear_count', 0)} 則"
+                f"利好 {_news_intel.get('bull_count', 0)} 則 ｜ 利空 {_news_intel.get('bear_count', 0)} 則 ｜ 中性 {_news_intel.get('neutral_count', 0)} 則"
             )
             nw_c2.metric(
                 "⚖️ 消息 × 量價交叉驗證",
@@ -8722,7 +9051,7 @@ elif mode == mode_options[1]:
             nw_c3.metric(
                 "🚨 新聞面黑天鵝掃描",
                 "🚨 發現高危利空字眼" if _news_intel.get("has_black_swan_news") else "✅ 未見重大黑天鵝字眼",
-                "掃描盈警/配股抽水/調查/降指引"
+                "📡 來源: " + (" / ".join(_news_intel.get("active_sources", [])) if _news_intel.get("active_sources") else "待連線")
             )
             if _news_px_div.get("reaction_advice"):
                 render_atomic_alert(_news_px_div["reaction_advice"], _news_px_div.get("alert_kind", "info"))
@@ -8749,7 +9078,8 @@ elif mode == mode_options[1]:
                         hide_index=True
                     )
                 else:
-                    st.info("目前暫無檢索到該標的之最新新聞標題，請以技術結構與量價信號為主。")
+                    _dbg_str = " ｜ ".join(_news_intel.get("debug_notes", [])) if _news_intel.get("debug_notes") else "請檢查本地網絡連線或防火牆設定"
+                    st.warning(f"⚠️ 暫未能從外部新聞源取回標題（診斷訊息：{_dbg_str}）。可點擊右上角「🔄 重新抓取最新新聞」重試。")
 
             # ==========================================
             # 🌟 專業級量化分析圖表 (修復對數座標崩潰問題)
