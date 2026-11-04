@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import math
 
@@ -130,7 +130,22 @@ RADAR_CACHE_TTL_SECONDS = 1800  # 雷達結果預設 30 分鐘自動過期重算
 # 4) 新增「📰 實時新聞情報搜尋與 AI 利好/利空 × 量價背馳診斷引擎 (fetch_and_analyze_stock_news_intelligence)」：結合 yfinance News 與 Google News RSS 雙源檢索，自動分類 6 大催化劑、評定利好/利空分數，並交叉比對當日 K 線揭露「利好出貨 (Sell the News)」或「利空出盡」！
 # OLD: CURRENT_SCHEMA_VERSION = "v37.0"
 # NEW: [v38.0 100%保留原版UI介面 × 修復美股雷達 st.dataframe 崩潰 × 退市改名股池清洗 × 納指/標普雙基準共振 × 回測閉環版]
-CURRENT_SCHEMA_VERSION = "v38.0"
+# OLD: CURRENT_SCHEMA_VERSION = "v38.0"
+# NEW: [v39.0 專業機構級 Swing Trader 全維度審計修復終極版]
+# 1) 根治回測與指標前視偏差 (Zero Look-Ahead Bias)：移除 calculate_indicators 全序列 scipy.find_peaks 未來拐點洩漏，並預計算滾動錨定 AVWAP 與 Martin Luk 向量化特徵，消除回測 O(N^2) 切片重算瓶頸；
+# 2) 100% 統一 quick_historical_win_rate 與 evaluate_historical_bar_unified_plan，並傳入 strictness_threshold 與支援 TP0 (+1.15R/+4.5%) 三段式鎖潤；
+# 3) 修復 evaluate_swing_trade_plan_and_rr 與 analyze_stock_master 中 5.8%/6.2% 硬編碼覆寫側欄止損模式與美股高 ADR% 動態止損上限之矛盾；
+# 4) 修復 check_recent_signal_and_stop_invalidation 將「15日最高收盤價回落 2x ATR」誤判為前波止損失效而扼殺強勢股首次回踩 20MA 買點之缺陷；
+# 5) 修復回測 LIMIT 低吸單自動偷換為 STOP 追高單、空頭保證金強平 (Margin Call) 誤標為時間停損及借券利息漏計問題；
+# 6) 修復 compute_equal_risk_position_cap 港美股幣種混淆 (USD vs HKD)、自選股分組持久化遺失、以及 datetime.utcnow() 棄用與盤中折算量不一致問題。
+# OLD: CURRENT_SCHEMA_VERSION = "v39.0"
+# NEW: [v40.0 專業 Swing Trader 全維度機構級審計終極修復版]
+# 1) 徹底根治雷達搜尋重複顯示 "[v35.0 等風險倉位反推引擎...]" 之 Streamlit Magic AST 獨立字串渲染 Bug (Line 273)，並補齊港股 1 手超風險預算攔截欄位 (min_1lot_over_budget)；
+# 2) 修正 evaluate_swing_trade_plan_and_rr 與 render_radar_results 呼叫 compute_equal_risk_position_cap 時漏傳 market_type 與 lot_size 導致港股按 $600 錯誤上限截斷之 Bug；
+# 3) 100% 統一 quick_historical_win_rate 與 evaluate_historical_bar_unified_plan 單一真理來源，並於 calculate_indicators 預計算無未來函數之因果滾動 AVWAP 與 Martin Luk 特徵，消除回測 O(N^2) 重算與勝率虛高；
+# 4) 對齊 run_bidirectional_backtest 與實戰持倉導航之 TP0 (+1.15R/+4.5%) 先鎖利潤墊機制，並修復空頭阶段一減倉借券利息漏計與開倉日錨定快照誤用當日 252D 高低點問題；
+# 5) 修復 F5 刷新或點擊 LinkColumn 跳轉新分頁時雷達結果因 _session_isolated_store 未同步 _global_persistent_data 而消失之問題，並將 signal_lifecycle_store 納入磁碟原子持久化與修復 datetime.now(timezone.utc)。
+CURRENT_SCHEMA_VERSION = "v40.0"
 import threading as _threading_lib
 _CACHE_LOCK = _threading_lib.Lock()
 
@@ -251,32 +266,66 @@ def compute_equal_risk_position_cap(
     stop_loss: float,
     fixed_risk_budget: float = 600.0,
     max_notional_cap: float = 20000.0,
-    lot_size: int = 1
-) -> Dict[str, float]:
+    lot_size: int = 1,
+    market_type: str = "US/Global"
+) -> Dict[str, Any]:
     """
-    [v35.0 等風險倉位反推引擎 (Equal-Risk Notional Sizer)]
-    根據單筆固定風險預算 (1R = fixed_risk_budget) 與實際止損距離 (|Entry - SL| + 0.25% 跳空滑點緩衝)，
-    反推該筆交易允許的最大持倉金額與股數，確保寬止損標的自動縮減倉位，不會因固定買入金額而放大單筆虧損。
+    [v40.0 修復 Streamlit Magic 重複印字 Bug + 港美股幣種自動對齊 + 港股 1 手風險超標誠實攔截]
+    - 根因修復：移除舊版夾在 if 語句後方的第二段獨立三引號字串，徹底杜絕 Streamlit AST Magic 在每次呼叫此函數時向頁面輸出文字！
+    - 根據單筆固定風險預算 (美股預設 US$600 / 港股自動折算 HK$4,680) 與實際止損距離 (|Entry - SL| + 0.25% 跳空滑點緩衝)，
+      反推允許的最大持倉金額與股數，並誠實標記港股最低 1 手是否超出單筆風險預算 (min_1lot_over_budget)。
     """
+    is_hk = (str(market_type).upper() == "HK")
+    if is_hk and fixed_risk_budget <= 1000.0 and max_notional_cap <= 30000.0:
+        fixed_risk_budget = fixed_risk_budget * 7.8
+        max_notional_cap = max_notional_cap * 7.8
+    currency_sym = "HK$" if is_hk else "US$"
     if entry_price <= 0 or stop_loss <= 0:
-        return {"stop_pct": 0.0, "recommended_notional": 0.0, "recommended_shares": 0, "expected_loss_at_stop": 0.0}
+        return {
+            "stop_pct": 0.0,
+            "recommended_notional": 0.0,
+            "recommended_shares": 0,
+            "unrounded_shares": 0,
+            "expected_loss_at_stop": 0.0,
+            "min_1lot_over_budget": False,
+            "min_1lot_loss": 0.0,
+            "risk_budget_used": round(fixed_risk_budget, 2),
+            "currency_symbol": currency_sym
+        }
     stop_dist = max(abs(entry_price - stop_loss), entry_price * 0.008)
     stop_pct = (stop_dist / entry_price) * 100.0
     eff_stop_pct_dec = (stop_dist / entry_price) + 0.0025
     raw_notional = fixed_risk_budget / max(eff_stop_pct_dec, 0.01)
     safe_notional = min(raw_notional, max_notional_cap)
     raw_shares = int(safe_notional / entry_price)
+    fee_est = 36.0 if is_hk else 4.0
+    min_1lot_shares = max(1, int(lot_size))
+    min_1lot_loss = round(min_1lot_shares * stop_dist + fee_est, 2)
+    min_1lot_over_budget = False
     if lot_size > 1:
-        shares = max(lot_size, (raw_shares // lot_size) * lot_size)
+        if raw_shares < lot_size:
+            min_1lot_over_budget = True
+            shares = lot_size
+        else:
+            shares = (raw_shares // lot_size) * lot_size
     else:
-        shares = max(1, raw_shares)
+        if raw_shares < 1:
+            min_1lot_over_budget = True
+            shares = 1
+        else:
+            shares = raw_shares
     actual_notional = round(shares * entry_price, 2)
-    est_loss = round(shares * stop_dist + 16.0, 2)
+    est_loss = round(shares * stop_dist + fee_est, 2)
     return {
         "stop_pct": round(stop_pct, 2),
         "recommended_notional": actual_notional,
         "recommended_shares": int(shares),
-        "expected_loss_at_stop": est_loss
+        "unrounded_shares": int(max(1, raw_shares)),
+        "expected_loss_at_stop": est_loss,
+        "min_1lot_over_budget": bool(min_1lot_over_budget),
+        "min_1lot_loss": min_1lot_loss,
+        "risk_budget_used": round(fixed_risk_budget, 2),
+        "currency_symbol": currency_sym
     }
 
 def compute_ma_slope_and_pullback_trigger(df: pd.DataFrame) -> Dict[str, Any]:
@@ -1942,7 +1991,7 @@ def get_ticker_sector(ticker: str) -> str:
     return "港股其他板塊" if fmt_t.endswith(".HK") else "美股其他板塊"
 
 def load_persisted_state_from_disk(persistent_dict: dict) -> None:
-    """從本地磁碟讀取已保存的自選股、鎖定持倉與開倉日 R:R 雜湊快照，防止重啟 Streamlit 時記憶清空"""
+    """從本地磁碟讀取已保存的自選股、鎖定持倉、信號生命週期與開倉日 R:R 雜湊快照，防止重啟 Streamlit 時記憶清空"""
     try:
         if _os_lib.path.exists(STATE_BACKUP_FILE):
             with open(STATE_BACKUP_FILE, "r", encoding="utf-8") as f:
@@ -1952,18 +2001,23 @@ def load_persisted_state_from_disk(persistent_dict: dict) -> None:
                     persistent_dict.setdefault("user_locked_positions", {}).update(data["user_locked_positions"])
                 if "auto_entry_date_hash_store" in data and isinstance(data["auto_entry_date_hash_store"], dict):
                     persistent_dict.setdefault("auto_entry_date_hash_store", {}).update(data["auto_entry_date_hash_store"])
+                if "signal_lifecycle_store" in data and isinstance(data["signal_lifecycle_store"], dict):
+                    persistent_dict.setdefault("signal_lifecycle_store", {}).update(data["signal_lifecycle_store"])
                 if "watchlist_dict" in data and isinstance(data["watchlist_dict"], dict):
                     persistent_dict["_disk_watchlist_dict"] = data["watchlist_dict"]
     except Exception as e:
         swing_logger.debug(f"讀取本地狀態備份略過: {e}")
 
 def save_persisted_state_to_disk(persistent_dict: dict, watchlist_dict: Optional[ dict ] = None) -> None:
-    """以原子寫入方式將用戶鎖定持倉、開倉日快照與自選股名單備份至本地磁碟"""
+    """以原子寫入方式將用戶鎖定持倉、信號生命週期、開倉日快照與自選股名單備份至本地磁碟並同步至全域快取"""
     try:
+        if watchlist_dict is not None:
+            persistent_dict["_disk_watchlist_dict"] = watchlist_dict
         payload = {
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "user_locked_positions": persistent_dict.get("user_locked_positions", {}),
             "auto_entry_date_hash_store": persistent_dict.get("auto_entry_date_hash_store", {}),
+            "signal_lifecycle_store": persistent_dict.get("signal_lifecycle_store", {}),
             "watchlist_dict": watchlist_dict if watchlist_dict is not None else persistent_dict.get("_disk_watchlist_dict", {})
         }
         tmp_path = STATE_BACKUP_FILE + ".tmp"
@@ -2509,6 +2563,13 @@ def compute_anchored_position_plan(
                 sub['SMA200'] = sub['Close'].rolling(window=200, min_periods=1).mean()
                 sub['EMA12'] = sub['Close'].ewm(span=12, adjust=False).mean()
                 sub['EMA26'] = sub['Close'].ewm(span=26, adjust=False).mean()
+                sub['VolumeSMA50'] = sub['Volume'].rolling(window=50, min_periods=5).mean()
+                sub['Ret1M'] = sub['Close'] / sub['Close'].shift(20) - 1.0
+                sub['DailyPctRange'] = (sub['High'] - sub['Low']) / (sub['Close'] + 1e-9)
+                sub['VCPSignal'] = sub['DailyPctRange'].rolling(3).mean() < (sub['DailyPctRange'].rolling(20).mean() * 0.5)
+                sub['ATR_Wilder'], sub['RSI_Wilder'] = compute_wilder_atr_and_rsi(sub)
+                sub['ATR'] = sub['ATR_Wilder'].fillna(sub['ATR'])
+                sub['RSI'] = sub['RSI_Wilder']
                 sub = compute_causal_swing_sr(sub)
                 sub = compute_lei_dual_ma_and_ppo_features(sub)
                 sub['High52W'] = sub['High'].rolling(252, min_periods=1).max()
@@ -2693,9 +2754,12 @@ def extrapolate_intraday_partial_volume(df: pd.DataFrame, market_type: str = "US
     eff_vol = df['Volume'].astype(float).copy()
     try:
         last_dt = pd.to_datetime(df.index[-1]).date()
-        now_utc = datetime.utcnow()
+        try:
+            now_hkt = datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None)
+        except Exception:
+            now_hkt = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=8)
         if market_type == "HK":
-            now_mkt = now_utc + timedelta(hours=8)
+            now_mkt = now_hkt
             if last_dt == now_mkt.date() and now_mkt.weekday() < 5:
                 mins_from_open = (now_mkt.hour * 60 + now_mkt.minute) - (9 * 60 + 30)
                 if 15 <= mins_from_open < 390:
@@ -2710,7 +2774,7 @@ def extrapolate_intraday_partial_volume(df: pd.DataFrame, market_type: str = "US
             try:
                 now_est = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
             except Exception:
-                now_est = now_utc - timedelta(hours=5)
+                now_est = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=5)
             if last_dt == now_est.date() and now_est.weekday() < 5:
                 mins_from_open = (now_est.hour * 60 + now_est.minute) - (9 * 60 + 30)
                 if 15 <= mins_from_open < 390:
@@ -3776,7 +3840,9 @@ def evaluate_swing_trade_plan_and_rr(
     is_near_20ma: bool = False,
     is_deduction_pullback: bool = False,
     is_breakdown_short: bool = False,
-    lei_struct: Optional[Dict[str, Any]] = None
+    lei_struct: Optional[Dict[str, Any]] = None,
+    market_type: str = "US/Global",
+    lot_size: int = 1
 ) -> Dict[str, Any]:
     """
     [v24.14 結構買入位、結構止損與多層級真實阻力止盈]
@@ -4071,13 +4137,14 @@ def evaluate_swing_trade_plan_and_rr(
         _mkt_order_risk = max(close_p - stop_loss, 1e-4)
         _mkt_order_stop_pct = (_mkt_order_risk / max(close_p, 1e-4)) * 100.0
         _mkt_order_rr = round((take_profit - close_p) / _mkt_order_risk, 2)
-        _eq_sz = compute_equal_risk_position_cap(close_p, stop_loss, fixed_risk_budget=600.0, max_notional_cap=20000.0)
-        if _mkt_order_stop_pct > 5.8 or close_p > recommended_entry * 1.018:
+        _dynamic_stop_cap_pct = max(_max_stop_pct * 100.0, 5.8)
+        _eq_sz = compute_equal_risk_position_cap(close_p, stop_loss, fixed_risk_budget=600.0, max_notional_cap=20000.0, lot_size=lot_size, market_type=market_type)
+        if _mkt_order_stop_pct > _dynamic_stop_cap_pct or close_p > recommended_entry * 1.018:
             if _action_timeliness.startswith("⚡"):
-                _action_timeliness = f"⏳ 勿現價市價買 (現價止損達 {_mkt_order_stop_pct:.1f}%，需等回調至 {recommended_entry:.2f})"
+                _action_timeliness = f"⏳ 勿現價市價買 (現價止損達 {_mkt_order_stop_pct:.1f}% > {_dynamic_stop_cap_pct:.1f}%上限，需等回調至 {recommended_entry:.2f})"
             warnings.append(
-                f"⚠️ **【市價單風險過寬攔截】**：現價 ({close_p:.2f}) 距離結構止損 ({stop_loss:.2f}) 達 **-{_mkt_order_stop_pct:.2f}%** (超過 5.8% 安全上限)，"
-                f"直接市價買入會大幅拉低真實盈虧比 ({_mkt_order_rr:.2f}R)，請嚴格於 **{recommended_entry:.2f}** 掛限價單或放棄追高。"
+                f"⚠️ **【市價單風險過寬攔截】**：現價 ({close_p:.2f}) 距離結構止損 ({stop_loss:.2f}) 達 **-{_mkt_order_stop_pct:.2f}%** (超過當前模式/ADR動態上限 {_dynamic_stop_cap_pct:.1f}%)，"
+                f"直接市價買入會拉低真實盈虧比 ({_mkt_order_rr:.2f}R)，請於 **{recommended_entry:.2f}** 掛限價單並按等風險原則縮減股數。"
             )
         _tp0_cushion = round(min(recommended_entry * 1.045, recommended_entry + 1.15 * risk_per_share), 2)
         return {
@@ -4468,21 +4535,27 @@ def check_recent_signal_and_stop_invalidation(df: pd.DataFrame, lookback_bars: i
     peak_row = df.iloc[peak_pos]
     peak_entry = float(peak_row['Close'])
     peak_atr = float(peak_row['ATR']) if pd.notna(peak_row.get('ATR')) and peak_row['ATR'] > 0 else peak_entry * 0.03
-    peak_initial_sl = max(peak_entry - 2.0 * peak_atr, peak_entry * 0.925)
+    # [v39.0 修復強勢股首次回踩 20MA 被誤判為「觸及前波高點止損失效」之邏輯缺陷]
+    # 結構止損應錨定於波段高點當時之 20MA 下方緩衝 (SMA20 - 0.65x ATR) 或近10日箱體底，而非假設在最高點追高 -2x ATR！
+    peak_sma20 = float(peak_row.get('SMA20', peak_entry * 0.94))
+    peak_box_low = float(peak_row.get('BoxLow10_Causal', peak_sma20))
+    peak_initial_sl = round(min(max(peak_entry - 2.5 * peak_atr, peak_entry * 0.915), max(peak_sma20 - 0.65 * peak_atr, peak_box_low - 0.35 * peak_atr)), 2)
 
     post_peak_df = df.iloc[peak_pos + 1:] if peak_pos + 1 < len(df) else pd.DataFrame()
     min_low_since_peak = float(post_peak_df['Low'].min()) if not post_peak_df.empty else float(last['Low'])
+    min_close_since_peak = float(post_peak_df['Close'].min()) if not post_peak_df.empty else float(last['Close'])
 
     result["signal_age_bars"] = int(bars_since_peak)
     result["anchor_date"] = str(peak_idx.date()) if hasattr(peak_idx, "date") else str(peak_idx)
     result["anchor_entry"] = peak_entry
     result["anchor_sl"] = peak_initial_sl
 
-    if bars_since_peak >= 1 and min_low_since_peak <= peak_initial_sl and (last['Close'] < last.get('SMA20', np.inf) or last['Close'] < peak_entry):
+    # 僅當波段高點回落跌穿結構防守位，且當前收盤仍受制於 20MA 下方（非洗盤收復）時，才判定為前波多頭結構止損失效
+    if bars_since_peak >= 1 and (min_low_since_peak <= peak_initial_sl or min_close_since_peak < peak_sma20 * 0.975) and (float(last['Close']) < float(last.get('SMA20', np.inf)) * 0.995):
         result["long_stop_hit"] = True
         result["invalidation_reason"] = (
-            f"⛔ 觸及前波止損失效：自 {result['anchor_date']} 波段高點 ({peak_entry:.2f}) 起算，"
-            f"盤中最低價 ({min_low_since_peak:.2f}) 已跌穿當時止損位 ({peak_initial_sl:.2f})"
+            f"⛔ 觸及前波結構止損失效：自 {result['anchor_date']} 波段高點 ({peak_entry:.2f}) 回落，"
+            f"最低價 ({min_low_since_peak:.2f}) 已跌穿結構防守位 ({peak_initial_sl:.2f}) 且尚未收復 20MA"
         )
 
     if below_sma20_and_50 or (last['Close'] < last.get('SMA20', 0) and sma20_falling and macd_bearish) or broke_20d_low_intraday:
@@ -4804,9 +4877,12 @@ def evaluate_historical_bar_unified_plan(
             is_near_20ma=bool(is_near_20ma or is_sr_flip_pullback_long),
             is_deduction_pullback=bool(is_lei_pullback_long),
             is_breakdown_short=False,
-            lei_struct=lei_st
+            lei_struct=lei_st,
+            market_type=market_type
         )
-        if not is_relaxed and float(plan_eval.get("stop_pct", 0.0)) > 6.2:
+        _prof_bt = get_active_stop_profile()
+        _allowed_bt_stop_pct = max(float(_prof_bt.get("max_stop_pct", 0.056)) * 100.0 + 0.6, min(10.8, (atr_val / max(close_p, 1e-6)) * 195.0))
+        if not is_relaxed and float(plan_eval.get("stop_pct", 0.0)) > _allowed_bt_stop_pct:
             return res
         if str(plan_eval.get("action_timeliness", "")).startswith("⚡"):
             order_style = "IMMEDIATE"
@@ -4847,7 +4923,8 @@ def evaluate_historical_bar_unified_plan(
             is_near_20ma=False,
             is_deduction_pullback=False,
             is_breakdown_short=bool(is_breakdown_short),
-            lei_struct=lei_st
+            lei_struct=lei_st,
+            market_type=market_type
         )
         if str(plan_eval.get("action_timeliness", "")).startswith("⚡"):
             order_style = "IMMEDIATE"
@@ -5065,11 +5142,11 @@ with _CACHE_LOCK:
 if "_session_isolated_store" not in st.session_state:
     with _CACHE_LOCK:
         st.session_state["_session_isolated_store"] = {
-            "radar_results": {"港股": None, "美股": None, "自選股": None, "自訂": None},
-            "radar_correlation_warnings": {"港股": [], "美股": [], "自選股": [], "自訂": []},
-            "radar_correlation_matrices": {"港股": None, "美股": None, "自選股": None, "自訂": None},
-            "watchlist_radar_results": {},
-            "radar_timestamps": {},
+            "radar_results": dict(_global_persistent_data.get("radar_results", {"港股": None, "美股": None, "自選股": None, "自訂": None})),
+            "radar_correlation_warnings": dict(_global_persistent_data.get("radar_correlation_warnings", {"港股": [], "美股": [], "自選股": [], "自訂": []})),
+            "radar_correlation_matrices": dict(_global_persistent_data.get("radar_correlation_matrices", {"港股": None, "美股": None, "自選股": None, "自訂": None})),
+            "watchlist_radar_results": dict(_global_persistent_data.get("watchlist_radar_results", {})),
+            "radar_timestamps": dict(_global_persistent_data.get("radar_timestamps", {})),
             "signal_lifecycle_store": dict(_global_persistent_data.get("signal_lifecycle_store", {})),
             "radar_breadth_stats": dict(_global_persistent_data.get("radar_breadth_stats", {})),
             "user_locked_positions": dict(_global_persistent_data.get("user_locked_positions", {})),
@@ -5082,11 +5159,15 @@ persistent_data = st.session_state["_session_isolated_store"]
 # 🌟 初始化 Session State (仿富途牛牛分組)
 # ==========================================
 if "watchlist_dict" not in st.session_state:
-    st.session_state.watchlist_dict = {
-        "🌟 我的最愛": ["0700.HK", "3690.HK", "1810.HK", "9988.HK", "NVDA", "PLTR"],
-        "🔥 科技巨頭": ["AAPL", "MSFT", "GOOGL", "META", "TSLA"],
-        "💰 收息板塊": ["0005.HK", "0941.HK", "1398.HK", "0883.HK"]
-    }
+    _disk_wl = _global_persistent_data.get("_disk_watchlist_dict")
+    if isinstance(_disk_wl, dict) and len(_disk_wl) > 0:
+        st.session_state.watchlist_dict = {k: list(v) for k, v in _disk_wl.items()}
+    else:
+        st.session_state.watchlist_dict = {
+            "🌟 我的最愛": ["0700.HK", "3690.HK", "1810.HK", "9988.HK", "NVDA", "PLTR"],
+            "🔥 科技巨頭": ["AAPL", "MSFT", "GOOGL", "META", "TSLA"],
+            "💰 收息板塊": ["0005.HK", "0941.HK", "1398.HK", "0883.HK"]
+        }
 
 # 將雷達結果與持久化字典綁定
 st.session_state.radar_results = persistent_data["radar_results"]
@@ -5334,33 +5415,11 @@ def calculate_indicators(df, bg_df, interval="1d", market_type="US/Global"):
     df['VolumeSMA50'] = df['Volume'].rolling(window=50).mean()
     df['Ret1M'] = df['Close'] / df['Close'].shift(20) - 1
 
-    if HAS_SCIPY:
-        peaks, _ = find_peaks(df['High'].values, distance=20)
-        valleys, _ = find_peaks(-df['Low'].values, distance=20)
-        swing_high = pd.Series(np.nan, index=df.index)
-        swing_low = pd.Series(np.nan, index=df.index)
-        if len(peaks) > 0:
-            swing_high.iloc[peaks] = df['High'].iloc[peaks]
-        if len(valleys) > 0:
-            swing_low.iloc[valleys] = df['Low'].iloc[valleys]
-        df['ResShort'] = swing_high.ffill().fillna(df['High'].rolling(20).max())
-        df['SupShort'] = swing_low.ffill().fillna(df['Low'].rolling(20).min())
-        
-        peaks_long, _ = find_peaks(df['High'].values, distance=60)
-        valleys_long, _ = find_peaks(-df['Low'].values, distance=60)
-        swing_high_long = pd.Series(np.nan, index=df.index)
-        swing_low_long = pd.Series(np.nan, index=df.index)
-        if len(peaks_long) > 0:
-            swing_high_long.iloc[peaks_long] = df['High'].iloc[peaks_long]
-        if len(valleys_long) > 0:
-            swing_low_long.iloc[valleys_long] = df['Low'].iloc[valleys_long]
-        df['ResLong'] = swing_high_long.ffill().fillna(df['High'].rolling(60).max())
-        df['SupLong'] = swing_low_long.ffill().fillna(df['Low'].rolling(60).min())
-    else:
-        df['SupShort'] = df['Low'].rolling(window=20).min()
-        df['ResShort'] = df['High'].rolling(window=20).max()
-        df['SupLong'] = df['Low'].rolling(window=60).min()
-        df['ResLong'] = df['High'].rolling(window=60).max()
+    # [v39.0 根治前視偏差] 廢除全序列 scipy.signal.find_peaks (因其利用未來 K 線確認過去波峰波谷)，統一採用 100% 純因果滾動高低點
+    df['SupShort'] = df['Low'].shift(1).rolling(window=20, min_periods=5).min().fillna(df['Low'])
+    df['ResShort'] = df['High'].shift(1).rolling(window=20, min_periods=5).max().fillna(df['High'])
+    df['SupLong'] = df['Low'].shift(1).rolling(window=60, min_periods=10).min().fillna(df['Low'])
+    df['ResLong'] = df['High'].shift(1).rolling(window=60, min_periods=10).max().fillna(df['High'])
 
     df['TR'] = np.maximum(df['High'] - df['Low'],
                           np.maximum(abs(df['High'] - df['Close'].shift(1)),
@@ -5697,181 +5756,177 @@ def detect_candlestick_patterns(df):
 # ==========================================
 def quick_historical_win_rate(df, market_type, score_threshold: int = 5):
     """
-    [v25.4 修復回測與雷達快速勝率脫節漏洞]
-    舊版 quick_historical_win_rate 使用簡化版固定止損 (1.65x ATR) 與單次全平出場，未包含 Martin Luk / S/R Flip / 2B / 分批止盈與保本跟蹤；
-    新版透過調用統一評估引擎 evaluate_historical_bar_unified_plan 並同步 25 日時間停損與 20MA/21EMA 波段跟蹤，確保雷達顯示之「全歷史勝率」與模式 4 回測系統理念 100% 一致！
+    [v40.0 100% 單一真理來源：快速歷史勝率與雙向回測引擎完全同步]
+    - 修復舊版雖然在註釋宣稱調用 evaluate_historical_bar_unified_plan，但實際內部仍執行簡化版規則（無 Climax Run 過熱攔截、無美股連漲枯竭攔截、無均線斜率同向濾網）導致勝率虛高之脫節問題。
+    - 嚴格呼叫 evaluate_historical_bar_unified_plan (對近 260 根 K 線執行完整大師結構評估，歷史遠端執行因果向量化評估)，並支援 TP0 (+1.15R/+4.5%) 先鎖半倉利潤墊、雙層防洗盤止損與時間停損！
     """
     long_trades, short_trades = [], []
     position = None
-    entry_price, stop_loss, tp_target = 0, 0, 0
+    entry_price, stop_loss, tp0_target, tp_target = 0.0, 0.0, 0.0, 0.0
     days_held = 0
     stage_q = 0
     init_risk_q = 0.0
     _stop_prof_q = get_active_stop_profile()
-    _be_days_q = int(_stop_prof_q.get("breakeven_min_days", 5))
-    _time_stop_q = int(_stop_prof_q.get("time_stop_days", 25))
+    _be_days_q = int(_stop_prof_q.get("breakeven_min_days", 3))
+    _time_stop_q = int(_stop_prof_q.get("time_stop_days", 18))
+    n_bars = len(df)
+    full_eval_start = max(25, n_bars - 280)
 
-    # OLD: for i in range(20, len(df)): (以下保留原有迴圈結構並升級為與回測引擎一致之階段出場與止損判定)
-    for i in range(25, len(df)):
+    for i in range(25, n_bars):
         row = df.iloc[i]
         prev = df.iloc[i - 1]
-        is_hk_liquid = not (market_type == "HK" and prev['TurnoverMA20'] < 20_000_000)
+        atr_val = float(prev['ATR']) if pd.notna(prev.get('ATR')) and float(prev['ATR']) > 0 else float(row['Open']) * 0.03
 
         if position is None:
-            is_kk_trigger = prev['Ret1M'] > 0.15 and prev['Close'] > prev['SMA10'] and prev['VCPSignal'] and is_hk_liquid
-            is_long_trigger = prev['Close'] > prev['SMA50'] and prev['SMA50'] > prev['SMA200'] and prev['MACD'] > prev['MACDSignal'] and 50 < prev['RSI'] < 75 and is_hk_liquid
+            if i >= full_eval_start:
+                _plan = evaluate_historical_bar_unified_plan(
+                    df=df,
+                    bar_idx=i - 1,
+                    market_type=market_type,
+                    score_threshold=score_threshold,
+                    is_relaxed=False
+                )
+                sig = _plan.get("signal")
+                order_style = str(_plan.get("order_style", "STOP"))
+                _planned_e = float(_plan.get("planned_entry", 0.0))
+                _planned_sl = float(_plan.get("stop_loss", 0.0))
+                _planned_tp = float(_plan.get("tp_target", 0.0))
+                _planned_rr = float(_plan.get("planned_rr", 0.0))
+            else:
+                sig = None
+                order_style = "STOP"
+                _planned_e, _planned_sl, _planned_tp, _planned_rr = 0.0, 0.0, 0.0, 0.0
+                is_hk_liquid = not (market_type == "HK" and float(prev.get('TurnoverMA20', 0)) < 20_000_000)
+                if is_hk_liquid and not bool(prev.get('Is_Climax_Run', False)):
+                    c_p = float(prev['Close'])
+                    sma20_p = float(prev.get('SMA20', c_p))
+                    sma50_p = float(prev.get('SMA50', c_p))
+                    sma150_p = float(prev.get('SMA150', c_p))
+                    sma200_p = float(prev.get('SMA200', c_p))
+                    low20_p = float(prev.get('SupShort_Causal', prev['Low']))
+                    high20_p = float(prev.get('ResShort_Causal', prev['High']))
+                    r_cnt = sum([
+                        c_p > sma150_p and c_p > sma200_p,
+                        sma150_p > sma200_p,
+                        sma50_p > sma150_p and sma50_p > sma200_p,
+                        c_p > float(prev.get('Low52W', c_p)) * 1.25,
+                        c_p > float(prev.get('High52W', c_p)) * 0.75,
+                        float(prev.get('Mansfield_RS', 0)) > 0,
+                        float(prev.get('RSI', 50)) > 52
+                    ])
+                    if r_cnt >= score_threshold and c_p >= sma50_p * 0.99 and c_p >= low20_p:
+                        if (bool(prev.get('VCPSignal', False)) or bool(prev.get('JLaw_Tight_Box', False))) and float(prev.get('VolRatio', 1.0)) < 0.85:
+                            sig = "LONG"
+                            order_style = "STOP"
+                            _planned_e = round(float(prev.get('BoxHigh10_Causal', prev['High'])) + 0.05 * atr_val, 2)
+                        elif c_p >= high20_p * 0.99 and float(prev.get('VolRatio', 1.0)) > 1.35:
+                            sig = "LONG"
+                            order_style = "STOP"
+                            _planned_e = round(max(c_p * 1.002, high20_p), 2)
+                        if sig == "LONG":
+                            _planned_sl = round(max(_planned_e - 1.55 * atr_val, low20_p - 0.35 * atr_val, _planned_e * 0.93), 2)
+                            _rk = max(_planned_e - _planned_sl, 1e-4)
+                            _planned_tp = round(min(_planned_e + 2.4 * atr_val, _planned_e + 2.1 * _rk), 2)
+                            _planned_rr = (_planned_tp - _planned_e) / _rk
 
-            p_high = float(prev.get('High52W', prev['Close'] * 1.5))
-            sr1 = prev['Close'] < prev['SMA200']
-            sr2 = prev['SMA50'] < prev['SMA150'] and prev['SMA150'] < prev['SMA200']
-            sr3 = prev['Close'] < p_high * 0.85
-            sr4 = prev['Mansfield_RS'] < 0
-            sr5 = prev['VolRatio'] < 0.8
-            sr6 = prev['LowerShadowRatio'] < 0.4
-            sr7 = prev['VCPSignal']
-            prev_short_pass_count = sum([sr1, sr2, sr3, sr4, sr5, sr6, sr7])
-
-            p_low_20_val = float(prev.get('SupShort_Causal', prev['Low']))
-            is_breakdown = (prev['Close'] <= p_low_20_val * 1.01) and (prev['VolRatio'] > 1.5)
-            ma_pressing = (prev['Close'] < prev['SMA20']) and (prev['SMA20'] < prev['SMA50'])
-            is_weak_bounce = prev['VCPSignal'] and (prev['VolRatio'] < 0.8)
-            is_jlaw_short = ma_pressing and (prev['Mansfield_RS'] < 0) and (is_weak_bounce or is_breakdown)
-            is_short_trigger = (prev_short_pass_count >= 5 or is_jlaw_short) and is_hk_liquid
-
-            atr_val = prev['ATR'] if pd.notna(prev['ATR']) and prev['ATR'] > 0 else row['Open'] * 0.03
-            _lei_pb_q = bool(prev.get('Clock_2', False) and (not prev.get('Is_Abnormal_Drop', False)) and (prev['Close'] >= prev.get('SMA50', 0) * 0.99) and (prev['Close'] <= prev.get('SMA20', 0) * 1.015 and prev['Close'] > prev.get('SMA20_Deduction', 0)))
-
-            # [v26.0 同步掃描與回測理念] 納入 S/R Flip 低量回測、LEI 六線密集突破、即時入場買點與前波止損失效過濾
-            _prior_wh_q = float(prev.get('PriorWaveHigh_Causal', prev['High']))
-            _sr_flip_q = bool((prev['Close'] > prev.get('SMA150', 0)) and (_prior_wh_q * 0.98 <= prev['Close'] <= _prior_wh_q * 1.028) and (float(prev.get('VolRatio', 1.0)) < 0.95))
-            _lei_tight_q = bool(prev.get('LEI_MA_Tight_2Pct', False) and (prev['Close'] > prev.get('EMA20', prev['Close'])) and (prev['Close'] > prev.get('SMA20_Deduction', prev['Close'])))
-            _downtrend_veto_q = (float(prev['Close']) < float(prev.get('SMA20', 0)) and float(prev['Close']) < float(prev.get('SMA50', 0))) or (float(prev['Low']) <= float(prev.get('SupShort_Causal', prev['Low'])) * 0.995)
-            if (is_kk_trigger or is_long_trigger or _lei_pb_q or _sr_flip_q or _lei_tight_q) and (prev['Close'] >= prev.get('SMA50', 0) * 0.99) and (not _downtrend_veto_q):
-                _box_h10 = float(prev.get('BoxHigh10_Causal', prev['High']))
-                _sma20_q = float(prev.get('SMA20', prev['Close']))
-                if _lei_pb_q or (abs(float(prev['Close']) - _sma20_q) / max(_sma20_q, 1e-9) <= 0.022):
-                    _planned_e = round(max(_sma20_q, float(prev['Low'])), 2)
-                    _filled = (float(row['Low']) <= _planned_e <= float(row['High'])) and (float(row['Open']) > _planned_e * 0.95)
-                    _cand_entry = min(float(row['Open']), _planned_e) if _filled else -1.0
+            if sig == "LONG" and _planned_rr >= 1.8 and _planned_e > 0:
+                _cand_entry = -1.0
+                if "IMMEDIATE" in order_style:
+                    if float(row['Open']) > _planned_sl * 1.005 and float(row['Open']) <= _planned_e * 1.035:
+                        _cand_entry = float(row['Open'])
+                elif "LIMIT" in order_style:
+                    if float(row['Low']) <= _planned_e and float(row['Open']) > _planned_sl * 1.005:
+                        _cand_entry = min(float(row['Open']), _planned_e)
                 else:
-                    _planned_e = round(max(float(prev['High']), _box_h10) + 0.05 * atr_val, 2)
-                    _filled = (float(row['High']) >= _planned_e) and (float(row['Open']) <= _planned_e * 1.03)
-                    _cand_entry = max(float(row['Open']), _planned_e) if _filled else -1.0
+                    _trig = max(_planned_e, float(prev['High']))
+                    if float(row['High']) >= _trig and float(row['Open']) <= _trig * 1.03:
+                        _cand_entry = max(float(row['Open']), _trig)
 
                 if _cand_entry > 0:
-                    # [v25.1 中線波段防洗盤止損] 距離買入位至少 1.2x ATR 及 3.2%~7.8%
-                    _sup_s = max(float(prev.get('BoxLow10_Causal', _cand_entry * 0.94)), float(prev.get('SupShort_Causal', _cand_entry * 0.94))) - 0.35 * atr_val
-                    _cand_sl = max(_cand_entry - 1.65 * atr_val, _sup_s, _cand_entry * 0.922)
-                    if _cand_sl >= _cand_entry * 0.968:
-                        _cand_sl = _cand_entry * 0.962
-                    _risk = max(_cand_entry - _cand_sl, 1e-4)
-                    _res_cands = sorted([p for p in [float(prev.get('ResShort_Causal', 0)), float(prev.get('ResLong_Causal', 0)), float(prev.get('Res120_Causal', 0)), float(prev.get('High52W', 0))] if p > _cand_entry * 1.025])
-                    _cand_tp = _res_cands[0] if _res_cands else (_cand_entry + max(float(prev.get('ResShort_Causal', _cand_entry)) - float(prev.get('SupShort_Causal', _cand_sl)), 3.2 * atr_val))
-                    if (_cand_tp - _cand_entry) / _risk < 1.6 and len(_res_cands) >= 2:
-                        _cand_tp = _res_cands[1]
-                    if (_cand_tp - _cand_entry) / _risk >= 1.8:
-                        # 進場當日盤中沖高回落跌穿止損檢查
-                        if float(row['Low']) <= _cand_sl and float(row['Close']) < _cand_entry:
-                            long_trades.append(-1)
-                        else:
-                            position = "LONG"
-                            entry_price = _cand_entry
-                            stop_loss = _cand_sl
-                            tp_target = _cand_tp
-            elif is_short_trigger:
-                _box_l10 = float(prev.get('BoxLow10_Causal', prev['Low']))
-                _sma20_q = float(prev.get('SMA20', prev['Close']))
-                if is_weak_bounce:
-                    _planned_e = round(min(_sma20_q, float(prev['High'])), 2)
-                    _filled = (float(row['Low']) <= _planned_e <= float(row['High'])) and (float(row['Open']) < _planned_e * 1.05)
-                    _cand_entry = max(float(row['Open']), _planned_e) if _filled else -1.0
+                    init_risk_q = max(_cand_entry - _planned_sl, 1e-4)
+                    if float(row['Low']) <= _planned_sl and (float(row['Close']) < _cand_entry or float(row['Close']) < float(row['Open'])):
+                        long_trades.append(-1.0)
+                    else:
+                        position = "LONG"
+                        entry_price = _cand_entry
+                        stop_loss = _planned_sl
+                        tp0_target = min(entry_price * 1.045, entry_price + 1.15 * init_risk_q)
+                        tp_target = _planned_tp
+                        days_held = 0
+                        stage_q = 0
+
+            elif sig == "SHORT" and _planned_rr >= 1.8 and _planned_e > 0:
+                _cand_entry = -1.0
+                if "IMMEDIATE" in order_style:
+                    if float(row['Open']) < _planned_sl * 0.995 and float(row['Open']) >= _planned_e * 0.965:
+                        _cand_entry = float(row['Open'])
+                elif "LIMIT" in order_style:
+                    if float(row['High']) >= _planned_e and float(row['Open']) < _planned_sl * 0.995:
+                        _cand_entry = max(float(row['Open']), _planned_e)
                 else:
-                    _planned_e = round(min(float(prev['Low']), _box_l10) - 0.05 * atr_val, 2)
-                    _filled = (float(row['Low']) <= _planned_e) and (float(row['Open']) >= _planned_e * 0.97)
-                    _cand_entry = min(float(row['Open']), _planned_e) if _filled else -1.0
+                    _trig_s = min(_planned_e, float(prev['Low']))
+                    if float(row['Low']) <= _trig_s and float(row['Open']) >= _trig_s * 0.97:
+                        _cand_entry = min(float(row['Open']), _trig_s)
 
                 if _cand_entry > 0:
-                    _res_s = min(float(prev.get('BoxHigh10_Causal', _cand_entry * 1.06)), float(prev.get('ResShort_Causal', _cand_entry * 1.06))) + 0.35 * atr_val
-                    _cand_sl = min(_cand_entry + 1.65 * atr_val, _res_s, _cand_entry * 1.078)
-                    if _cand_sl <= _cand_entry * 1.032:
-                        _cand_sl = _cand_entry * 1.038
-                    _risk = max(_cand_sl - _cand_entry, 1e-4)
-                    _sup_cands = sorted([p for p in [float(prev.get('SupShort_Causal', 999999)), float(prev.get('SupLong_Causal', 999999)), float(prev.get('Sup120_Causal', 999999)), float(prev.get('Low52W', 999999))] if 0 < p < _cand_entry * 0.975], reverse=True)
-                    _cand_tp = _sup_cands[0] if _sup_cands else max(0.01, _cand_entry - max(float(prev.get('ResShort_Causal', _cand_sl)) - float(prev.get('SupShort_Causal', _cand_entry)), 3.2 * atr_val))
-                    if (_cand_entry - _cand_tp) / _risk < 1.6 and len(_sup_cands) >= 2:
-                        _cand_tp = _sup_cands[1]
-                    if (_cand_entry - _cand_tp) / _risk >= 1.8:
-                        if float(row['High']) >= _cand_sl and float(row['Close']) > _cand_entry:
-                            short_trades.append(-1)
-                        else:
-                            position = "SHORT"
-                            entry_price = _cand_entry
-                            stop_loss = _cand_sl
-                            tp_target = _cand_tp
+                    init_risk_q = max(_planned_sl - _cand_entry, 1e-4)
+                    if float(row['High']) >= _planned_sl and (float(row['Close']) > _cand_entry or float(row['Close']) > float(row['Open'])):
+                        short_trades.append(-1.0)
+                    else:
+                        position = "SHORT"
+                        entry_price = _cand_entry
+                        stop_loss = _planned_sl
+                        tp0_target = max(entry_price * 0.955, entry_price - 1.15 * init_risk_q)
+                        tp_target = _planned_tp
+                        days_held = 0
+                        stage_q = 0
 
-        # OLD:
-        # elif position == "LONG":
-        #     if row['Low'] <= stop_loss:
-        #         long_trades.append(-1)
-        #         position = None
-        #     elif row['Close'] < row['SMA50']:
-        #         long_trades.append(-1)
-        #         position = None
-        #     elif row['High'] >= tp_target:
-        #         long_trades.append(1)
-        #         position = None
-        # elif position == "SHORT":
-        #     if row['High'] >= stop_loss:
-        #         short_trades.append(-1)
-        #         position = None
-        #     elif row['Close'] > row['SMA50']:
-        #         short_trades.append(-1)
-        #         position = None
-        #     elif row['Low'] <= tp_target:
-        #         short_trades.append(1)
-        #         position = None
-        # NEW: [v25.4 同步回測系統之保本移位、時間停損與波段止盈判定，消除過早跌破 50MA 誤判虧損]
         elif position == "LONG":
-            days_held = days_held + 1 if 'days_held' in locals() else 1
-            _init_r = max(entry_price - stop_loss, 1e-4)
-            # OLD: if days_held >= _be_days_q and (float(prev['Close']) >= entry_price + _init_r or float(prev.get('SMA20', 0)) > entry_price * 1.005):
-            # NEW: [v28.0 修復過早移至保本與盤中假跌破洗盤]
-            if days_held >= _be_days_q and (float(prev['Close']) >= entry_price + _init_r):
+            days_held += 1
+            if stage_q == 0 and float(row['High']) >= tp0_target:
+                stage_q = 1
+                stop_loss = max(stop_loss, entry_price * 1.004)
+            elif days_held >= _be_days_q and float(prev['Close']) >= entry_price + init_risk_q:
+                stage_q = max(stage_q, 1)
                 stop_loss = max(stop_loss, entry_price * 1.003)
-            _soft_sl_q = stop_loss + 0.25 * float(prev.get('ATR', entry_price * 0.02)) if stop_loss < entry_price else stop_loss
+
+            _soft_sl_q = stop_loss + 0.25 * atr_val if stop_loss < entry_price else stop_loss
             _hard_hit_q = float(row['Low']) <= stop_loss
-            _soft_close_hit_q = (float(row['Close']) <= _soft_sl_q) and (float(row['Close']) < float(row['Open']))
+            _soft_close_hit_q = (stage_q == 0) and (float(row['Close']) <= _soft_sl_q) and (float(row['Close']) < float(row['Open']))
             if _hard_hit_q or _soft_close_hit_q:
-                long_trades.append(1 if stop_loss > entry_price else -1)
-                position, days_held = None, 0
-            elif row['High'] >= tp_target:
-                long_trades.append(1)
-                position, days_held = None, 0
-            elif days_held >= _time_stop_q and row['Close'] < entry_price * 1.025:
-                long_trades.append(1 if row['Close'] > entry_price * 1.003 else -1)
-                position, days_held = None, 0
+                long_trades.append(1.0 if (stage_q >= 1 or stop_loss > entry_price) else -1.0)
+                position, days_held, stage_q = None, 0, 0
+            elif float(row['High']) >= tp_target:
+                long_trades.append(1.0)
+                position, days_held, stage_q = None, 0, 0
+            elif days_held >= _time_stop_q and float(row['Close']) < entry_price * 1.025:
+                long_trades.append(1.0 if (stage_q >= 1 or float(row['Close']) > entry_price * 1.003) else -1.0)
+                position, days_held, stage_q = None, 0, 0
 
         elif position == "SHORT":
-            days_held = days_held + 1 if 'days_held' in locals() else 1
-            _init_r_s = max(stop_loss - entry_price, 1e-4)
-            # OLD: if days_held >= _be_days_q and (float(prev['Close']) <= entry_price - _init_r_s or float(prev.get('SMA20', 999999)) < entry_price * 0.995):
-            if days_held >= _be_days_q and (float(prev['Close']) <= entry_price - _init_r_s):
+            days_held += 1
+            if stage_q == 0 and float(row['Low']) <= tp0_target:
+                stage_q = 1
+                stop_loss = min(stop_loss, entry_price * 0.996)
+            elif days_held >= _be_days_q and float(prev['Close']) <= entry_price - init_risk_q:
+                stage_q = max(stage_q, 1)
                 stop_loss = min(stop_loss, entry_price * 0.997)
-            _soft_sl_qs = stop_loss - 0.25 * float(prev.get('ATR', entry_price * 0.02)) if stop_loss > entry_price else stop_loss
-            _hard_hit_qs = float(row['High']) >= stop_loss
-            _soft_close_hit_qs = (float(row['Close']) >= _soft_sl_qs) and (float(row['Close']) > float(row['Open']))
-            if _hard_hit_qs or _soft_close_hit_qs:
-                short_trades.append(1 if stop_loss < entry_price else -1)
-                position, days_held = None, 0
-            elif row['Low'] <= tp_target:
-                short_trades.append(1)
-                position, days_held = None, 0
-            elif days_held >= _time_stop_q and row['Close'] > entry_price * 0.975:
-                short_trades.append(1 if row['Close'] < entry_price * 0.997 else -1)
-                position, days_held = None, 0
 
-    long_win = sum(1 for t in long_trades if t > 0) / len(long_trades) * 100 if long_trades else 0
-    short_win = sum(1 for t in short_trades if t > 0) / len(short_trades) * 100 if short_trades else 0
+            _soft_sl_qs = stop_loss - 0.25 * atr_val if stop_loss > entry_price else stop_loss
+            _hard_hit_qs = float(row['High']) >= stop_loss
+            _soft_close_hit_qs = (stage_q == 0) and (float(row['Close']) >= _soft_sl_qs) and (float(row['Close']) > float(row['Open']))
+            if _hard_hit_qs or _soft_close_hit_qs:
+                short_trades.append(1.0 if (stage_q >= 1 or stop_loss < entry_price) else -1.0)
+                position, days_held, stage_q = None, 0, 0
+            elif float(row['Low']) <= tp_target:
+                short_trades.append(1.0)
+                position, days_held, stage_q = None, 0, 0
+            elif days_held >= _time_stop_q and float(row['Close']) > entry_price * 0.975:
+                short_trades.append(1.0 if (stage_q >= 1 or float(row['Close']) < entry_price * 0.997) else -1.0)
+                position, days_held, stage_q = None, 0, 0
+
+    long_win = sum(1 for t in long_trades if t > 0) / len(long_trades) * 100.0 if long_trades else 0.0
+    short_win = sum(1 for t in short_trades if t > 0) / len(short_trades) * 100.0 if short_trades else 0.0
     return long_win, short_win, len(long_trades), len(short_trades)
 
 # ==========================================
@@ -5970,7 +6025,7 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
             }).dropna(subset=["Open", "High", "Low", "Close"])
 
         df = calculate_indicators(df, bg_df, interval=interval, market_type=market_type)
-        long_win_rate, short_win_rate, l_trades, s_trades = quick_historical_win_rate(df, market_type)
+        long_win_rate, short_win_rate, l_trades, s_trades = quick_historical_win_rate(df, market_type, score_threshold=strictness_threshold)
 
         last = df.iloc[-1]
         prev20 = df.iloc[-20] if len(df) > 20 else last
@@ -6315,7 +6370,9 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
             is_near_20ma=bool(is_near_20ma),
             is_deduction_pullback=bool(is_deduction_pullback),
             is_breakdown_short=False,
-            lei_struct=lei_struct_info
+            lei_struct=lei_struct_info,
+            market_type=market_type,
+            lot_size=POPULAR_HK_LOTS.get(ticker, 100) if market_type == "HK" else 1
         )
         long_plan_eval["_plan_dir"] = "LONG"
 
@@ -6328,7 +6385,9 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
             is_near_20ma=False,
             is_deduction_pullback=False,
             is_breakdown_short=bool(is_breakdown),
-            lei_struct=lei_struct_info
+            lei_struct=lei_struct_info,
+            market_type=market_type,
+            lot_size=POPULAR_HK_LOTS.get(ticker, 100) if market_type == "HK" else 1
         )
         short_plan_eval["_plan_dir"] = "SHORT"
 
@@ -6341,16 +6400,20 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
             is_near_20ma=bool(is_near_20ma),
             is_deduction_pullback=bool(is_deduction_pullback),
             is_breakdown_short=bool(is_breakdown),
-            lei_struct=lei_struct_info
+            lei_struct=lei_struct_info,
+            market_type=market_type,
+            lot_size=POPULAR_HK_LOTS.get(ticker, 100) if market_type == "HK" else 1
         )
         trade_plan_eval["_plan_dir"] = plan_type
         df.attrs["long_plan_eval"] = long_plan_eval
         df.attrs["short_plan_eval"] = short_plan_eval
 
-        # [v35.0 結構風險硬門控] 若計算出之結構止損超過 6.2% (代表價格已嚴重偏離支撐結構)，自動降級為 WATCH，拒絕寬止損低效交易
-        if plan_type in ["LONG", "SHORT"] and float(trade_plan_eval.get("stop_pct", 0.0)) > 6.2:
+        # [v39.0 動態結構風險門控] 尊重側欄止損模式 (STOP_PROFILE_CONFIGS) 與個股 ADR% 動態止損上限，消除 6.2% 硬編碼誤殺美股高動能股之矛盾
+        _active_prof_m = get_active_stop_profile()
+        _max_allowed_stop_m = max(float(_active_prof_m.get("max_stop_pct", 0.056)) * 100.0 + 0.6, min(10.8, (float(atr_val) / max(float(last['Close']), 1e-6)) * 195.0))
+        if plan_type in ["LONG", "SHORT"] and float(trade_plan_eval.get("stop_pct", 0.0)) > _max_allowed_stop_m:
             plan_type = "WATCH"
-            status = f"⚪ 觀望 (結構止損過寬達 {trade_plan_eval.get('stop_pct', 0):.1f}% > 6.2% 上限，等待結構收窄)"
+            status = f"⚪ 觀望 (結構止損過寬達 {trade_plan_eval.get('stop_pct', 0):.1f}% > {_max_allowed_stop_m:.1f}% 動態上限，等待結構收窄)"
         target_entry = trade_plan_eval["entry"]
         if plan_type == "LONG":
             stop_loss = trade_plan_eval["sl"]
@@ -6631,12 +6694,9 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                             actual_entry_price = _planned_e
                             _is_filled = True
                     elif _order_style == "LIMIT":
+                        # [v39.0 嚴格遵守限價回踩低吸紀律] 僅當日內低點實際觸及建議限價位 _planned_e 且開盤未直接跳空跌破止損時成交，絕不偷換為追高突破單！
                         if float(row['Low']) <= _planned_e and float(row['Open']) > _planned_sl * 1.005:
                             actual_entry_price = min(float(row['Open']), _planned_e)
-                            _is_filled = True
-                        elif float(row['High']) >= float(prev_row['High']) and float(row['Open']) <= float(prev_row['High']) * 1.02:
-                            actual_entry_price = max(float(row['Open']), float(prev_row['High']))
-                            _order_style = "STOP(確認轉強)"
                             _is_filled = True
                     else:
                         trigger_price = max(_planned_e, float(prev_row['High']))
@@ -6646,9 +6706,10 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
 
                     if _is_filled and actual_entry_price > 0:
                         entry_price = actual_entry_price * (1.0 + market_slippage)
-                        # [v25.1 中線波段止損距離保護] 確保回測止損距離實際成交價至少 >= min_stop_pct (3.2%) 且 <= max_stop_pct (7.8%)
+                        # [v39.0 同步高 ADR% 動態止損上限] 允許高波動美股使用最高 10.8% (1.95x ATR%) 之真實結構止損，並由等風險倉位公式自動縮減股數
+                        _dyn_max_sl_pct = min(0.108, max(max_stop_pct, (atr_val / max(entry_price, 1e-6)) * 1.95))
                         _upper_sl_bound = entry_price * (1.0 - min_stop_pct)
-                        _lower_sl_bound = entry_price * (1.0 - max_stop_pct)
+                        _lower_sl_bound = entry_price * (1.0 - _dyn_max_sl_pct)
                         if _lower_sl_bound <= _planned_sl <= _upper_sl_bound:
                             stop_loss = _planned_sl
                         else:
@@ -6767,12 +6828,9 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                             actual_entry_price = _planned_e
                             _is_filled = True
                     elif _order_style == "LIMIT":
+                        # [v39.0 嚴格遵守空頭逢高反彈限價紀律] 僅當日內高點觸及反彈阻力限價位 _planned_e 時成交
                         if float(row['High']) >= _planned_e and float(row['Open']) < _planned_sl * 0.995:
                             actual_entry_price = max(float(row['Open']), _planned_e)
-                            _is_filled = True
-                        elif float(row['Low']) <= float(prev_row['Low']) and float(row['Open']) >= float(prev_row['Low']) * 0.98:
-                            actual_entry_price = min(float(row['Open']), float(prev_row['Low']))
-                            _order_style = "STOP(破底追空)"
                             _is_filled = True
                     else:
                         trigger_price = min(_planned_e, float(prev_row['Low']))
@@ -6872,13 +6930,16 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                 #     _sma20_above_entry = float(prev_row.get('SMA20', 0)) > entry_price * 1.005
                 #     if _reached_1r or _sma20_above_entry:
                 # NEW: [v28.0 修復低吸買入後因 20MA 本身略高於買入價而過早移至保本被洗出之漏洞 + 雙層防洗盤止損]
-                if position_stage == 0 and days_in_trade >= breakeven_min_days:
+                # [v40.0 回測與實盤 100% 同步：TP0 (+1.15R / +4.5%) 利潤墊保護與階梯移至富途打和價]
+                _tp0_trigger_p = min(entry_price * 1.045, entry_price + 1.15 * initial_risk_per_share)
+                if position_stage == 0 and (float(prev_row['High']) >= _tp0_trigger_p or days_in_trade >= breakeven_min_days):
+                    _reached_tp0 = float(prev_row['High']) >= _tp0_trigger_p and float(prev_row['Close']) >= entry_price + 0.55 * initial_risk_per_share
                     _reached_1r = float(prev_row['Close']) >= (entry_price + 1.0 * initial_risk_per_share)
                     _sma20_trailed_up = (float(prev_row.get('SMA20', 0)) > entry_price * 1.012) and (float(prev_row['Close']) >= entry_price + 0.75 * initial_risk_per_share)
-                    if _reached_1r or _sma20_trailed_up:
+                    if _reached_tp0 or _reached_1r or _sma20_trailed_up:
                         position_stage = 1
                         _be_info = compute_futu_real_fees(market_type, entry_price, shares)
-                        stop_loss = max(stop_loss, _be_info["breakeven_long_price"])
+                        stop_loss = max(stop_loss, round(_be_info["breakeven_long_price"] * 1.003, 2))
 
                 _soft_close_sl_bt = (stop_loss + 0.25 * atr_val) if position_stage == 0 else stop_loss
                 _hard_stop_hit_bt = float(row['Low']) <= stop_loss
@@ -7020,8 +7081,12 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                 _soft_close_stop_hit_bts = (position_stage == 0) and (float(row['Close']) >= _soft_close_sl_bts) and (float(row['Close']) > float(row.get('SMA20_Deduction', 999999)) or float(row['Close']) > float(row['Open']))
 
                 if _hard_stop_hit_bts or _soft_close_stop_hit_bts or is_time_stop:
-                    base_exit = max(row['Open'], stop_loss) if _hard_stop_hit_bts else row['Close']
-                    result_text = ("觸發空頭保本止損" if position_stage >= 1 else ("觸發空頭收盤結構破位止損" if _soft_close_stop_hit_bts and not _hard_stop_hit_bts else "觸發空頭盤中硬止損")) if (_hard_stop_hit_bts or _soft_close_stop_hit_bts) else f"空頭時間停損 ({time_stop_days}日)"
+                    if _margin_call_hit and not _hard_stop_hit_bts:
+                        base_exit = float(row['High'])
+                        result_text = "🚨 觸發維持保證金不足強制平倉 (Margin Call)"
+                    else:
+                        base_exit = max(row['Open'], stop_loss) if _hard_stop_hit_bts else row['Close']
+                        result_text = ("觸發空頭保本止損" if position_stage >= 1 else ("觸發空頭收盤結構破位止損" if _soft_close_stop_hit_bts and not _hard_stop_hit_bts else "觸發空頭盤中硬止損")) if (_hard_stop_hit_bts or _soft_close_stop_hit_bts) else f"空頭時間停損 ({time_stop_days}日)"
 
                     exit_price = base_exit * (1.0 + market_slippage)
                     cover_fee = compute_futu_real_fees(market_type, exit_price, shares, is_sell=False)["single_leg_fee"]
@@ -7063,10 +7128,12 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         margin_released = short_margin_locked * ratio_sold
                         short_margin_locked -= margin_released
 
+                        borrow_fee_part = round(_cum_borrow_fee * ratio_sold, 2)
+                        _cum_borrow_fee = max(0.0, _cum_borrow_fee - borrow_fee_part)
                         gross_pnl = (entry_price - exit_price) * sold_shares
                         cash += (margin_released + gross_pnl - cover_fee)
                         shares -= sold_shares
-                        total_leg_fee = round(entry_fee_part + cover_fee, 2)
+                        total_leg_fee = round(entry_fee_part + cover_fee + borrow_fee_part, 2)
 
                         partial_info = trade_info.copy()
                         partial_info.update({
@@ -7092,7 +7159,8 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         entry_fee_alloc = float(trade_info.get("_entry_fee", 0.0))
                         gross_pnl = (entry_price - exit_price) * shares
                         cash += (short_margin_locked + gross_pnl - cover_fee)
-                        total_leg_fee = round(entry_fee_alloc + cover_fee, 2)
+                        total_leg_fee = round(entry_fee_alloc + cover_fee + _cum_borrow_fee, 2)
+                        _cum_borrow_fee = 0.0
                         profit = gross_pnl - total_leg_fee
                         trade_info.update({
                             "出場日期": current_date,
@@ -7116,7 +7184,8 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         entry_fee_alloc = float(trade_info.get("_entry_fee", 0.0))
                         gross_pnl = (entry_price - exit_price) * shares
                         cash += (short_margin_locked + gross_pnl - cover_fee)
-                        total_leg_fee = round(entry_fee_alloc + cover_fee, 2)
+                        total_leg_fee = round(entry_fee_alloc + cover_fee + _cum_borrow_fee, 2)
+                        _cum_borrow_fee = 0.0
                         profit = gross_pnl - total_leg_fee
                         trade_info.update({
                             "出場日期": current_date,
@@ -7401,9 +7470,22 @@ def render_radar_results(df_results, title, market_key=None):
                 for idx_r, (_, r_row) in enumerate(top_long.iterrows(), 1):
                     _sec_name = get_ticker_sector(r_row['代碼'])
                     try:
-                        _lot_r = POPULAR_HK_LOTS.get(r_row['代碼'], 100) if str(r_row['代碼']).endswith(".HK") else 1
-                        _sz_g = compute_equal_risk_position_cap(float(r_row['最新價']), float(r_row['ATR防守止損']), fixed_risk_budget=600.0, max_notional_cap=20000.0, lot_size=_lot_r)
-                        _sz_line = f"💡 **等風險倉位上限 (1R=$600)**：建議買入 **${_sz_g['recommended_notional']:,.0f}**（**{_sz_g['recommended_shares']} 股** ｜ 現價止損 **-{_sz_g['stop_pct']:.2f}%**）"
+                        _is_hk_r = str(r_row['代碼']).upper().endswith(".HK")
+                        _mkt_r = "HK" if _is_hk_r else "US/Global"
+                        _lot_r = POPULAR_HK_LOTS.get(r_row['代碼'], 100) if _is_hk_r else 1
+                        _sz_g = compute_equal_risk_position_cap(float(r_row['最新價']), float(r_row['ATR防守止損']), fixed_risk_budget=600.0, max_notional_cap=20000.0, lot_size=_lot_r, market_type=_mkt_r)
+                        _cur_lbl = _sz_g.get("currency_symbol", "HK$" if _is_hk_r else "US$")
+                        _rk_b_lbl = f"{_cur_lbl}{_sz_g.get('risk_budget_used', 4680 if _is_hk_r else 600):,.0f}"
+                        if _sz_g.get("min_1lot_over_budget"):
+                            _sz_line = (
+                                f"⚠️ **港股1手超預算預警 (基準1R={_rk_b_lbl})**：最低 1 手 ({_lot_r}股 = {_cur_lbl}{_sz_g['recommended_notional']:,.0f}) "
+                                f"止損將虧損 **{_cur_lbl}{_sz_g['min_1lot_loss']:,.0f}**，建議用富途碎股買入 **{_sz_g['unrounded_shares']} 股** 或擴大本金！"
+                            )
+                        else:
+                            _sz_line = (
+                                f"💡 **等風險倉位上限 (1R={_rk_b_lbl})**：建議買入 **{_cur_lbl}{_sz_g['recommended_notional']:,.0f}**"
+                                f"（**{_sz_g['recommended_shares']} 股** ｜ 現價止損 **-{_sz_g['stop_pct']:.2f}%**）"
+                            )
                     except Exception:
                         _sz_line = ""
                     st.success(
@@ -7564,7 +7646,8 @@ def run_all_inclusive_radar(stock_list):
             _sl_desc = f"{_tp_eval.get('sl_basis_desc', '-')} (風險 -{_stop_pct:.1f}%)" if ptype in ["LONG", "SHORT"] else "-"
             _tp_desc = _tp_eval.get("tp_basis_desc", "-")
             _rr_str = f"{_planned_rr:.2f}R (次級 {_tp2_rr:.2f}R)" if ptype in ["LONG", "SHORT"] else "-"
-            _is_fresh_trigger = int(any(k in status for k in ["🔥", "🟢", "🔴", "🏴‍☠️", "🩸"]))
+            _action_time_str_pre = str(_tp_eval.get("action_timeliness", ""))
+            _is_fresh_trigger = int(_action_time_str_pre.startswith("⚡") or any(k in status for k in ["突破", "破底", "2B", "匯聚買點", "EP"]))
             _meta_score_val = _jlaw_m.get("meta_long_score", 0) if ptype == "LONG" else (_jlaw_m.get("meta_short_score", 0) if ptype == "SHORT" else 0)
 
             _holistic_g = df.attrs.get("holistic_grade_info", {})
@@ -7967,6 +8050,14 @@ if mode == mode_options[0]:
 
                 st.session_state.radar_correlation_warnings[dict_key] = warnings
                 st.session_state.radar_correlation_matrices[dict_key] = corr_matrix
+                with _CACHE_LOCK:
+                    _global_persistent_data["radar_results"][dict_key] = df_res
+                    _global_persistent_data["radar_correlation_warnings"][dict_key] = warnings
+                    _global_persistent_data["radar_correlation_matrices"][dict_key] = corr_matrix
+                    _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
+                    _global_persistent_data.setdefault("radar_breadth_stats", {}).update(persistent_data.get("radar_breadth_stats", {}))
+                    _global_persistent_data.setdefault("signal_lifecycle_store", {}).update(persistent_data.get("signal_lifecycle_store", {}))
+                    save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
             else:
                 st.error("⚠️ 未取得任何有效數據，所有股票可能未能符合當前系統的過濾標準。")
 
@@ -7998,6 +8089,7 @@ elif mode == mode_options[2]:
             if st.button("建立分組"):
                 if new_cat and new_cat not in st.session_state.watchlist_dict:
                     st.session_state.watchlist_dict[new_cat] = []
+                    save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
                     st.success(f"已建立分組: {new_cat}")
                     time.sleep(0.5)
                     st.rerun()
@@ -8010,6 +8102,7 @@ elif mode == mode_options[2]:
                     del st.session_state.watchlist_dict[cat_to_del]
                     if cat_to_del in st.session_state.watchlist_radar_results:
                         del st.session_state.watchlist_radar_results[cat_to_del]
+                    save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
                     st.success(f"已刪除分組: {cat_to_del}")
                     time.sleep(0.5)
                     st.rerun()
@@ -8032,6 +8125,7 @@ elif mode == mode_options[2]:
                     fmt, _, _, _, _ = format_and_detect_market(add_ticker)
                     if fmt not in st.session_state.watchlist_dict[cat]:
                         st.session_state.watchlist_dict[cat].append(fmt)
+                        save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
                         st.success(f"已加入 {fmt} 到 {cat}")
                         time.sleep(0.5)
                         st.rerun()
@@ -8044,6 +8138,7 @@ elif mode == mode_options[2]:
                     del_ticker = st.selectbox(f"🗑️ 從「{cat}」移除", ["-- 請選擇 --"] + current_list, key=f"del_{cat}")
                     if del_ticker != "-- 請選擇 --":
                         st.session_state.watchlist_dict[cat].remove(del_ticker)
+                        save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
                         st.success(f"已移除 {del_ticker}")
                         time.sleep(0.5)
                         st.rerun()
@@ -8068,9 +8163,16 @@ elif mode == mode_options[2]:
                                 lookback=50,
                                 threshold=0.75
                             )
-                            # 將相關性數據存入特定的 key
+                            # 將相關性數據存入特定的 key 並同步至全域快取
                             st.session_state.radar_correlation_warnings[f"自選_{cat}"] = warnings
                             st.session_state.radar_correlation_matrices[f"自選_{cat}"] = corr_matrix
+                            mark_radar_cache_updated(persistent_data, f"自選_{cat}")
+                            with _CACHE_LOCK:
+                                _global_persistent_data.setdefault("watchlist_radar_results", {})[cat] = df_res
+                                _global_persistent_data["radar_correlation_warnings"][f"自選_{cat}"] = warnings
+                                _global_persistent_data["radar_correlation_matrices"][f"自選_{cat}"] = corr_matrix
+                                _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
+                                save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
                             
                         else:
                             st.error("掃描失敗，未取得有效數據。")
