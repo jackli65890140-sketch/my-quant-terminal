@@ -128,15 +128,25 @@ RADAR_CACHE_TTL_SECONDS = 1800  # 雷達結果預設 30 分鐘自動過期重算
 # 2) 升級「🛡️ 實戰持倉防守與風控導航」：新增「實際持倉手數 / 股數」與「實際持倉金額」雙向連動輸入，精確計算實時淨浮盈 ($)、止損實質淨風險 ($)、TP0/TP1 應賣出之確切股數/手數與預計落袋金額 ($)，並自動識別港股「1手單倉」切換為全進全出階梯鎖潤；
 # 3) 升級「📅 業績公佈日、除淨日與黑天鵝風險雷達」：三層解析 yfinance 財報具體日期 (YYYY-MM-DD) 與倒數天數、除淨日 (防除息假破位) 及量價黑天鵝異動；
 # 4) 新增「📰 實時新聞情報搜尋與 AI 利好/利空 × 量價背馳診斷引擎 (fetch_and_analyze_stock_news_intelligence)」：結合 yfinance News 與 Google News RSS 雙源檢索，自動分類 6 大催化劑、評定利好/利空分數，並交叉比對當日 K 線揭露「利好出貨 (Sell the News)」或「利空出盡」！
-CURRENT_SCHEMA_VERSION = "v37.0"
+# OLD: CURRENT_SCHEMA_VERSION = "v37.0"
+# NEW: [v38.0 100%保留原版UI介面 × 修復美股雷達 st.dataframe 崩潰 × 退市改名股池清洗 × 納指/標普雙基準共振 × 回測閉環版]
+CURRENT_SCHEMA_VERSION = "v38.0"
 import threading as _threading_lib
 _CACHE_LOCK = _threading_lib.Lock()
 
+US_TICKER_ALIAS_MAP: Dict[str, str] = {
+    "SQ": "XYZ",       # Block Inc. 2025年1月正式由 SQ 改名為 XYZ
+    "BRK.B": "BRK-B",  # Yahoo Finance 格式統一
+    "BF.B": "BF-B",
+    "FB": "META",
+}
+
 def sanitize_ticker_input(raw_ticker: str, default_val: str = "0700.HK") -> str:
-    """[v31.0 安全加固] 對 URL Query Params 或輸入框代碼進行白名單正則消毒，防止跨站或異常字符注入"""
+    """[v38.0 安全加固與美股改名映射] 對 URL Query Params 或輸入框代碼進行白名單正則消毒並自動轉換改名代碼"""
     if not raw_ticker or not isinstance(raw_ticker, str):
         return default_val
     cleaned = re.sub(r"[^A-Za-z0-9.\^=-]", "", raw_ticker.strip().upper())
+    cleaned = US_TICKER_ALIAS_MAP.get(cleaned, cleaned)
     return cleaned[:15] if cleaned else default_val
 
 def evaluate_premarket_gap_and_orb_stop_protocol(
@@ -1920,7 +1930,9 @@ SECTOR_MAPPING: Dict[str, str] = {
     "NVDA": "AI與半導體", "AMD": "AI與半導體", "AVGO": "AI與半導體", "TSM": "AI與半導體", "ASML": "AI與半導體", "ARM": "AI與半導體", "MU": "AI與半導體", "QCOM": "AI與半導體", "INTC": "AI與半導體", "SMCI": "AI與半導體",
     "AAPL": "大型科技巨頭", "MSFT": "大型科技巨頭", "GOOGL": "大型科技巨頭", "AMZN": "大型科技巨頭", "META": "大型科技巨頭", "NFLX": "大型科技巨頭", "TSLA": "新能源車與智駕",
     "PLTR": "AI與企業軟件", "CRWD": "網絡安全與雲端", "PANW": "網絡安全與雲端", "ZS": "網絡安全與雲端", "SNOW": "AI與企業軟件", "DDOG": "AI與企業軟件", "CRM": "AI與企業軟件", "ADBE": "AI與企業軟件", "ORCL": "AI與企業軟件", "SHOP": "電商與金融科技",
-    "COIN": "加密資產與Fintech", "MSTR": "加密資產與Fintech", "PYPL": "加密資產與Fintech", "SQ": "加密資產與Fintech", "UBER": "共享出行與旅遊", "ABNB": "共享出行與旅遊"
+    "COIN": "加密資產與Fintech", "MSTR": "加密資產與Fintech", "PYPL": "加密資產與Fintech", "SQ": "加密資產與Fintech", "XYZ": "加密資產與Fintech", "HOOD": "加密資產與Fintech",
+    "UBER": "共享出行與旅遊", "ABNB": "共享出行與旅遊", "APP": "AI與企業軟件", "ANET": "AI與半導體", "RDDT": "科網平台", "AXON": "硬科技與消費電子",
+    "VST": "AI電力與能源", "CEG": "AI電力與能源", "GEV": "AI電力與能源"
 }
 
 def get_ticker_sector(ticker: str) -> str:
@@ -5097,11 +5109,13 @@ target_strict_from_radar = qp.get("strict", "")
 # 1. 智能代碼格式化與市場識別
 # ==========================================
 def format_and_detect_market(ticker):
-    ticker = ticker.strip().upper()
+    ticker = sanitize_ticker_input(str(ticker), default_val="0700.HK")
     if ticker.isdigit():
         ticker = f"{int(ticker):04d}.HK"
     elif len(ticker) <= 4 and ticker.replace('.', '').isdigit():
         ticker = f"{int(float(ticker)):04d}.HK"
+    else:
+        ticker = US_TICKER_ALIAS_MAP.get(ticker, ticker)
 
     if ticker.endswith(".HK"):
         return ticker, "HK", "^HSI", "恆生指數", "HKD"
@@ -5155,7 +5169,7 @@ def get_index_data(index_ticker, interval="1d"):
         elif interval in ["1h", "4h", "90m"]:
             period = "730d"
         else:
-            period = "max"
+            period = "5y"
 
         _dl_interval = "1h" if interval == "4h" else interval
         idx_df = yf.download(index_ticker, period=period, interval=_dl_interval, auto_adjust=True, progress=False)
@@ -5222,9 +5236,33 @@ HK_MOMENTUM_POOL = [
 US_MOMENTUM_POOL = [
     "NVDA", "AAPL", "TSLA", "PLTR", "MSFT", "AMZN", "META", "GOOGL", "AMD", "MSTR",
     "COIN", "SMCI", "AVGO", "CRWD", "NFLX", "ADBE", "SNOW", "DDOG", "ZS", "PANW",
-    "ARM", "ASML", "TSM", "INTC", "QCOM", "MU", "UBER", "ABNB", "PYPL", "SQ",
-    "ROKU", "SHOP", "PTON", "DOCU", "ZM", "INTU", "ORCL", "IBM", "CSCO", "CRM"
+    "ARM", "ASML", "TSM", "INTC", "QCOM", "MU", "UBER", "ABNB", "PYPL", "XYZ",
+    "ROKU", "SHOP", "APP", "ANET", "AXON", "VST", "CEG", "GEV", "HOOD", "RDDT",
+    "INTU", "ORCL", "IBM", "CSCO", "CRM"
 ]
+
+@st.cache_data(ttl=3600)
+def get_us_dual_benchmark_regime(interval: str = "1d") -> Dict[str, Any]:
+    out = {"nasdaq_bear": False, "nasdaq_dist_days": 0, "dual_index_hostile": False, "dual_index_note": ""}
+    if interval != "1d":
+        return out
+    try:
+        ndx_df = get_index_data("^IXIC", interval="1d")
+        if ndx_df is not None and len(ndx_df) >= 55:
+            last_n = ndx_df.iloc[-1]
+            c_n = float(last_n['Close'])
+            s50_n = float(last_n.get('SMA50', c_n))
+            s200_n = float(last_n.get('SMA200', c_n))
+            dist_n = int(float(last_n.get('Dist_Days_20d', 0)))
+            out["nasdaq_dist_days"] = dist_n
+            if c_n < s50_n or s50_n < s200_n:
+                out["nasdaq_bear"] = True
+            if out["nasdaq_bear"] or dist_n >= 5:
+                out["dual_index_hostile"] = True
+                out["dual_index_note"] = f"納斯達克指數 (^IXIC) 目前處於 50MA 下方或出貨日偏高 ({dist_n} 次)，美股成長股突破失敗率高"
+    except Exception:
+        pass
+    return out
 
 POPULAR_HK_LOTS = {
     "0700.HK": 100, "3690.HK": 100, "9988.HK": 100, "1810.HK": 200, "1211.HK": 500,
@@ -5468,6 +5506,8 @@ def calculate_indicators(df, bg_df, interval="1d", market_type="US/Global"):
     # [v25.1 清理無效重複欄位與前視偏差] 統一使用 100% 因果無未來函數之多層級結構支撐阻力、Wilder ATR/RSI 與三師特徵
     df = compute_causal_swing_sr(df)
     df['ATR_Wilder'], df['RSI_Wilder'] = compute_wilder_atr_and_rsi(df)
+    df['ATR'] = df['ATR_Wilder'].fillna(df['ATR'])
+    df['RSI'] = df['RSI_Wilder'].fillna(df['RSI'])
     df = compute_lei_dual_ma_and_ppo_features(df)
     df['ResShort'] = df['ResShort_Causal']
     df['SupShort'] = df['SupShort_Causal']
@@ -6091,9 +6131,16 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         is_breakout_long = (float(last['Close']) >= p_high_20 * 0.99) and (float(last['VolRatio']) > 1.35)
         early_stage_bypass = (last['Close'] > last['SMA50']) and (last['Ret1M'] > 0.20)
 
+        _ma_slope_pre = compute_ma_slope_and_pullback_trigger(df)
+        _is_20ma_reclaim_buy = bool(
+            is_near_20ma
+            and _ma_slope_pre.get("reclaimed_9ema_right_side", False)
+            and not _ma_slope_pre.get("ma_ribbon_sloping_down", False)
+            and float(last.get('VolRatio', 1.0)) <= 1.25
+        )
         is_long_trigger = momentum_ready and (
             (pass_count >= strictness_threshold) or early_stage_bypass
-        ) and (is_tight_setup or is_breakout_long)
+        ) and (is_tight_setup or is_breakout_long or _is_20ma_reclaim_buy)
 
         # [做空優化] 結合「原版結構空頭」與「J Law 動能破底」雙邏輯
         is_short_candidate_original = original_short_pass_count >= strictness_threshold
@@ -6156,9 +6203,11 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         df.attrs["exhaustion_guard"] = exh_guard_info
         _is_exhausted_bar = bool(exh_guard_info.get("is_exhausted_dont_chase", False))
         _bench_dist_now = float(last.get('Bench_Dist_Days', 0)) if pd.notna(last.get('Bench_Dist_Days')) else 0.0
+        _us_dual_bench = get_us_dual_benchmark_regime(interval=interval) if market_type != "HK" else {"dual_index_hostile": False}
         _live_market_hostile = bool(
             ms_metrics.get("market_bear", False)
             or _bench_dist_now >= 5
+            or (market_type != "HK" and _us_dual_bench.get("dual_index_hostile", False))
             or (market_type != "HK" and martin_luk_info.get("index_at_declining_ema_resistance", False) and _bench_dist_now >= 3)
         )
         df.attrs["live_market_hostile"] = _live_market_hostile
@@ -6439,6 +6488,9 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
         days_in_trade = 0
         shares = 0
         trade_counter = 0
+        _cum_borrow_fee = 0.0
+        _bt_loss_streak = 0
+        _bt_peak_equity = float(initial_capital)
         trade_log, history_equity, history_dates = [], [], []
 
         # 市場衝擊滑點 (不含券商手續費，券商手續費與印花稅由 compute_futu_real_fees 獨立精算)
@@ -6609,10 +6661,14 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         _planned_rr = (tp_target - entry_price) / risk_per_share
 
                         if _planned_rr >= 1.8:
-                            # OLD: risk_amount = current_equity * 0.01
-                            # NEW: [v25.4 J Law 出貨日風控聯動] 若個股近20日出貨日 >= 4 或大盤出貨日 >= 3，單筆風險自動減半至 0.5%
                             _dist_cnt_bar = float(prev_row.get('Dist_Days_20d', 0))
-                            _eff_risk_frac = 0.005 if (_dist_cnt_bar >= 4 or bench_dist >= 3) else 0.01
+                            _bt_peak_equity = max(_bt_peak_equity, current_equity)
+                            _bt_curr_dd_pct = ((_bt_peak_equity - current_equity) / max(_bt_peak_equity, 1.0)) * 100.0
+                            _eff_risk_frac = 0.005 if (_dist_cnt_bar >= 4 or bench_dist >= 3) else 0.0075
+                            if _bt_loss_streak >= 4 or _bt_curr_dd_pct >= 12.0:
+                                _eff_risk_frac = min(_eff_risk_frac, 0.0020)
+                            elif _bt_loss_streak >= 2 or _bt_curr_dd_pct >= 6.0:
+                                _eff_risk_frac = min(_eff_risk_frac, 0.0035)
                             risk_amount = current_equity * _eff_risk_frac
                             target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
                             _adr_bar = float(prev_row.get('ADR_Pct', 4.0))
@@ -6740,7 +6796,10 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         _planned_rr = (entry_price - tp_target) / risk_per_share
 
                         if _planned_rr >= 1.8:
-                            risk_amount = current_equity * 0.01
+                            _bt_peak_equity = max(_bt_peak_equity, current_equity)
+                            _bt_curr_dd_pct = ((_bt_peak_equity - current_equity) / max(_bt_peak_equity, 1.0)) * 100.0
+                            _eff_short_risk_frac = 0.0035 if (_bt_loss_streak >= 2 or _bt_curr_dd_pct >= 6.0) else 0.0075
+                            risk_amount = current_equity * _eff_short_risk_frac
                             target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
                             _adr_bar = float(prev_row.get('ADR_Pct', 4.0))
                             _max_notional_cap = current_equity * (0.25 if _adr_bar >= 6.0 else 0.35)
@@ -6759,6 +6818,7 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                                     cash -= (short_margin_locked + short_open_fee)
                                     position_stage = 0
                                     days_in_trade = 0
+                                    _cum_borrow_fee = 0.0
                                     entry_structural_sl = stop_loss
                                     position_type = "SHORT"
                                     trade_info = {
@@ -6931,9 +6991,9 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
 
             elif position_type == "SHORT":
                 days_in_trade += 1
-                # [v32.0 補齊空頭每日融券借券利息扣除 (年化 4.5% / 252) 與 30% 維持保證金強平檢查]
                 _daily_borrow_cost = (shares * float(row['Close'])) * (0.045 / 252.0)
                 cash -= _daily_borrow_cost
+                _cum_borrow_fee += _daily_borrow_cost
                 _short_unrealized = (entry_price - float(row['High'])) * shares
                 _margin_equity_intraday = cash + short_margin_locked + _short_unrealized
                 _maint_margin_req = (shares * float(row['High'])) * 0.30
@@ -6968,8 +7028,9 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                     entry_fee_alloc = float(trade_info.get("_entry_fee", 0.0))
                     gross_pnl = (entry_price - exit_price) * shares
                     cash += (short_margin_locked + gross_pnl - cover_fee)
-                    total_leg_fee = round(entry_fee_alloc + cover_fee, 2)
+                    total_leg_fee = round(entry_fee_alloc + cover_fee + _cum_borrow_fee, 2)
                     profit = gross_pnl - total_leg_fee
+                    _cum_borrow_fee = 0.0
 
                     trade_info.update({
                         "出場日期": current_date,
@@ -7071,12 +7132,16 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         short_margin_locked = 0.0
                         position_stage = 0
 
+            if position_type is None and trade_log:
+                _last_trd_profit = float(trade_log[-1].get("利潤", 0.0))
+                _bt_loss_streak = (_bt_loss_streak + 1) if _last_trd_profit <= 0 else 0
             if position_type == "LONG":
                 current_equity = cash + (shares * float(row['Close']))
             elif position_type == "SHORT":
                 current_equity = cash + short_margin_locked + ((entry_price - float(row['Close'])) * shares)
             else:
                 current_equity = cash
+            _bt_peak_equity = max(_bt_peak_equity, current_equity)
             history_equity.append(current_equity)
             history_dates.append(current_date)
 
@@ -7196,11 +7261,28 @@ if mode == mode_options[0]:
 # ==========================================
 # 10. 雷達顯示
 # ==========================================
-def render_styled_dataframe(df):
-    df = df.dropna(subset=['代碼', '最新價']).copy()
+_DF_RENDER_COUNTER = 0
+
+def render_styled_dataframe(df, table_key: Optional[str] = None):
+    """
+    [v38.0 100% 保留原版 st.dataframe 視覺與顏色介面，並在底層修復美股列表序列化與無 key 衝突]
+    1) 強制執行 reset_index(drop=True) 並淨化字串/浮點數 NaN，消除子表切片索引不連續造成的 Pandas Styler / PyArrow 序列化崩潰；
+    2) 自動為每個 st.dataframe 綁定唯一 key，防止同頁同時渲染港股與美股多個表格時引發前端模組衝突。
+    """
+    global _DF_RENDER_COUNTER
+    if df is None or df.empty:
+        st.warning("數據過濾後無符合條件的結果。")
+        return
+    df = df.dropna(subset=['代碼', '最新價']).copy().reset_index(drop=True)
     if df.empty:
         st.warning("數據過濾後無符合條件的結果。")
         return
+
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].fillna("-").astype(str)
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].fillna(0)
 
     def highlight_status(val):
         if isinstance(val, str):
@@ -7224,11 +7306,13 @@ def render_styled_dataframe(df):
                 return 'color: #808080;'
         return ''
 
-    # OLD: styled_df = df.style.map(highlight_status, subset=['J Law 強勢形態', '診斷結果', '交易方向'])
-    # NEW: [修復 Screenshot 2 KeyError] 動態取 df.columns 交集，無論精簡視圖或完整視圖均絕不拋出 KeyError
     _valid_style_cols = [c for c in ['優先次序', 'J Law 強勢形態', '診斷結果', '交易方向', '信號狀態', 'META多重優勢'] if c in df.columns]
     styled_df = df.style.map(highlight_status, subset=_valid_style_cols) if _valid_style_cols else df.style
-    
+
+    if not table_key:
+        _DF_RENDER_COUNTER += 1
+        table_key = f"styled_df_{_DF_RENDER_COUNTER}_{len(df)}_{len(df.columns)}"
+
     st.dataframe(
         styled_df,
         column_config={
@@ -7240,7 +7324,8 @@ def render_styled_dataframe(df):
             "代碼": st.column_config.TextColumn("代碼")
         },
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        key=table_key
     )
 
 def render_radar_results(df_results, title, market_key=None):
@@ -7413,7 +7498,7 @@ def render_radar_results(df_results, title, market_key=None):
 
         st.markdown("#### 🟢 做多 (Long) 完整排名列表 (已按 #1, #2, #3 優先次序排列)")
         if not df_long.empty:
-            render_styled_dataframe(_prepare_display_df(df_long))
+            render_styled_dataframe(_prepare_display_df(df_long), table_key=f"radar_long_tbl_{market_key}")
         else:
             st.info("目前沒有符合做多條件的標的。")
 
@@ -7421,13 +7506,13 @@ def render_radar_results(df_results, title, market_key=None):
 
         st.markdown("#### 🔴 做空 (Short) 完整排名列表 (已按 #1, #2, #3 優先次序排列)")
         if not df_short.empty:
-            render_styled_dataframe(_prepare_display_df(df_short))
+            render_styled_dataframe(_prepare_display_df(df_short), table_key=f"radar_short_tbl_{market_key}")
         else:
             st.info("目前沒有符合做空條件的標的。")
 
         if not df_watch.empty:
             with st.expander("⚪ 觀望名單 (未觸發或已觸及止損失效)", expanded=False):
-                render_styled_dataframe(_prepare_display_df(df_watch))
+                render_styled_dataframe(_prepare_display_df(df_watch), table_key=f"radar_watch_tbl_{market_key}")
 
 # ==========================================
 # 11. 全景雷達掃描
