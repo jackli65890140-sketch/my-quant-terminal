@@ -174,7 +174,7 @@ RADAR_CACHE_TTL_SECONDS = 1800  # 雷達結果預設 30 分鐘自動過期重算
 #    - 🇺🇸 美股模式：針對美股零印花稅、1股可拆賣但常於 +6.5%~+8.5% 出現 Squat 回抽之微結構，採用《超級績效 2》「2R~2.4R 強勢賣出一半 (TP1) + 尾倉沿 21EMA 奔跑搏遠端大目標 (TP2)」雙軌制！
 # 5) [Five-Stage Bull/Bear & Correction-Ending Engine] 同時分辨「🐂 確認牛市」、「🌤️ 大盤調整結束 / 熊轉牛初段 (彈簧股爆發期)」、「🟡 牛市中期修正」、「🌩️ 牛市見頂派發預警」與「🐻 確認熊市」；
 # 6) [Small/Mid-Cap High-Velocity Pool] 新增「🚀 超級績效・中小型高彈性潛力池」並配備日均成交額 ≥ 2,000萬港元防老千股護欄。
-CURRENT_SCHEMA_VERSION = "v47.0"
+CURRENT_SCHEMA_VERSION = "v48.0"
 
 # ==============================================================================
 # 1. 《超級績效 1 & 2》VCP 遞進收縮足跡 + 3-C (Low Cheat / Cheat / Pivot) 識別引擎
@@ -8786,17 +8786,17 @@ _DF_RENDER_COUNTER = 0
 
 def render_styled_dataframe(df, table_key: Optional[str] = None):
     """
-    [v38.0 100% 保留原版 st.dataframe 視覺與顏色介面，並在底層修復美股列表序列化與無 key 衝突]
-    1) 強制執行 reset_index(drop=True) 並淨化字串/浮點數 NaN，消除子表切片索引不連續造成的 Pandas Styler / PyArrow 序列化崩潰；
-    2) 自動為每個 st.dataframe 綁定唯一 key，防止同頁同時渲染港股與美股多個表格時引發前端模組衝突。
+    [v48.0 富途牛牛式互動選股表：每行內置「☑️ 勾選方格」與「⭐ 點擊放入自選類別」下拉格]
+    1) 方式 A (單隻秒存)：直接點擊該行股票旁邊的「⭐ 點擊放入自選」方格並選擇類別，無需按確認掣即刻自動存入該自選分組！
+    2) 方式 B (勾選多格批量存入)：勾選最左邊「☑️ 勾選」方格，表格下方即時浮現所有自選類別一鍵按鈕與新建類別輸入框，點擊即批量歸檔！
     """
     global _DF_RENDER_COUNTER
     if df is None or df.empty:
-        st.warning("數據過濾後無符合條件的結果。")
+        render_atomic_alert("數據過濾後無符合條件的結果。", "warning")
         return
     df = df.dropna(subset=['代碼', '最新價']).copy().reset_index(drop=True)
     if df.empty:
-        st.warning("數據過濾後無符合條件的結果。")
+        render_atomic_alert("數據過濾後無符合條件的結果。", "warning")
         return
 
     for col in df.columns:
@@ -8805,49 +8805,141 @@ def render_styled_dataframe(df, table_key: Optional[str] = None):
         elif pd.api.types.is_numeric_dtype(df[col]):
             df[col] = df[col].fillna(0)
 
-    def highlight_status(val):
-        if isinstance(val, str):
-            if '🔥' in val or '🟢' in val or '🌟' in val:
-                return 'color: #00FF00; font-weight: bold;'
-            if '🔴' in val:
-                return 'color: #FF4B4B; font-weight: bold;'
-            if '🩸' in val:
-                return 'color: #D32F2F; font-weight: bold;'
-            if '🏴‍☠️' in val:
-                return 'color: #000000; font-weight: bold; background-color: #EF5350;'
-            if '🟠' in val:
-                return 'color: #FFA500; font-weight: bold;'
-            if '🟡' in val:
-                return 'color: #FFD700;'
-            if '⚪' in val:
-                return 'color: #A9A9A9; font-style: italic;'
-            if '🚨' in val:
-                return 'color: #FF6347;'
-            if '🗑️' in val:
-                return 'color: #808080;'
-        return ''
-
-    _valid_style_cols = [c for c in ['優先次序', 'J Law 強勢形態', '診斷結果', '交易方向', '信號狀態', 'META多重優勢'] if c in df.columns]
-    styled_df = df.style.map(highlight_status, subset=_valid_style_cols) if _valid_style_cols else df.style
-
     if not table_key:
         _DF_RENDER_COUNTER += 1
         table_key = f"styled_df_{_DF_RENDER_COUNTER}_{len(df)}_{len(df.columns)}"
 
-    st.dataframe(
-        styled_df,
-        column_config={
-            "跳轉診斷": st.column_config.LinkColumn(
-                "🔍 分析器",
-                display_text="進入診斷",
-                help="請使用下方選單進入診斷"
-            ),
-            "代碼": st.column_config.TextColumn("代碼")
-        },
-        use_container_width=True,
-        hide_index=True,
-        key=table_key
-    )
+    wl_dict = st.session_state.watchlist_dict
+    all_cats = list(wl_dict.keys())
+    _placeholder_opt = "➕ 點擊選擇類別..."
+    _select_options = [_placeholder_opt] + all_cats
+
+    work_df = df.copy()
+    # 計算每隻股票目前已屬於哪些自選類別
+    def _get_in_wl_str(tk_val: str) -> str:
+        fmt_t, _, _, _, _ = format_and_detect_market(tk_val)
+        matched_c = [c for c, gl in wl_dict.items() if fmt_t in gl or tk_val in gl]
+        return " / ".join(matched_c) if matched_c else "-"
+
+    if "📂 所屬自選" not in work_df.columns:
+        work_df.insert(0, "📂 所屬自選", work_df["代碼"].apply(_get_in_wl_str))
+    if "⭐ 點擊放入自選" not in work_df.columns:
+        work_df.insert(0, "⭐ 點擊放入自選", _placeholder_opt)
+    if "☑️ 勾選" not in work_df.columns:
+        work_df.insert(0, "☑️ 勾選", False)
+
+    editable_cols = {"☑️ 勾選", "⭐ 點擊放入自選"}
+    disabled_cols = [c for c in work_df.columns if c not in editable_cols]
+
+    try:
+        edited_df = st.data_editor(
+            work_df,
+            column_config={
+                "☑️ 勾選": st.column_config.CheckboxColumn(
+                    "☑️ 勾選",
+                    help="點擊方格勾選此股票，可於表格下方一鍵放入任何自選類別",
+                    default=False,
+                    width="small"
+                ),
+                "⭐ 點擊放入自選": st.column_config.SelectboxColumn(
+                    "⭐ 點擊放入自選",
+                    options=_select_options,
+                    help="直接點擊此格選擇自選類別（如：🌟 我的最愛），系統即刻自動存入！",
+                    width="medium"
+                ),
+                "📂 所屬自選": st.column_config.TextColumn(
+                    "📂 所屬自選",
+                    help="此股票目前已收藏的自選類別",
+                    width="small"
+                ),
+                "跳轉診斷": st.column_config.LinkColumn(
+                    "🔍 分析器",
+                    display_text="進入診斷",
+                    help="點擊直接進入個股 K 線與買賣位診斷",
+                    width="small"
+                ),
+                "代碼": st.column_config.TextColumn("代碼", width="small")
+            },
+            disabled=disabled_cols,
+            use_container_width=True,
+            hide_index=True,
+            key=f"de_{table_key}"
+        )
+    except Exception:
+        st.dataframe(work_df, use_container_width=True, hide_index=True, key=f"fb_{table_key}")
+        return
+
+    if isinstance(edited_df, pd.DataFrame) and not edited_df.empty:
+        # 1. 檢測用戶是否直接點擊了某一行的「⭐ 點擊放入自選」下拉格選擇了類別
+        _direct_assigned = []
+        for _, r_ed in edited_df.iterrows():
+            _chosen_cat = str(r_ed.get("⭐ 點擊放入自選", _placeholder_opt))
+            if _chosen_cat != _placeholder_opt and _chosen_cat in wl_dict:
+                _tk_ed, _, _, _, _ = format_and_detect_market(str(r_ed.get("代碼", "")))
+                _nm_ed = str(r_ed.get("股票名稱", _tk_ed))
+                if _tk_ed and _tk_ed not in wl_dict[_chosen_cat]:
+                    wl_dict[_chosen_cat].append(_tk_ed)
+                    _direct_assigned.append((_tk_ed, _nm_ed, _chosen_cat))
+                elif _tk_ed in wl_dict[_chosen_cat]:
+                    st.toast(f"ℹ️ {_tk_ed} ({_nm_ed}) 已經在【{_chosen_cat}】內！")
+        if _direct_assigned:
+            save_persisted_state_to_disk(persistent_data, wl_dict)
+            for _tk_a, _nm_a, _cat_a in _direct_assigned:
+                st.toast(f"⭐ 已將 {_tk_a} ({_nm_a}) 放入自選類別【{_cat_a}】！")
+            st.rerun()
+
+        # 2. 檢測用戶是否勾選了「☑️ 勾選」方格 (支援一鍵點擊類別按鈕批量存入或新建類別)
+        _checked_mask = edited_df["☑️ 勾選"].astype(bool)
+        _checked_df = edited_df[_checked_mask]
+        if not _checked_df.empty:
+            _checked_syms = []
+            _checked_labels = []
+            for _, _cr in _checked_df.iterrows():
+                _ctk, _, _, _, _ = format_and_detect_market(str(_cr.get("代碼", "")))
+                _cnm = str(_cr.get("股票名稱", ""))
+                if _ctk:
+                    _checked_syms.append(_ctk)
+                    _checked_labels.append(f"{_ctk}({_cnm})")
+            render_atomic_alert(
+                f"☑️ **已勾選 {len(_checked_syms)} 隻股票**：`{', '.join(_checked_labels)}` —— **請點擊下方你想放入的自選類別按鈕（一按即存）**：",
+                "success"
+            )
+            # 渲染富途式橫向一鍵類別按鈕列
+            _btn_cols_cnt = min(len(all_cats) + 2, 6)
+            _b_cols = st.columns(_btn_cols_cnt)
+            for _c_idx, _cat_btn_name in enumerate(all_cats):
+                with _b_cols[_c_idx % _btn_cols_cnt]:
+                    if st.button(f"➕ 放入【{_cat_btn_name}】", key=f"chk_add_{table_key}_{_c_idx}", use_container_width=True):
+                        _added_n = 0
+                        for _s_add in _checked_syms:
+                            if _s_add not in wl_dict[_cat_btn_name]:
+                                wl_dict[_cat_btn_name].append(_s_add)
+                                _added_n += 1
+                        save_persisted_state_to_disk(persistent_data, wl_dict)
+                        st.toast(f"⭐ 已將 {len(_checked_syms)} 隻勾選股票放入【{_cat_btn_name}】！")
+                        st.rerun()
+            # 支援當場新建分組並放入
+            _nc_col1, _nc_col2 = st.columns([2.5, 1.5])
+            with _nc_col1:
+                _inline_new_cat = st.text_input(
+                    "➕ 或輸入新自選類別名稱將勾選股票放入:",
+                    placeholder="例如：今日突破觀察、下週重點...",
+                    key=f"chk_newcat_inp_{table_key}"
+                ).strip()
+            with _nc_col2:
+                st.write("")
+                if st.button("✨ 新建類別並放入勾選股", key=f"chk_newcat_btn_{table_key}", use_container_width=True):
+                    if _inline_new_cat:
+                        if _inline_new_cat not in wl_dict:
+                            wl_dict[_inline_new_cat] = []
+                        for _s_add in _checked_syms:
+                            if _s_add not in wl_dict[_inline_new_cat]:
+                                wl_dict[_inline_new_cat].append(_s_add)
+                        save_persisted_state_to_disk(persistent_data, wl_dict)
+                        st.toast(f"⭐ 已建立【{_inline_new_cat}】並存入 {', '.join(_checked_syms)}！")
+                        st.rerun()
+                    else:
+                        st.warning("請先輸入新類別名稱")
 
 def render_radar_results(df_results, title, market_key=None):
     if df_results is None or df_results.empty:
@@ -9007,6 +9099,29 @@ def render_radar_results(df_results, title, market_key=None):
                         f"- 💰 **波段止盈位 (港美雙軌)**：**{r_row['ATR目標止盈']}** — *{r_row.get('止盈阻力依據', '-')}*\n"
                         f"- ⚖️ **真實結構盈虧比**：**{r_row.get('預估盈虧比(R:R)', '-')}** ｜ {_sz_line}"
                     )
+                    _pb_tk_code = str(r_row['代碼'])
+                    _pb_in_cats = [c for c, gl in st.session_state.watchlist_dict.items() if _pb_tk_code in gl]
+                    _pb_c1, _pb_c2 = st.columns([2.4, 1.2])
+                    with _pb_c1:
+                        _pb_sel_cat = st.selectbox(
+                            f"⭐ 放入自選 ({_pb_tk_code}):",
+                            options=[f"⭐ 放入自選類別... (已在: {'/'.join(_pb_in_cats)})" if _pb_in_cats else "⭐ 點擊放入自選類別..."] + list(st.session_state.watchlist_dict.keys()),
+                            key=f"pb_card_wl_{market_key}_{idx_r}_{_pb_tk_code}",
+                            label_visibility="collapsed"
+                        )
+                        if _pb_sel_cat in st.session_state.watchlist_dict:
+                            if _pb_tk_code not in st.session_state.watchlist_dict[_pb_sel_cat]:
+                                st.session_state.watchlist_dict[_pb_sel_cat].append(_pb_tk_code)
+                                save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                                st.toast(f"⭐ 已將 {_pb_tk_code} ({r_row['股票名稱']}) 放入【{_pb_sel_cat}】！")
+                                st.rerun()
+                    with _pb_c2:
+                        if st.button(f"🔍 診斷 {_pb_tk_code}", key=f"pb_card_go_{market_key}_{idx_r}_{_pb_tk_code}", use_container_width=True):
+                            st.query_params["mode"] = "診斷"
+                            st.query_params["ticker"] = _pb_tk_code
+                            st.query_params["dir"] = "LONG"
+                            st.query_params["strict"] = str(strictness)
+                            st.rerun()
             else:
                 st.info("目前無同時滿足「多頭觸發 + 結構盈虧比 ≥ 1.8R」的優先買入股票，建議耐心等待。")
 
@@ -9025,6 +9140,29 @@ def render_radar_results(df_results, title, market_key=None):
                         f"- 💰 **結構回補位**：**{r_row['ATR目標止盈']}** — *{r_row.get('止盈阻力依據', '-')}*\n"
                         f"- ⚖️ **真實結構盈虧比**：**{r_row.get('預估盈虧比(R:R)', '-')}** ｜ 優勢：{r_row.get('META多重優勢', '-')} / {r_row.get('LEI頂底/2B', '-')}"
                     )
+                    _ps_tk_code = str(r_row['代碼'])
+                    _ps_in_cats = [c for c, gl in st.session_state.watchlist_dict.items() if _ps_tk_code in gl]
+                    _ps_c1, _ps_c2 = st.columns([2.4, 1.2])
+                    with _ps_c1:
+                        _ps_sel_cat = st.selectbox(
+                            f"⭐ 放入自選 ({_ps_tk_code}):",
+                            options=[f"⭐ 放入自選類別... (已在: {'/'.join(_ps_in_cats)})" if _ps_in_cats else "⭐ 點擊放入自選類別..."] + list(st.session_state.watchlist_dict.keys()),
+                            key=f"ps_card_wl_{market_key}_{idx_r}_{_ps_tk_code}",
+                            label_visibility="collapsed"
+                        )
+                        if _ps_sel_cat in st.session_state.watchlist_dict:
+                            if _ps_tk_code not in st.session_state.watchlist_dict[_ps_sel_cat]:
+                                st.session_state.watchlist_dict[_ps_sel_cat].append(_ps_tk_code)
+                                save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                                st.toast(f"⭐ 已將 {_ps_tk_code} ({r_row['股票名稱']}) 放入【{_ps_sel_cat}】！")
+                                st.rerun()
+                    with _ps_c2:
+                        if st.button(f"🔍 診斷 {_ps_tk_code}", key=f"ps_card_go_{market_key}_{idx_r}_{_ps_tk_code}", use_container_width=True):
+                            st.query_params["mode"] = "診斷"
+                            st.query_params["ticker"] = _ps_tk_code
+                            st.query_params["dir"] = "SHORT"
+                            st.query_params["strict"] = str(strictness)
+                            st.rerun()
             else:
                 st.info("目前無同時滿足「空頭觸發 + 結構盈虧比 ≥ 1.8R」的優先沽空股票。")
 
@@ -9565,31 +9703,83 @@ def render_interactive_tutorial_hub():
 if mode == mode_options[0]:
     render_atomic_section_header("🔎 市場動能掃描雷達", level=1)
     render_global_quick_guide_banner()
-    st.markdown("💡 **提示：** 系統已智能分辨美/港股。")
+    render_atomic_caption("💡 提示：掃描結果表格內每隻股票旁均設有 **「☑️ 勾選」方格** 與 **「⭐ 點擊放入自選」下拉格**，點擊即可直接將股票歸類至你的自選股票名單！")
 
-    quick_search = st.text_input("🔍 即時個股雷達掃描 (輸入代碼即時檢視):", placeholder="例: AAPL").strip()
+    # [v48.0 新增：雷達頁頂部「即時單股掃描 + 快速加入自選類別」雙合一工具列]
+    rad_top_c1, rad_top_c2, rad_top_c3, rad_top_c4 = st.columns([2.2, 1.5, 1.3, 1.2])
+    with rad_top_c1:
+        quick_search = st.text_input(
+            "🔍 即時個股掃描 / 快速加入自選 (輸入代碼或中文名，支援多隻):",
+            placeholder="例: 700, 藥明生物, NVDA, TSLA",
+            key="radar_top_quick_inp"
+        ).strip()
+    with rad_top_c2:
+        _rad_top_cats = list(st.session_state.watchlist_dict.keys())
+        _rad_top_sel_cat = st.selectbox(
+            "⭐ 放入自選類別:",
+            options=_rad_top_cats + ["➕ 新建自選類別..."],
+            key="radar_top_wl_cat"
+        )
+    with rad_top_c3:
+        _rad_top_new_cat = st.text_input(
+            "✏️ 新類別名稱 (選填):",
+            placeholder="輸入新類別名",
+            disabled=(_rad_top_sel_cat != "➕ 新建自選類別..."),
+            key="radar_top_new_cat_inp"
+        ).strip()
+    with rad_top_c4:
+        st.write("")
+        if st.button("⭐ 直接加入自選", key="radar_top_add_wl_btn", use_container_width=True):
+            _dest_c = _rad_top_new_cat if _rad_top_sel_cat == "➕ 新建自選類別..." else _rad_top_sel_cat
+            if not quick_search:
+                st.warning("請先在左方輸入股票代碼或名稱！")
+            elif not _dest_c:
+                st.warning("請輸入新自選類別名稱！")
+            else:
+                if _dest_c not in st.session_state.watchlist_dict:
+                    st.session_state.watchlist_dict[_dest_c] = []
+                _toks = [x.strip() for x in re.split(r'[\s,，、;；]+', quick_search) if x.strip()]
+                _added_tks = []
+                for _tk_raw in _toks:
+                    _fmt_t, _, _, _, _ = format_and_detect_market(_tk_raw)
+                    if _fmt_t not in st.session_state.watchlist_dict[_dest_c]:
+                        st.session_state.watchlist_dict[_dest_c].append(_fmt_t)
+                        _added_tks.append(f"{_fmt_t}({get_stock_name(_fmt_t)})")
+                save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                if _added_tks:
+                    st.toast(f"⭐ 已將 {', '.join(_added_tks)} 加入【{_dest_c}】！")
+                else:
+                    st.toast(f"ℹ️ 輸入的股票已在【{_dest_c}】中")
+                st.rerun()
+
     if quick_search:
-        q_df = run_all_inclusive_radar([quick_search])
+        _q_toks = [format_and_detect_market(x.strip())[0] for x in re.split(r'[\s,，、;；]+', quick_search) if x.strip()]
+        q_df = run_all_inclusive_radar(_q_toks)
         if q_df is not None:
-            st.markdown("#### ⚡ 即時掃描結果")
-            render_styled_dataframe(q_df)
+            st.markdown("#### ⚡ 即時掃描結果 (可直接點擊行內「⭐ 點擊放入自選」或「☑️ 勾選」歸類)")
+            render_styled_dataframe(q_df, table_key="quick_search_radar_tbl")
         st.markdown("---")
 
-    # [優化加入] 將自訂名單放入雷達掃描選項
+    # [v48.0 升級：將用戶所有「⭐ 自選股票類別」直接納入雷達核心追蹤池選單]
+    _wl_pool_opts = [f"⭐ 自選類別：【{c}】({len(gl)}隻)" for c, gl in st.session_state.watchlist_dict.items() if len(gl) > 0]
     pool_choice = st.selectbox(
-        "核心追蹤池：",
+        "核心追蹤池 (可直接揀選系統潛力池或你的自選股票類別)：",
         [
             "🚀 超級績效・港股中小型高彈性潛力池 (ADR 3.2%~7.5% 細分龍頭)",
             "🚀 超級績效・美股中小型高爆發潛力池 (Minervini 風格高 RS 成長股)",
             "港股高動能增長池 (全市場強勢成分股｜已剔除慢速內銀)",
             "美股高動能爆發池 (全市場科技與成長領頭羊)",
             "港股收息防守池 (低波幅藍籌/內銀公用股)",
+        ] + _wl_pool_opts + [
             "自訂擴充名單 (從側欄載入)"
         ]
     )
     
     target_pool = []
-    if "港股中小型" in pool_choice:
+    if pool_choice.startswith("⭐ 自選類別：【"):
+        _chosen_wl_cat = pool_choice.split("【", 1)[1].split("】", 1)[0]
+        target_pool = list(st.session_state.watchlist_dict.get(_chosen_wl_cat, []))
+    elif "港股中小型" in pool_choice:
         target_pool = HK_SMALL_MID_SUPER_POOL
     elif "美股中小型" in pool_choice:
         target_pool = US_SMALL_MID_SUPER_POOL
@@ -9856,18 +10046,102 @@ elif mode == mode_options[2]:
                 qm3.metric("🛡️ 站穩 50MA 比例", f"{q_stats['above_50ma_pct']:.1f}%", "中線多頭健康度")
                 qm4.metric("🔒 組內已鎖定持倉", f"{q_stats['locked_cnt']} 筆", "點擊下方進入診斷可查看")
 
-                st.markdown(f"#### 📊 「{cat}」實時報價與技術位置總覽表 (點擊【進入診斷】一鍵查看 K 線與買賣位)")
+                st.markdown(f"#### 📊 「{cat}」實時報價與互動管理總覽表 (點擊行內【☑️ 勾選】或【📂 點擊移至/複製類別】即可直接整理)")
                 if not quote_df.empty:
-                    st.dataframe(
-                        quote_df,
-                        column_config={
-                            "跳轉診斷": st.column_config.LinkColumn("🔍 個股診斷", display_text="進入診斷"),
-                            "代碼": st.column_config.TextColumn("股票代碼"),
-                        },
-                        use_container_width=True,
-                        hide_index=True,
-                        key=f"wl_instant_quote_tbl_{cat}"
-                    )
+                    _other_wl_cats = [c for c in cat_names if c != cat]
+                    _mv_placeholder = "📂 點擊移至..."
+                    _cp_placeholder = "📋 點擊複製至..."
+                    _q_work = quote_df.copy()
+                    _q_work.insert(0, "📋 點擊複製至類別", _cp_placeholder)
+                    _q_work.insert(0, "📂 點擊移至類別", _mv_placeholder)
+                    _q_work.insert(0, "☑️ 勾選", False)
+                    _q_disabled = [c for c in _q_work.columns if c not in {"☑️ 勾選", "📂 點擊移至類別", "📋 點擊複製至類別"}]
+
+                    try:
+                        _q_edited = st.data_editor(
+                            _q_work,
+                            column_config={
+                                "☑️ 勾選": st.column_config.CheckboxColumn("☑️ 勾選", help="勾選此行股票以執行置頂、移動、複製或移除", default=False, width="small"),
+                                "📂 點擊移至類別": st.column_config.SelectboxColumn("📂 點擊移至類別", options=[_mv_placeholder] + _other_wl_cats, help="直接點擊選擇目標類別，即將此股票移過去", width="medium"),
+                                "📋 點擊複製至類別": st.column_config.SelectboxColumn("📋 點擊複製至類別", options=[_cp_placeholder] + _other_wl_cats, help="直接點擊選擇目標類別，即將此股票複製過去", width="medium"),
+                                "跳轉診斷": st.column_config.LinkColumn("🔍 個股診斷", display_text="進入診斷", width="small"),
+                                "代碼": st.column_config.TextColumn("股票代碼", width="small"),
+                            },
+                            disabled=_q_disabled,
+                            use_container_width=True,
+                            hide_index=True,
+                            key=f"wl_instant_de_tbl_{cat}"
+                        )
+                    except Exception:
+                        _q_edited = _q_work
+                        st.dataframe(quote_df, use_container_width=True, hide_index=True, key=f"wl_instant_fb_tbl_{cat}")
+
+                    if isinstance(_q_edited, pd.DataFrame) and not _q_edited.empty:
+                        # 處理單行點擊「📂 點擊移至類別」或「📋 點擊複製至類別」
+                        _row_changed = False
+                        for _, _qr in _q_edited.iterrows():
+                            _q_tk = str(_qr.get("代碼", "")).strip()
+                            _q_nm = str(_qr.get("股票名稱", _q_tk))
+                            _mv_to = str(_qr.get("📂 點擊移至類別", _mv_placeholder))
+                            _cp_to = str(_qr.get("📋 點擊複製至類別", _cp_placeholder))
+                            if _mv_to != _mv_placeholder and _mv_to in st.session_state.watchlist_dict:
+                                if _q_tk in st.session_state.watchlist_dict[cat]:
+                                    st.session_state.watchlist_dict[cat].remove(_q_tk)
+                                if _q_tk not in st.session_state.watchlist_dict[_mv_to]:
+                                    st.session_state.watchlist_dict[_mv_to].append(_q_tk)
+                                st.toast(f"📂 已將 {_q_tk} ({_q_nm}) 從【{cat}】移至【{_mv_to}】！")
+                                _row_changed = True
+                            if _cp_to != _cp_placeholder and _cp_to in st.session_state.watchlist_dict:
+                                if _q_tk not in st.session_state.watchlist_dict[_cp_to]:
+                                    st.session_state.watchlist_dict[_cp_to].append(_q_tk)
+                                st.toast(f"📋 已將 {_q_tk} ({_q_nm}) 複製至【{_cp_to}】！")
+                                _row_changed = True
+                        if _row_changed:
+                            save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                            st.rerun()
+
+                        # 處理表格內「☑️ 勾選」方格之批量置頂 / 移動 / 複製 / 移除操作欄
+                        _q_chk_df = _q_edited[_q_edited["☑️ 勾選"].astype(bool)]
+                        if not _q_chk_df.empty:
+                            _q_chk_syms = [str(x).strip() for x in _q_chk_df["代碼"].tolist() if str(x).strip()]
+                            render_atomic_alert(
+                                f"☑️ **你在「{cat}」表格內已勾選 {len(_q_chk_syms)} 隻股票 (`{', '.join(_q_chk_syms)}`)** —— 請選擇批量操作：",
+                                "success"
+                            )
+                            _tb_c1, _tb_c2, _tb_c3, _tb_c4, _tb_c5 = st.columns([1.2, 1.5, 1.2, 1.2, 1.2])
+                            with _tb_c1:
+                                if st.button("⬆️ 置頂勾選股", key=f"tbl_chk_pin_{cat}", use_container_width=True):
+                                    _rest = [t for t in current_list if t not in _q_chk_syms]
+                                    st.session_state.watchlist_dict[cat] = _q_chk_syms + _rest
+                                    save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                                    st.toast(f"⬆️ 已將 {len(_q_chk_syms)} 隻股票置頂！")
+                                    st.rerun()
+                            with _tb_c2:
+                                _tbl_dest_cat = st.selectbox("選擇目標類別:", _other_wl_cats if _other_wl_cats else [cat], key=f"tbl_chk_dest_{cat}", label_visibility="collapsed")
+                            with _tb_c3:
+                                if st.button(f"📂 移至【{_tbl_dest_cat}】", key=f"tbl_chk_mv_{cat}", use_container_width=True, disabled=(not _other_wl_cats)):
+                                    for _s in _q_chk_syms:
+                                        if _s in st.session_state.watchlist_dict[cat]:
+                                            st.session_state.watchlist_dict[cat].remove(_s)
+                                        if _s not in st.session_state.watchlist_dict[_tbl_dest_cat]:
+                                            st.session_state.watchlist_dict[_tbl_dest_cat].append(_s)
+                                    save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                                    st.toast(f"📂 已將 {len(_q_chk_syms)} 隻股票移至【{_tbl_dest_cat}】！")
+                                    st.rerun()
+                            with _tb_c4:
+                                if st.button(f"📋 複製至【{_tbl_dest_cat}】", key=f"tbl_chk_cp_{cat}", use_container_width=True, disabled=(not _other_wl_cats)):
+                                    for _s in _q_chk_syms:
+                                        if _s not in st.session_state.watchlist_dict[_tbl_dest_cat]:
+                                            st.session_state.watchlist_dict[_tbl_dest_cat].append(_s)
+                                    save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                                    st.toast(f"📋 已將 {len(_q_chk_syms)} 隻股票複製至【{_tbl_dest_cat}】！")
+                                    st.rerun()
+                            with _tb_c5:
+                                if st.button("❌ 移除勾選股", key=f"tbl_chk_rm_{cat}", use_container_width=True):
+                                    st.session_state.watchlist_dict[cat] = [t for t in current_list if t not in _q_chk_syms]
+                                    save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                                    st.toast(f"❌ 已從【{cat}】移除 {len(_q_chk_syms)} 隻股票！")
+                                    st.rerun()
 
                 # 3. 啟動此分組深度量化雷達掃描
                 scan_col1, scan_col2 = st.columns([3, 1])
