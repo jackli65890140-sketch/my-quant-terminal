@@ -174,7 +174,7 @@ RADAR_CACHE_TTL_SECONDS = 1800  # 雷達結果預設 30 分鐘自動過期重算
 #    - 🇺🇸 美股模式：針對美股零印花稅、1股可拆賣但常於 +6.5%~+8.5% 出現 Squat 回抽之微結構，採用《超級績效 2》「2R~2.4R 強勢賣出一半 (TP1) + 尾倉沿 21EMA 奔跑搏遠端大目標 (TP2)」雙軌制！
 # 5) [Five-Stage Bull/Bear & Correction-Ending Engine] 同時分辨「🐂 確認牛市」、「🌤️ 大盤調整結束 / 熊轉牛初段 (彈簧股爆發期)」、「🟡 牛市中期修正」、「🌩️ 牛市見頂派發預警」與「🐻 確認熊市」；
 # 6) [Small/Mid-Cap High-Velocity Pool] 新增「🚀 超級績效・中小型高彈性潛力池」並配備日均成交額 ≥ 2,000萬港元防老千股護欄。
-CURRENT_SCHEMA_VERSION = "v42.0"
+CURRENT_SCHEMA_VERSION = "v47.0"
 
 # ==============================================================================
 # 1. 《超級績效 1 & 2》VCP 遞進收縮足跡 + 3-C (Low Cheat / Cheat / Pivot) 識別引擎
@@ -261,22 +261,28 @@ def compute_minervini_vcp_and_3c_cheats(
         sma50 = float(sub["SMA50"].iloc[-1]) if "SMA50" in sub.columns else float(sub["Close"].rolling(50, min_periods=10).mean().iloc[-1])
         sma200 = float(sub["SMA200"].iloc[-1]) if "SMA200" in sub.columns else close_now * 0.9
 
-        if tight_5d_pct <= 6.2 and close_now >= sma200 * 0.98:
+        # OLD: if tight_5d_pct <= 6.2 and close_now >= sma200 * 0.98:
+        # NEW: [v45.0 P0-1 修復] 要求必須滿足波幅收斂 (t1_depth > t3_depth 且基底深度 8%~45%) 及中期均線結構未壞 (sma50 >= sma200 * 0.95)，杜絕喇叭形發散形態被誤判為提前買點
+        _is_contracting_base = (t1_depth > t3_depth * 1.10) and (8.0 <= total_base_depth <= 45.0) and (sma50 >= sma200 * 0.95)
+        if tight_5d_pct <= 6.2 and close_now >= sma200 * 0.98 and _is_contracting_base:
             if 0.20 <= pos_in_base < 0.55 and close_now >= sma20 * 0.99:
                 res["entry_tier"] = "LOW_CHEAT"
-                res["entry_tier_badge"] = f"💎 Low Cheat 低位作弊點 (極窄止損 -{tight_5d_pct:.1f}%)"
+                # OLD: res["entry_tier_badge"] = f"💎 Low Cheat 低位作弊點 (極窄止損 -{tight_5d_pct:.1f}%)"
+                res["entry_tier_badge"] = f"🟢 底部轉強買點 (低位提前進場｜止損 -{tight_5d_pct:.1f}%)"
                 res["cheat_pivot_price"] = round(pivot_5d_high * 1.002, 2)
                 res["cheat_stop_price"] = round(stop_5d_low * 0.996, 2)
                 res["cheat_stop_pct"] = round(tight_5d_pct + 0.4, 2)
             elif 0.55 <= pos_in_base < 0.82 and close_now >= sma20 and close_now >= sma50 * 0.99:
                 res["entry_tier"] = "MID_CHEAT_3C"
-                res["entry_tier_badge"] = f"🎯 3C 中位作弊買點 (波幅收窄 -{tight_5d_pct:.1f}%)"
+                # OLD: res["entry_tier_badge"] = f"🎯 3C 中位作弊買點 (波幅收窄 -{tight_5d_pct:.1f}%)"
+                res["entry_tier_badge"] = f"🎯 平台突破買點 (中段提前進場｜波幅 -{tight_5d_pct:.1f}%)"
                 res["cheat_pivot_price"] = round(pivot_5d_high * 1.002, 2)
                 res["cheat_stop_price"] = round(stop_5d_low * 0.996, 2)
                 res["cheat_stop_pct"] = round(tight_5d_pct + 0.4, 2)
             elif pos_in_base >= 0.82 and close_now >= sma20 and close_now >= sma50:
                 res["entry_tier"] = "HANDLE_PIVOT"
-                res["entry_tier_badge"] = f"🚀 VCP 標準杯柄樞紐點 (止損 -{tight_5d_pct:.1f}%)"
+                # OLD: res["entry_tier_badge"] = f"🚀 VCP 標準杯柄樞紐點 (止損 -{tight_5d_pct:.1f}%)"
+                res["entry_tier_badge"] = f"🚀 前高突破買點 (頂部標準進場｜止損 -{tight_5d_pct:.1f}%)"
                 res["cheat_pivot_price"] = round(pivot_5d_high * 1.002, 2)
                 res["cheat_stop_price"] = round(stop_5d_low * 0.996, 2)
                 res["cheat_stop_pct"] = round(tight_5d_pct + 0.4, 2)
@@ -327,18 +333,21 @@ def evaluate_tennis_ball_and_squat_action(df: pd.DataFrame) -> Dict[str, Any]:
 
         if dipped_near_20ma and c_now >= sma20 and c_now >= ema9 and c_now > o_now and close_pos_now >= 0.60:
             res["is_tennis_ball"] = True
-            res["action_badge"] = "🎾 網球強彈確認 (Tennis Ball)"
-            res["action_note"] = "回測均線後迅速收陽彈起站上 9EMA/20MA，屬《超級績效》標準『網球抗跌反彈』，機構承接力極強！"
+            # OLD: res["action_badge"] = "🎾 網球強彈確認 (Tennis Ball)"
+            res["action_badge"] = "🟢 回調承接力強 (縮量止跌回升)"
+            res["action_note"] = "回調觸及均線後迅速收陽站回 9EMA/20MA 之上，顯示下方買盤承接力強，趨勢結構穩健。"
         elif dipped_near_20ma and c_now < sma20 and (sub["Close"].iloc[-3:] < sub["Open"].iloc[-3:]).sum() >= 2:
             res["is_egg_slump"] = True
-            res["action_badge"] = "🥚 雞蛋軟弱無力 (Egg Slump)"
-            res["action_note"] = "回測均線後缺乏買盤彈力、連續陰跌像『雞蛋落地』，切勿左側盲目接刀！"
+            # OLD: res["action_badge"] = "🥚 雞蛋軟弱無力 (Egg Slump)"
+            res["action_badge"] = "🔴 回調承接力弱 (跌穿均線無反彈)"
+            res["action_note"] = "回調跌穿 20MA 後缺乏買盤承接、連續收陰走弱，不宜盲目低吸。"
 
         # Check Squat Bar (High volume breakout attempt that closes in bottom 40% of range)
         if vol_now >= vol_ma * 1.30 and close_pos_now <= 0.40 and h_now >= float(sub["High"].iloc[:-1].max()):
             res["is_squat_bar"] = True
-            res["action_badge"] = "🏋️ 突破蹲伏 (Squat Bar)"
-            res["action_note"] = "當日放量衝高但收出上影線蹲伏 (Squat)，《超級績效》法則：若未破結構止損，觀察 1~2 日內能否陽燭收復今日高點；若隔日放量續跌破 9EMA 則果斷離場。"
+            # OLD: res["action_badge"] = "🏋️ 突破蹲伏 (Squat Bar)"
+            res["action_badge"] = "🟡 突破遇阻留上影線 (觀察次日收復)"
+            res["action_note"] = "當日放量衝高但遇阻留上影線，若未跌破結構止損位，可觀察 1~2 日內能否收復今日高點；若次日繼續跌破 9EMA 則按紀律離場。"
     except Exception:
         pass
     return res
@@ -410,15 +419,16 @@ def evaluate_minervini_overlapping_mini_screens(df: pd.DataFrame) -> Dict[str, A
 
         cnt = len(matched)
         if cnt == 4:
-            badge = f"🔥 4/4 四網全滿貫 ({'+'.join(matched)})"
+            # OLD: badge = f"🔥 4/4 四網全滿貫 ({'+'.join(matched)})"
+            badge = f"🟢 4/4 四項全符 ({'+'.join(matched)})"
         elif cnt == 3:
-            badge = f"🌟 3/4 三網重疊 ({'+'.join(matched)})"
+            badge = f"🟢 3/4 三項符合 ({'+'.join(matched)})"
         elif cnt == 2:
-            badge = f"🟢 2/4 雙網重疊 ({'+'.join(matched)})"
+            badge = f"🟡 2/4 兩項符合 ({'+'.join(matched)})"
         elif cnt == 1:
-            badge = f"🟡 1/4 單網命中 ({matched[0]})"
+            badge = f"⚪ 1/4 單項符合 ({matched[0]})"
         else:
-            badge = "⚪ 0/4 未命中"
+            badge = "⚪ 0/4 未符合"
 
         out.update({
             "screen_a_rs_leader": scr_a,
@@ -504,14 +514,24 @@ def compute_dual_track_hk_us_rr_targets(
         planned_rr = round((tp1_price - entry_price) / risk_per_share, 2)
         tp2_rr = round((tp2_price - entry_price) / risk_per_share, 2)
     else:
-        main7_wave_tp = round(max(0.01, min(entry_price - 3.6 * atr_val, entry_price - 2.2 * risk_per_share)), 2)
-        tp0_breakeven_trigger = round(max(0.01, entry_price - 1.25 * risk_per_share), 2)
-        tp1_price = main7_wave_tp
-        tp2_price = round(max(0.01, entry_price - 4.8 * atr_val), 2)
-        tp1_desc = f"空頭波段回補目標 ({tp1_price:.2f})"
+        # [v45.0 P1-1 修復] 空頭同樣實施港美雙軌差異化目標：自動跨過不足 1.85R 之近距離小支撐，結合真實歷史支撐區與波段下跌目標
+        main7_wave_tp = round(max(0.01, min(entry_price - 3.5 * atr_val, entry_price - 2.15 * risk_per_share)), 2)
+        tp0_breakeven_trigger = round(max(0.01, entry_price - 1.20 * risk_per_share), 2)
+        valid_short_srs = [
+            (p, lbl) for (p, lbl) in (sr_targets or [])
+            if 0 < p < entry_price and ((entry_price - p) / risk_per_share) >= 1.85
+        ]
+        if valid_short_srs:
+            tp1_price = round(valid_short_srs[0][0], 2)
+            tp1_desc = f"空頭波段目標支撐 ({valid_short_srs[0][1]}: {tp1_price:.2f})"
+            tp2_price = round(valid_short_srs[1][0], 2) if len(valid_short_srs) >= 2 else round(max(0.01, min(tp1_price * 0.95, entry_price - 4.6 * atr_val)), 2)
+        else:
+            tp1_price = main7_wave_tp
+            tp2_price = round(max(0.01, entry_price - 4.8 * atr_val), 2)
+            tp1_desc = f"跨過近端小支撐，按空頭波段等距目標投射 ({tp1_price:.2f})"
         planned_rr = round((entry_price - tp1_price) / risk_per_share, 2)
         tp2_rr = round((entry_price - tp2_price) / risk_per_share, 2)
-        exit_strategy_note = f"空頭下跌波段快而急，觸及 **TP1 ({tp1_price:.2f})** 建議回補 50%~100% 落袋。"
+        exit_strategy_note = f"空頭下跌速度快但反彈急，跌穿 **{tp0_breakeven_trigger:.2f} (+1.2R)** 先將止損下移至打和價，觸及 **TP1 ({tp1_price:.2f})** 建議回補 50%~100% 鎖定利潤。"
 
     return {
         "tp0_breakeven_trigger": tp0_breakeven_trigger,
@@ -523,6 +543,191 @@ def compute_dual_track_hk_us_rr_targets(
         "tp1_desc": tp1_desc,
         "exit_strategy_note": exit_strategy_note
     }
+# ==============================================================================
+# 5. 三大經典名著整合引擎：
+#    ① Mark Minervini《超級績效》(持倉違規訊號 Violation vs 正常洗盤檢驗)
+#    ② Stan Weinstein《多空操作秘笈》(30週/150日均線四階段週期 + Stage 1→2 底部突破與首次縮量回測買點 + Stage 3→4 頂部破位空點)
+#    ③ Martin J. Pring《技術分析精論》(KST 確然指標四週期動能共振 + 峰谷演進 Peak-and-Trough + 真假突破過濾)
+# ==============================================================================
+def compute_weinstein_stage_and_pring_kst(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    結合《多空操作秘笈》(Stan Weinstein) 與《技術分析精論》(Martin J. Pring) 及《超級績效》(Mark Minervini)：
+    1) Weinstein 四階段週期 (Four-Stage Cycle，以 150MA [即 30 週均線] 斜率與價格位置界定)：
+       - 🌱 第一階段 (Stage 1 底部築底區)：150MA 走平 (近20日斜率介乎 -1.5% ~ +1.5%)，股價於 150MA 上下窄幅橫行；
+       - 🟢 一轉二階段 (Stage 1→2 早期轉勢買點)：股價剛放量升穿走平/微升之 150MA 與 50MA，或突破後首次縮量回測 50MA/150MA 支撐且守穩 (極佳盈虧比買點，如藥明生物早期啟動階段)；
+       - 🚀 第二階段 (Stage 2 主升趨勢期)：股價穩守上揚之 50MA 與 150MA 之上，50MA > 150MA；
+       - 🟡 第三階段 (Stage 3 高位震盪派發期)：前期大漲後 50MA/150MA 斜率放緩，股價高位波幅擴大且屢次放量滯漲 (忌追高突破)；
+       - 🔴 第四階段 (Stage 4 下跌趨勢期)：股價跌破下彎之 50MA 與 150MA，反抽受阻為順勢做空點。
+    2) Martin J. Pring《技術分析精論》KST 確然指標 (Know Sure Thing) 與峰谷演進 (Peak-and-Trough)：
+       - KST = 1*SMA(ROC10,10) + 2*SMA(ROC15,10) + 3*SMA(ROC20,10) + 4*SMA(ROC30,15)，訊號線 = SMA(KST, 9)；
+       - 當 KST > Signal 且斜率向上，代表短中長四週期動能同步轉強；若股價創 20 日新高但 KST 下彎且低於前高，屬「動能頂背馳」；
+       - 峰谷演進 (Higher High & Higher Low)：近 10 日低點高於前 10~25 日低點，確認底部抬高；
+       - 真假突破過濾 (Pring Two-Day / Close Filter)：突破前高時要求收盤位於日內波幅上半部 (>=55%) 且量比配合，若衝高留長上影線跌回突破位下方則標記為「假突破陷阱預警」。
+    3) Minervini《超級績效》買入後「正常回調 vs 結構違規 (Post-Breakout Violation)」判別：
+       - 統計近 5 日是否出現「放量大陰燭跌穿 20MA」或「連續 3 日低點下移且收陰放量」，協助持倉者分辨應否忍耐洗盤。
+    """
+    out: Dict[str, Any] = {
+        "weinstein_stage": 0,
+        "weinstein_badge": "⚪ 階段待確認",
+        "is_stage_1_to_2_buy": False,
+        "is_stage_3_topping": False,
+        "is_stage_4_short": False,
+        "pring_kst_val": 0.0,
+        "pring_kst_sig": 0.0,
+        "pring_kst_bullish": False,
+        "pring_kst_cross_up": False,
+        "pring_bearish_divergence": False,
+        "pring_bullish_divergence": False,
+        "pring_higher_lows_ok": False,
+        "pring_false_breakout_trap": False,
+        "pring_badge": "⚪ 動能中性",
+        "minervini_violation_warn": False,
+        "minervini_violation_desc": "🟢 近期回調量價正常 (無結構違規訊號)",
+        "three_books_summary_note": ""
+    }
+    if df is None or len(df) < 45:
+        return out
+
+    try:
+        closes = df["Close"].astype(float)
+        highs = df["High"].astype(float)
+        lows = df["Low"].astype(float)
+        opens = df["Open"].astype(float)
+        vols = df["Volume"].astype(float) if "Volume" in df.columns else pd.Series(1.0, index=df.index)
+
+        c_now = float(closes.iloc[-1])
+        o_now = float(opens.iloc[-1])
+        h_now = float(highs.iloc[-1])
+        l_now = float(lows.iloc[-1])
+        sma20 = float(df["SMA20"].iloc[-1]) if "SMA20" in df.columns and pd.notna(df["SMA20"].iloc[-1]) else float(closes.tail(20).mean())
+        sma50 = float(df["SMA50"].iloc[-1]) if "SMA50" in df.columns and pd.notna(df["SMA50"].iloc[-1]) else float(closes.tail(50).mean())
+        sma150_ser = df["SMA150"] if "SMA150" in df.columns else closes.rolling(150, min_periods=40).mean()
+        sma150 = float(sma150_ser.iloc[-1]) if pd.notna(sma150_ser.iloc[-1]) else sma50
+        sma150_prev20 = float(sma150_ser.iloc[-20]) if len(sma150_ser) >= 20 and pd.notna(sma150_ser.iloc[-20]) else sma150
+        sma150_slope_pct = ((sma150 - sma150_prev20) / max(sma150_prev20, 1e-6)) * 100.0
+
+        vol_ma20 = float(vols.tail(20).mean()) if len(vols) >= 5 else 1.0
+        vol_ratio_now = float(vols.iloc[-1]) / max(vol_ma20, 1e-6)
+        close_pos_now = (c_now - l_now) / max(h_now - l_now, 1e-6)
+
+        # --- 1. Martin Pring KST (Know Sure Thing) 計算 ---
+        roc10 = ((closes / closes.shift(10)) - 1.0) * 100.0
+        roc15 = ((closes / closes.shift(15)) - 1.0) * 100.0
+        roc20 = ((closes / closes.shift(20)) - 1.0) * 100.0
+        roc30 = ((closes / closes.shift(30)) - 1.0) * 100.0
+
+        rcma1 = roc10.rolling(10, min_periods=3).mean()
+        rcma2 = roc15.rolling(10, min_periods=3).mean()
+        rcma3 = roc20.rolling(10, min_periods=3).mean()
+        rcma4 = roc30.rolling(15, min_periods=5).mean()
+
+        kst_ser = (rcma1 * 1.0 + rcma2 * 2.0 + rcma3 * 3.0 + rcma4 * 4.0).fillna(0.0)
+        kst_sig_ser = kst_ser.rolling(9, min_periods=3).mean().fillna(0.0)
+
+        kst_now = float(kst_ser.iloc[-1])
+        kst_prev = float(kst_ser.iloc[-2]) if len(kst_ser) >= 2 else kst_now
+        kst_sig_now = float(kst_sig_ser.iloc[-1])
+        kst_sig_prev = float(kst_sig_ser.iloc[-2]) if len(kst_sig_ser) >= 2 else kst_sig_now
+
+        kst_bull = bool(kst_now > kst_sig_now and kst_now >= kst_prev)
+        kst_cross_up = bool(kst_now > kst_sig_now and (kst_prev <= kst_sig_prev or kst_ser.iloc[-3] <= kst_sig_ser.iloc[-3]))
+
+        # Pring 峰谷演進 (Higher Low & Higher High)
+        low_recent10 = float(lows.iloc[-10:].min())
+        low_prior15 = float(lows.iloc[-25:-10].min()) if len(lows) >= 25 else low_recent10
+        high_recent10 = float(highs.iloc[-10:].max())
+        high_prior15 = float(highs.iloc[-25:-10].max()) if len(highs) >= 25 else high_recent10
+        higher_lows_ok = bool(low_recent10 >= low_prior15 * 0.995 and c_now >= sma20 * 0.99)
+
+        # Pring 動能背馳與假突破檢測
+        price_near_20d_high = bool(h_now >= float(highs.iloc[-20:].max()) * 0.992)
+        kst_20d_max = float(kst_ser.iloc[-20:-3].max()) if len(kst_ser) >= 20 else kst_now
+        bear_div = bool(price_near_20d_high and kst_now < kst_20d_max * 0.82 and kst_now < kst_prev and len(df) >= 60)
+
+        price_near_20d_low = bool(l_now <= float(lows.iloc[-20:].min()) * 1.01)
+        kst_20d_min = float(kst_ser.iloc[-20:-3].min()) if len(kst_ser) >= 20 else kst_now
+        bull_div = bool(price_near_20d_low and kst_now > kst_20d_min * 0.85 and kst_now > kst_prev)
+
+        res_20d_prev = float(highs.iloc[-21:-1].max()) if len(highs) >= 21 else h_now
+        false_bo_trap = bool(h_now > res_20d_prev * 1.003 and c_now < res_20d_prev * 0.995 and close_pos_now <= 0.38)
+
+        if false_bo_trap:
+            pring_badge = "⚠️ 衝高回落假突破預警 (上影線跌回前高下)"
+        elif bear_div:
+            pring_badge = "🟡 價格創高但 KST 動能背馳 (宜鎖利勿追高)"
+        elif kst_cross_up and higher_lows_ok:
+            pring_badge = "🟢 KST 四週期動能剛金叉轉強 (高低點拾級而上)"
+        elif kst_bull:
+            pring_badge = "🟢 KST 多週期動能同步向上 (趨勢健康)"
+        elif bull_div:
+            pring_badge = "🌤️ KST 底部動能背馳止跌 (關注轉勢)"
+        else:
+            pring_badge = "🔴 KST 動能偏弱向下 (低於訊號線)"
+
+        # --- 2. Stan Weinstein《多空操作秘笈》四階段週期判定 ---
+        # Stage 1->2 Transition: Price recently crossed or sits just above flattening/turning 150MA & 50MA (within 0% to +12% above 150MA)
+        was_below_150_recently = bool((closes.iloc[-35:-3] <= sma150_ser.iloc[-35:-3] * 1.02).any()) if len(closes) >= 35 else False
+        dist_above_150_pct = ((c_now - sma150) / max(sma150, 1e-6)) * 100.0
+        had_vol_thrust_10d = bool((vols.iloc[-10:] >= vol_ma20 * 1.35).any())
+        is_low_vol_pullback_to_neck = bool(c_now >= sma50 * 0.99 and c_now >= sma150 * 0.99 and vol_ratio_now <= 0.92 and close_pos_now >= 0.48)
+
+        if c_now >= sma150 * 0.995 and c_now >= sma50 and sma150_slope_pct >= -0.8:
+            if was_below_150_recently and 0.0 <= dist_above_150_pct <= 12.5 and (had_vol_thrust_10d or is_low_vol_pullback_to_neck):
+                w_stage = 12  # Stage 1 -> 2 Transition!
+                w_badge = "🟢 一轉二階段：底部突破 / 縮量回測買點 (早期轉勢黃金區)"
+                out["is_stage_1_to_2_buy"] = True
+            else:
+                w_stage = 2
+                w_badge = f"🚀 第二階段：中長線上升趨勢 (150MA斜率 {sma150_slope_pct:+.1f}%)"
+        elif c_now >= sma150 * 0.96 and abs(sma150_slope_pct) <= 1.8 and c_now < sma50:
+            # Check if after a big run (Stage 3) or after a decline (Stage 1)
+            high_120 = float(highs.tail(120).max())
+            if c_now >= high_120 * 0.85 and float(df.get("Dist_Days_20d", pd.Series([0])).iloc[-1]) >= 4:
+                w_stage = 3
+                w_badge = "🟡 第三階段：高位寬幅震盪期 (忌追高突破、宜分批鎖利)"
+                out["is_stage_3_topping"] = True
+            else:
+                w_stage = 1
+                w_badge = "🌱 第一階段：底部築底整理期 (等待放量升穿 50/150MA)"
+        elif c_now < sma150 and c_now < sma50 and sma150_slope_pct < 0.5:
+            w_stage = 4
+            w_badge = f"🔴 第四階段：中長線下跌趨勢 (避開做多 / 反彈受阻順勢做空)"
+            out["is_stage_4_short"] = bool(c_now < sma20 and (vol_ratio_now >= 1.30 or c_now <= sma20 * 0.99))
+        else:
+            w_stage = 3 if c_now < sma50 and sma50 > sma150 else 1
+            w_badge = "🟡 第三階段：趨勢放緩整理期 (宜等待企穩)" if w_stage == 3 else "🌱 第一階段：底部築底整理期"
+            if w_stage == 3:
+                out["is_stage_3_topping"] = True
+
+        # --- 3. Minervini《超級績效》買入後「正常回調 vs 結構違規 (Post-Entry Violation)」檢驗 ---
+        last3_low_falling = bool(lows.iloc[-1] < lows.iloc[-2] < lows.iloc[-3])
+        last3_red_bars = int((closes.iloc[-3:] < opens.iloc[-3:]).sum())
+        heavy_vol_drop_20ma = bool(c_now < sma20 * 0.99 and c_now < o_now and vol_ratio_now >= 1.25)
+        if heavy_vol_drop_20ma or (last3_low_falling and last3_red_bars >= 3 and c_now < sma20):
+            out["minervini_violation_warn"] = True
+            out["minervini_violation_desc"] = "⚠️ 出現《超級績效》回調違規訊號 (放量跌穿 20MA 或連續3日低點下移收陰，非正常洗盤，宜嚴守止損)"
+        elif c_now >= sma20 and vol_ratio_now < 0.90:
+            out["minervini_violation_desc"] = "🟢 縮量守穩 20MA 之上 (符合正常健康洗盤特徵)"
+
+        out.update({
+            "weinstein_stage": w_stage,
+            "weinstein_badge": w_badge,
+            "pring_kst_val": round(kst_now, 2),
+            "pring_kst_sig": round(kst_sig_now, 2),
+            "pring_kst_bullish": kst_bull,
+            "pring_kst_cross_up": kst_cross_up,
+            "pring_bearish_divergence": bear_div,
+            "pring_bullish_divergence": bull_div,
+            "pring_higher_lows_ok": higher_lows_ok,
+            "pring_false_breakout_trap": false_bo_trap,
+            "pring_badge": pring_badge,
+            "three_books_summary_note": f"【多空階段】{w_badge} ｜ 【Pring KST 動能】{pring_badge} ｜ 【持倉檢驗】{out['minervini_violation_desc']}"
+        })
+    except Exception:
+        pass
+    return out
+
+
 import threading as _threading_lib
 _CACHE_LOCK = _threading_lib.Lock()
 
@@ -653,6 +858,8 @@ def get_user_risk_and_full_pos_config(market_type: str = "HK") -> Dict[str, floa
         return {
             "risk_budget": round(hkd_risk, 2),
             "full_notional": round(hkd_full_notional, 2),
+            "max_loss_local": round(hkd_risk, 2),
+            "full_pos_local": round(hkd_full_notional, 2),
             "risk_hkd": round(hkd_risk, 2),
             "full_notional_hkd": round(hkd_full_notional, 2),
             "currency_symbol": "HK$"
@@ -661,6 +868,8 @@ def get_user_risk_and_full_pos_config(market_type: str = "HK") -> Dict[str, floa
         return {
             "risk_budget": round(hkd_risk / 7.8, 2),
             "full_notional": round(hkd_full_notional / 7.8, 2),
+            "max_loss_local": round(hkd_risk / 7.8, 2),
+            "full_pos_local": round(hkd_full_notional / 7.8, 2),
             "risk_hkd": round(hkd_risk, 2),
             "full_notional_hkd": round(hkd_full_notional, 2),
             "currency_symbol": "US$"
@@ -1972,7 +2181,7 @@ def evaluate_holistic_setup_grade_and_edge(
             missing.append("⑧ 空頭短線已極度超賣延伸 (低於20MA逾 3x ATR 或 RSI≤22，嚴禁低位追空)")
     elif str(trade_plan_eval.get("action_timeliness", "")).startswith("⚡"):
         score += 5.0
-        passed.append("⑧ 正處於 ⚡ 即時入場黃金擊球區" if plan_type == "LONG" else "⑧ 正處於 ⚡ 即時沽空黃金擊球區")
+        passed.append("⑧ 現價正處於 ⚡ 理想進場價區間內" if plan_type == "LONG" else "⑧ 現價正處於 ⚡ 理想沽空價區間內")
     else:
         score += 3.0
 
@@ -1995,7 +2204,7 @@ def evaluate_holistic_setup_grade_and_edge(
         out["climax_metric_delta"] = "⚠️ 短線已超賣勿追空" if is_overext else "偏離20MA達-3.2x ATR回補鎖潤位"
 
     if score >= 85.0 and planned_rr >= 2.0 and not is_overext:
-        out["setup_grade"] = "🏆 S 級 (聖杯滿貫機會)" if plan_type == "LONG" else "🏆 S 級 (空頭滿貫機會)"
+        out["setup_grade"] = "🏆 S 級 (多維度高分機會)" if plan_type == "LONG" else "🏆 S 級 (空頭高分機會)"
         out["grade_code"] = "S"
         out["sizing_multiplier"] = 1.25
         out["sizing_advice"] = (
@@ -2004,7 +2213,7 @@ def evaluate_holistic_setup_grade_and_edge(
             "🔥 **S 級空頭頂尖共振（建議 100%~125% 標準風險倉位，即 0.50%~0.75% 總資金風險）**：空頭八大維度全面共振，上方套牢反壓沉重、下方支撐薄弱且下跌空間充裕！"
         )
     elif score >= 74.0 and planned_rr >= 1.8 and not is_overext:
-        out["setup_grade"] = "💎 A+ 級 (機構高勝率機會)" if plan_type == "LONG" else "💎 A+ 級 (高勝率做空機會)"
+        out["setup_grade"] = "🟢 A+ 級 (條件優良機會)" if plan_type == "LONG" else "🔴 A+ 級 (條件優良做空)"
         out["grade_code"] = "A+"
         out["sizing_multiplier"] = 1.0
         out["sizing_advice"] = (
@@ -2310,10 +2519,10 @@ def compute_mtf_execution_and_exit_sniper(
         elif h1_reclaimed and (h4_bullish or m15_orb_breakout):
             sniper_p = round(curr_price if curr_price <= orb_h * 1.01 else orb_h, 2)
             res["sniper_entry_trigger_price"] = sniper_p
-            res["sniper_entry_method"] = f"⚡ 四週期共振最佳擊球點！可於現價 / 日內VWAP ({intra_v:.2f}) 即時建倉"
+            res["sniper_entry_method"] = f"⚡ 多週期趨勢同步向上，可於現價或日內均價線 VWAP ({intra_v:.2f}) 附近進場"
             cards.append((
                 "success",
-                f"🔥 **【1D × 4H × 1H × 15m 四週期多頭完美共振 —— 即買即升黃金擊球區！】**\n\n"
+                f"🟢 **【日線 × 4小時 × 1小時 × 15分鐘 多週期趨勢同步向上 —— 理想進場區間】**\n\n"
                 f"目前股價已同時站穩 **4H 20EMA ({res['h4_ema20']})**、**1H 20EMA ({h1_e20:.2f})**、**1H 回調 AVWAP ({h1_avwap:.2f})** 與 **15m 日內 VWAP ({intra_v:.2f})**！"
                 f"小週期洗盤已徹底完成並與日線主升浪同向共振，現價 (**{curr_price:.2f}**) 正處於爆發臨界點！"
             ))
@@ -2421,6 +2630,33 @@ def render_atomic_alert_group(alerts: List[Tuple[str, str]], slot: Any = None) -
     target = slot if slot is not None else st
     target.markdown(combined, unsafe_allow_html=True)
 
+def render_atomic_caption(msg: str, slot: Any = None) -> None:
+    """[v46.0 根治截圖 st.caption NotFoundError: removeChild 崩潰]
+    使用單一防翻譯 HTML 節點渲染說明文字，避開 ReactMarkdown 對 <strong> 與 Chrome 翻譯 <font> 節點之跨股票 diff 衝突"""
+    target = slot if slot is not None else st
+    if not msg:
+        target.markdown('<div class="notranslate" translate="no" style="display:none;"></div>', unsafe_allow_html=True)
+        return
+    body_html = _md_bold_to_html(msg)
+    html_str = (
+        f'<div class="notranslate" translate="no" style="'
+        f'color:rgba(49,51,63,0.72);font-size:0.86rem;line-height:1.5;margin-top:2px;margin-bottom:10px;">'
+        f'{body_html}</div>'
+    )
+    target.markdown(html_str, unsafe_allow_html=True)
+
+def render_atomic_section_header(title_text: str, level: int = 3, slot: Any = None) -> None:
+    """[v46.0 防翻譯原子標題] 避免切換股票或多空視角時因標題文字改變觸發 Chrome 翻譯 DOM removeChild 錯誤"""
+    target = slot if slot is not None else st
+    tag = f"h{min(max(int(level), 1), 6)}"
+    clean_t = _html_lib.escape(str(title_text).lstrip("#").strip())
+    html_str = (
+        f'<{tag} class="notranslate" translate="no" style="'
+        f'margin-top:0.8rem;margin-bottom:0.5rem;font-weight:600;line-height:1.35;">'
+        f'{clean_t}</{tag}>'
+    )
+    target.markdown(html_str, unsafe_allow_html=True)
+
 
 
 import json
@@ -2442,14 +2678,27 @@ SECTOR_MAPPING: Dict[str, str] = {
     "PLTR": "AI與企業軟件", "CRWD": "網絡安全與雲端", "PANW": "網絡安全與雲端", "ZS": "網絡安全與雲端", "SNOW": "AI與企業軟件", "DDOG": "AI與企業軟件", "CRM": "AI與企業軟件", "ADBE": "AI與企業軟件", "ORCL": "AI與企業軟件", "SHOP": "電商與金融科技",
     "COIN": "加密資產與Fintech", "MSTR": "加密資產與Fintech", "PYPL": "加密資產與Fintech", "SQ": "加密資產與Fintech", "XYZ": "加密資產與Fintech", "HOOD": "加密資產與Fintech",
     "UBER": "共享出行與旅遊", "ABNB": "共享出行與旅遊", "APP": "AI與企業軟件", "ANET": "AI與半導體", "RDDT": "科網平台", "AXON": "硬科技與消費電子",
-    "VST": "AI電力與能源", "CEG": "AI電力與能源", "GEV": "AI電力與能源"
+    "VST": "AI電力與能源", "CEG": "AI電力與能源", "GEV": "AI電力與能源",
+    # [v45.0 P1-2 補齊《超級績效》港美中小型高彈性潛力池之板塊映射，防止在 Priority Buy 去重時被誤刪]
+    "9926.HK": "生物醫藥", "1789.HK": "醫療器械與服務", "2500.HK": "醫療器械與服務", "2158.HK": "AI醫療與軟件",
+    "3888.HK": "雲端與遊戲軟件", "2400.HK": "雲端與遊戲軟件", "1357.HK": "AI與視覺軟件", "9698.HK": "AI數據中心與算力",
+    "9896.HK": "新消費與潮玩零售", "1797.HK": "直播電商與新消費", "0322.HK": "內需食品飲料", "6186.HK": "內需食品飲料",
+    "0780.HK": "OTA旅遊與出行", "6060.HK": "金融科技與互聯網保險", "0358.HK": "有色金屬與資源",
+    "6098.HK": "物管與地產服務", "3319.HK": "物管與地產服務", "1995.HK": "物管與地產服務",
+    "RKLB": "商業航天與國防", "ASTS": "商業航天與衛星通訊", "LUNR": "商業航天與國防",
+    "IONQ": "量子計算與前沿科技", "RGTI": "量子計算與前沿科技", "QBTS": "量子計算與前沿科技",
+    "AFRM": "先買後付與金融科技", "SOFI": "數碼銀行與金融科技", "UPST": "AI信貸與金融科技",
+    "DUOL": "AI教育與訂閱應用", "CAVA": "高成長連鎖餐飲", "SHAK": "高成長連鎖餐飲", "WING": "高成長連鎖餐飲", "SG": "高成長連鎖餐飲",
+    "TOST": "餐飲SaaS與支付終端", "CELH": "功能性飲品與新消費", "ONON": "高成長運動服飾", "DECK": "高成長運動服飾",
+    "VRT": "AI液冷與數據中心基建", "ROKU": "串流媒體與廣告平台"
 }
 
 def get_ticker_sector(ticker: str) -> str:
     fmt_t = str(ticker).strip().upper()
     if fmt_t in SECTOR_MAPPING:
         return SECTOR_MAPPING[fmt_t]
-    return "港股其他板塊" if fmt_t.endswith(".HK") else "美股其他板塊"
+    # [v45.0 P1-2 修復] 未收錄之自訂股票返回獨立標識，避免 drop_duplicates(subset=["_sector_grp"]) 將多隻自選股合併刪除
+    return f"港股獨立標的 ({fmt_t})" if fmt_t.endswith(".HK") else f"美股獨立標的 ({fmt_t})"
 
 def load_persisted_state_from_disk(persistent_dict: dict) -> None:
     """從本地磁碟讀取已保存的自選股、鎖定持倉、信號生命週期與開倉日 R:R 雜湊快照，防止重啟 Streamlit 時記憶清空"""
@@ -2610,13 +2859,13 @@ def compute_vbp_profile_and_vsa_engine(df: pd.DataFrame, lookback: int = 120, nu
             res["vsa_upthrust_distribution"] = True
 
     if curr_c > vah_price and res["is_in_lvn_vacuum"]:
-        res["vbp_position_label"] = f"🚀 站上 VAH ({vah_price:.2f}) 進入 LVN 籌碼真空加速區 (上方套牢僅 {overhead_supply_pct:.1f}%)"
+        res["vbp_position_label"] = f"🟢 站上密集交易區頂部 ({vah_price:.2f})，上方歷史套牢阻力極少 (僅佔 {overhead_supply_pct:.1f}%)"
         res["vbp_tactical_advice"] = "現價已突破 70% 籌碼價值區頂部 (VAH) 且上方屬低量真空區 (LVN)，套牢阻力極輕，最利於【⚡ 即時突破入場】或順勢加碼！"
     elif curr_c >= poc_price:
         res["vbp_position_label"] = f"🟢 站穩最大籌碼峰 POC ({poc_price:.2f}) 之上 (價值區 {val_price:.2f}~{vah_price:.2f})"
         res["vbp_tactical_advice"] = f"最大籌碼共識區 POC ({poc_price:.2f}) 已轉化為下方強力鐵底支撐，回踩 POC 或 20MA 出現 Wyckoff 無供給縮量時為最佳買點。"
     elif res["is_blocked_by_hvn"]:
-        res["vbp_position_label"] = f"🧱 處於 POC ({poc_price:.2f}) 下方，頭頂面臨 HVN 巨量套牢峰壓制 (上方套牢佔 {overhead_supply_pct:.1f}%)"
+        res["vbp_position_label"] = f"🟡 處於最大成交密集價 ({poc_price:.2f}) 下方，上方有較多歷史套牢盤阻力 (佔 {overhead_supply_pct:.1f}%)"
         res["vbp_tactical_advice"] = f"上方 {poc_price:.2f}~{vah_price:.2f} 堆積大量歷史套牢盤，直接硬衝極易受阻，務必等放量站上 POC ({poc_price:.2f}) 或縮量回踩 VAL ({val_price:.2f}) 企穩。"
     else:
         res["vbp_position_label"] = f"🟡 處於籌碼價值區下沿 (POC: {poc_price:.2f} ｜ VAL: {val_price:.2f})"
@@ -2650,7 +2899,7 @@ def compute_vbp_profile_and_vsa_engine(df: pd.DataFrame, lookback: int = 120, nu
     res["vsa_no_demand"] = vsa_no_demand
 
     if curr_c < val_price and is_downside_lvn:
-        res["short_vbp_position_label"] = f"🩸 跌穿價值區底 VAL ({val_price:.2f}) 墜入下方 LVN 籌碼真空暴跌區 (上方套牢高達 {overhead_supply_pct:.1f}%)"
+        res["short_vbp_position_label"] = f"🔴 跌穿密集交易區底部 ({val_price:.2f})，下方缺乏歷史成交支撐 (上方套牢達 {overhead_supply_pct:.1f}%)"
         res["short_vbp_tactical_advice"] = (
             f"現價已跌破 70% 籌碼價值區下沿 VAL ({val_price:.2f})，頭頂堆積 **{overhead_supply_pct:.1f}%** 歷史套牢賣壓，"
             f"且下方支撐籌碼僅佔 **{downside_support_pct:.1f}%**（屬 LVN 籌碼斷層真空區），多頭毫無承接，最利於【⚡ 順勢破底做空】或反抽 VAL ({val_price:.2f}) 加空！"
@@ -4420,7 +4669,20 @@ def evaluate_swing_trade_plan_and_rr(
                 recommended_entry = round(max(close_p * 1.002, min(pivot_buy, close_p + 0.35 * atr_safe)), 2)
                 _action_timeliness = "🎯 突破觸發"
                 entry_type_desc = f"突破觸發單 (Stop-Buy 升穿箱體樞紐 {recommended_entry:.2f} 進場 ｜ 空單消化 {_dc_score:.0f}分)"
-        elif bool(last.get('VCPSignal', False)) or bool(last.get('JLaw_Tight_Box', False)) or bool(last.get('LEI_MA_Tight_2Pct', False)) or "壓縮" in status or "密集" in status:
+        elif df.attrs.get("sepa_vcp_3c_info", {}).get("entry_tier") in ["LOW_CHEAT", "MID_CHEAT_3C", "HANDLE_PIVOT"] and float(df.attrs.get("sepa_vcp_3c_info", {}).get("cheat_pivot_price", 0.0)) > 0:
+            # [v45.0 P0-1 修復] 將《超級績效》3-C (底部轉強 Low Cheat / 平台突破 Mid Cheat) 之 5 日緊密樞紐價直接連通至交易計劃
+            _vcp_3c_plan = df.attrs.get("sepa_vcp_3c_info", {})
+            _c_piv = float(_vcp_3c_plan.get("cheat_pivot_price", box_high_10))
+            _c_tier_lbl = "底部轉強買點" if _vcp_3c_plan.get("entry_tier") == "LOW_CHEAT" else ("平台中段突破買點" if _vcp_3c_plan.get("entry_tier") == "MID_CHEAT_3C" else "前高突破買點")
+            if close_p >= _c_piv * 0.995 and close_p <= _c_piv * 1.022 and _bullish_bar_now and not _is_exhausted_now:
+                recommended_entry = round(close_p, 2)
+                _action_timeliness = f"⚡ 即時入場 ({_c_tier_lbl})"
+                entry_type_desc = f"⚡ {_c_tier_lbl}即時單 (現價 {close_p:.2f} 已站上 5 日緊密平台樞紐 {_c_piv:.2f}，止損極窄，適合滿倉定額風控)"
+            else:
+                recommended_entry = round(_c_piv, 2)
+                _action_timeliness = f"🎯 突破觸發 ({_c_tier_lbl})"
+                entry_type_desc = f"🎯 {_c_tier_lbl}觸發單 (於 5 日緊密收縮平台頂 {recommended_entry:.2f} 設突破買入單，未升穿前不提早進場)"
+        elif bool(last.get('VCPSignal', False)) or bool(last.get('JLaw_Tight_Box', False)) or bool(last.get('LEI_MA_Tight_2Pct', False)) or "壓縮" in status or "密集" in status or "收窄" in status:
             recommended_entry = round(box_high_10 + 0.05 * atr_safe, 2)
             _action_timeliness = "🎯 突破觸發"
             entry_type_desc = f"突破埋伏單 (待升穿近10日緊密平台頂 {recommended_entry:.2f} 觸發買入 ｜ 空單消化 {_dc_score:.0f}分)"
@@ -4483,6 +4745,12 @@ def evaluate_swing_trade_plan_and_rr(
         if lei_struct and pd.notna(lei_struct.get("structure_low")):
             sl_st = float(lei_struct["structure_low"]) - 0.30 * atr_safe
             struct_low_candidates.append((sl_st, f"LEI 底部構造低點 ({lei_struct['structure_low']:.2f}) 下方"))
+        # [v45.0 P0-1 修復] 若具備 3-C (底部/平台轉強買點) 之 5 日緊密平台底止損，納入結構止損候選池，令止損自然控制在 3.2%~4.8% (完美契合滿倉 HK$21,500 蝕 <= HK$1,000)
+        _vcp_3c_sl_info = df.attrs.get("sepa_vcp_3c_info", {})
+        if _vcp_3c_sl_info.get("entry_tier") in ["LOW_CHEAT", "MID_CHEAT_3C", "HANDLE_PIVOT"] and float(_vcp_3c_sl_info.get("cheat_stop_price", 0.0)) > 0:
+            _c_sl_p = float(_vcp_3c_sl_info["cheat_stop_price"])
+            if _c_sl_p < recommended_entry * 0.985:
+                struct_low_candidates.append((_c_sl_p, f"5日緊密收縮平台底 ({_c_sl_p:.2f}) 防守位"))
 
         # 僅當用戶在側欄明確切換為「⚡ 短線緊密模式」時，才將當日低點 (LOD) 納入止損候選
         if _stop_prof.get("use_intraday_lod", False):
@@ -4581,7 +4849,17 @@ def evaluate_swing_trade_plan_and_rr(
         _mkt_order_stop_pct = (_mkt_order_risk / max(close_p, 1e-4)) * 100.0
         _mkt_order_rr = round((take_profit - close_p) / _mkt_order_risk, 2)
         _dynamic_stop_cap_pct = max(_max_stop_pct * 100.0, 5.8)
-        _eq_sz = compute_equal_risk_position_cap(close_p, stop_loss, fixed_risk_budget=600.0, max_notional_cap=20000.0, lot_size=lot_size, market_type=market_type)
+        # OLD: _eq_sz = compute_equal_risk_position_cap(close_p, stop_loss, fixed_risk_budget=600.0, max_notional_cap=20000.0, lot_size=lot_size, market_type=market_type)
+        # NEW: [v45.0 P0-2 修復] 廢除硬編碼 600/20,000，統一讀取用戶側欄設定之「單筆最大止損 (預設 HK$1,000 / US$128)」與「目標滿倉本金 (預設 HK$21,500 / US$2,756)」
+        _u_risk_cfg_eval = get_user_risk_and_full_pos_config(market_type)
+        _eq_sz = compute_equal_risk_position_cap(
+            recommended_entry if recommended_entry > 0 else close_p,
+            stop_loss,
+            fixed_risk_budget=float(_u_risk_cfg_eval["max_loss_local"]),
+            max_notional_cap=float(_u_risk_cfg_eval["full_pos_local"]),
+            lot_size=lot_size,
+            market_type=market_type
+        )
         if _mkt_order_stop_pct > _dynamic_stop_cap_pct or close_p > recommended_entry * 1.018:
             if _action_timeliness.startswith("⚡"):
                 _action_timeliness = f"⏳ 勿現價市價買 (現價止損達 {_mkt_order_stop_pct:.1f}% > {_dynamic_stop_cap_pct:.1f}%上限，需等回調至 {recommended_entry:.2f})"
@@ -4736,24 +5014,19 @@ def evaluate_swing_trade_plan_and_rr(
         _tsl_cand = _piv_ch.get("tsl_support", np.nan)
         measured_move_tp = round(float(_tsl_cand) if (pd.notna(_tsl_cand) and 0 < float(_tsl_cand) < recommended_entry * 0.97) else max(0.01, recommended_entry - recent_swing_amp * 1.0), 2)
 
-        if sr_targets:
-            first_sr_p, first_sr_lbl = sr_targets[0]
-            first_sr_rr = (recommended_entry - first_sr_p) / risk_per_share
-            if first_sr_rr < 1.6 and len(sr_targets) >= 2:
-                second_sr_p, second_sr_lbl = sr_targets[1]
-                take_profit = round(first_sr_p, 2)
-                tp2_price = round(second_sr_p, 2)
-                tp_basis_desc = f"第一支撐: {first_sr_lbl} ({first_sr_p:.2f}) ｜ 次級目標: {second_sr_lbl} ({second_sr_p:.2f})"
-            else:
-                take_profit = round(first_sr_p, 2)
-                tp2_price = round(sr_targets[1][0], 2) if len(sr_targets) >= 2 else measured_move_tp
-                tp_basis_desc = f"{first_sr_lbl} ({take_profit:.2f})"
-            structural_tp = round(first_sr_p, 2)
-        else:
-            take_profit = measured_move_tp
-            tp2_price = round(max(0.01, recommended_entry - recent_swing_amp * 1.35), 2)
-            structural_tp = take_profit
-            tp_basis_desc = f"破底無歷史支撐，按波段等距下跌通道投射 ({take_profit:.2f})"
+        # [v45.0 P1-1 修復] 空頭計劃同步接入 compute_dual_track_hk_us_rr_targets，消除單一近距離小支撐 (<1.6R) 壓低空頭 R:R 之缺陷
+        _dual_rr_short_eval = compute_dual_track_hk_us_rr_targets(
+            entry_price=recommended_entry,
+            stop_loss=stop_loss,
+            atr_val=atr_safe,
+            sr_targets=sr_targets,
+            market_type=market_type,
+            direction="SHORT"
+        )
+        take_profit = _dual_rr_short_eval["tp1_price"]
+        tp2_price = _dual_rr_short_eval["tp2_price"]
+        structural_tp = take_profit
+        tp_basis_desc = _dual_rr_short_eval["tp1_desc"]
 
         structural_rr = round((recommended_entry - structural_tp) / risk_per_share, 2)
         planned_rr = round((recommended_entry - take_profit) / risk_per_share, 2)
@@ -4993,18 +5266,27 @@ def check_recent_signal_and_stop_invalidation(df: pd.DataFrame, lookback_bars: i
     result["anchor_entry"] = peak_entry
     result["anchor_sl"] = peak_initial_sl
 
-    # 僅當波段高點回落跌穿結構防守位，且當前收盤仍受制於 20MA 下方（非洗盤收復）時，才判定為前波多頭結構止損失效
-    if bars_since_peak >= 1 and (min_low_since_peak <= peak_initial_sl or min_close_since_peak < peak_sma20 * 0.975) and (float(last['Close']) < float(last.get('SMA20', np.inf)) * 0.995):
+    # OLD:
+    # if bars_since_peak >= 1 and (min_low_since_peak <= peak_initial_sl or min_close_since_peak < peak_sma20 * 0.975) and (float(last['Close']) < float(last.get('SMA20', np.inf)) * 0.995):
+    #     result["long_stop_hit"] = True
+    # NEW: [v44.0 平衡結構止損失效判定：兼顧防破位與保留正常縮量回調/網球止跌買點]
+    # 當波段高點回落已跌穿前波結構防守位 (peak_initial_sl * 0.992) 或收盤深跌穿 20MA (< SMA20 * 0.982)，
+    # 且當日尚未站回 20MA 或 9EMA 之上收陽止跌時，判定為前波多頭結構止損失效！
+    _reclaimed_short_ma_today = (
+        float(last['Close']) >= float(last.get('SMA20', np.inf)) * 0.995
+        or (float(last['Close']) >= float(last.get('EMA9', np.inf)) and float(last['Close']) > float(last['Open']))
+    )
+    if bars_since_peak >= 1 and (min_low_since_peak <= peak_initial_sl * 0.992 or min_close_since_peak < peak_sma20 * 0.980) and (float(last['Close']) < float(last.get('SMA20', np.inf)) * 0.992) and not _reclaimed_short_ma_today:
         result["long_stop_hit"] = True
         result["invalidation_reason"] = (
-            f"⛔ 觸及前波結構止損失效：自 {result['anchor_date']} 波段高點 ({peak_entry:.2f}) 回落，"
-            f"最低價 ({min_low_since_peak:.2f}) 已跌穿結構防守位 ({peak_initial_sl:.2f}) 且尚未收復 20MA"
+            f"⛔ 觸及前波結構止損：自 {result['anchor_date']} 波段高點 ({peak_entry:.2f}) 回落，"
+            f"最低價 ({min_low_since_peak:.2f}) 已跌穿結構防守位 ({peak_initial_sl:.2f}) 且尚未收復短期均線"
         )
 
-    if below_sma20_and_50 or (last['Close'] < last.get('SMA20', 0) and sma20_falling and macd_bearish) or broke_20d_low_intraday:
+    if below_sma20_and_50 or (float(last['Close']) < float(last.get('SMA20', 0)) * 0.99 and sma20_falling and macd_bearish and not _reclaimed_short_ma_today) or (broke_20d_low_intraday and float(last['Close']) < float(last.get('SMA50', np.inf))):
         result["downtrend_veto_long"] = True
         if not result["invalidation_reason"]:
-            result["invalidation_reason"] = "📉 結構轉空否決做多：股價已跌破 20MA/50MA 或創 20 日新低，短期均線下彎"
+            result["invalidation_reason"] = "📉 短期趨勢轉弱：股價已跌破 20MA/50MA 或均線下彎且動能轉負"
 
     trough_idx = window['Close'].idxmin()
     trough_pos = df.index.get_loc(trough_idx)
@@ -5096,11 +5378,13 @@ def evaluate_historical_bar_unified_plan(
     if pd.notna(bench_close) and pd.notna(bench_50):
         is_market_bullish = bool(bench_close > bench_50)
 
-    is_market_health_ok = True
-    if pd.notna(bench_close) and pd.notna(bench_200):
-        if bench_close < bench_200 or bench_dist >= 5:
-            is_market_health_ok = False
-
+    # OLD:
+    # is_market_health_ok = True
+    # if pd.notna(bench_close) and pd.notna(bench_200):
+    #     if bench_close < bench_200 or bench_dist >= 5:
+    #         is_market_health_ok = False
+    # NEW: [v43.0 修復 P0-2 回測與快速勝率在大盤低於 200MA 時一刀切封殺所有做多之脫節漏洞]
+    # 當大盤處於回調見底轉勢期 (站上 50MA，或個股本身相對強度 Mansfield_RS > 0.3 且穩守 50MA 之上)，允許抗跌領頭股觸發做多信號！
     close_p = float(prev_row['Close'])
     high_p = float(prev_row['High'])
     low_p = float(prev_row['Low'])
@@ -5109,6 +5393,17 @@ def evaluate_historical_bar_unified_plan(
     sma50_p = float(prev_row.get('SMA50', close_p))
     sma150_p = float(prev_row.get('SMA150', close_p))
     sma200_p = float(prev_row.get('SMA200', close_p))
+
+    # [v46.0 回測與實盤五階段大市見底轉勢 100% 對齊]
+    # 若大盤當日出現強勢反攻 (單日漲幅 >= +1.0% 或站上 9EMA)，或個股本身相對強度跑贏大市且穩守 50MA 之上，允許觸發做多信號！
+    is_market_health_ok = True
+    _prev_bench_c = float(df.iloc[bar_idx - 1].get('CloseBench', bench_close)) if bar_idx >= 1 else bench_close
+    _bench_ret_1d = ((float(bench_close) - _prev_bench_c) / max(_prev_bench_c, 1e-6)) if (pd.notna(bench_close) and pd.notna(_prev_bench_c) and _prev_bench_c > 0) else 0.0
+    _is_bottom_rev_bt = bool(_bench_ret_1d >= 0.01)
+    if pd.notna(bench_close) and pd.notna(bench_200):
+        _leader_rs_override = bool((float(prev_row.get('Mansfield_RS', 0)) > 0.25 and close_p >= sma50_p * 0.995) or _is_bottom_rev_bt)
+        if (bench_close < bench_200 and (pd.isna(bench_50) or bench_close < bench_50 * 0.985) and not _leader_rs_override) or bench_dist >= 6:
+            is_market_health_ok = False
     atr_val = float(prev_row['ATR']) if pd.notna(prev_row.get('ATR')) and prev_row['ATR'] > 0 else close_p * 0.03
 
     # 短期破位否決檢查 (與 check_recent_signal_and_stop_invalidation 同步)
@@ -5275,33 +5570,61 @@ def evaluate_historical_bar_unified_plan(
         if lei_st.get("bearish_2b", False) and (close_p < sma20_p) and (not is_market_bullish):
             short_cond = True
 
+    # [v46.0 回測與實盤 SEPA 100% 同步] 計算並注入 sepa_vcp_3c_info / sepa_tennis_squat_info / sepa_mini_screens_info 至 sub_df.attrs，
+    # 確保 evaluate_swing_trade_plan_and_rr 在回測中同樣使用 3-C (底部/平台轉強) 緊密樞紐買入位與 5 日平台底止損！
+    _bt_vcp, _bt_tb, _bt_ov = {}, {}, {}
+    if not is_relaxed and (close_p >= sma50_p * 0.985):
+        try:
+            _bt_vcp = compute_minervini_vcp_and_3c_cheats(sub_df, lookback_base=min(65, len(sub_df)))
+            _bt_tb = evaluate_tennis_ball_and_squat_action(sub_df)
+            _bt_ov = evaluate_minervini_overlapping_mini_screens(sub_df)
+            _bt_3b = compute_weinstein_stage_and_pring_kst(sub_df)
+            sub_df.attrs["sepa_vcp_3c_info"] = _bt_vcp
+            sub_df.attrs["sepa_tennis_squat_info"] = _bt_tb
+            sub_df.attrs["sepa_mini_screens_info"] = _bt_ov
+            sub_df.attrs["three_books_info"] = _bt_3b
+            if not long_cond and not downtrend_veto_long and is_market_health_ok and not _climax_run_bt and not _bt_3b.get("pring_false_breakout_trap", False):
+                _ov_c = int(_bt_ov.get("overlap_count", 0))
+                if _bt_vcp.get("entry_tier") in ["LOW_CHEAT", "MID_CHEAT_3C"] and _ov_c >= 2:
+                    long_cond = True
+                elif _bt_tb.get("is_tennis_ball", False) and _ov_c >= 2:
+                    long_cond = True
+                elif _bt_3b.get("is_stage_1_to_2_buy", False) and _bt_3b.get("pring_kst_bullish", False):
+                    long_cond = True
+                elif _ov_c >= 3:
+                    long_cond = True
+                elif _ov_c == 2 and (pass_count >= score_threshold or early_stage_bypass) and (is_near_20ma or is_tight_setup):
+                    long_cond = True
+        except Exception:
+            pass
+
     if long_cond:
         if is_martin_ep_bt:
-            status_str = "🚀 Martin Luk EP跳空爆量突破"
+            status_str = "🟢 利好裂口放量突破 (跳空轉強)"
             order_style = "STOP"
         elif is_martin_pb_bt:
-            status_str = "🎯 Martin Luk AVWAP+EMA匯聚低吸"
+            status_str = "🟢 回調多重均線支撐買點 (低吸進場)"
             order_style = "LIMIT"
         elif is_martin_id_bt:
-            status_str = "🟢 Martin Luk InsideDay壓縮突破"
+            status_str = "🟢 窄幅收縮突破買點 (突破前日高點)"
             order_style = "STOP"
         elif is_sr_flip_pullback_long:
-            status_str = "🟢 S/R互換支撐回踩買點"
+            status_str = "🟢 前高阻力轉支撐回踩買點"
             order_style = "LIMIT"
         elif is_lei_pullback_long:
-            status_str = "🟡 2點鐘抵扣價回撤買點"
+            status_str = "🟡 上升趨勢回調買點 (均線支撐穩健)"
             order_style = "LIMIT"
         elif is_breakout_long:
-            status_str = "🟢 放量強勢突破 (Breakout)"
+            status_str = "🟢 放量突破前高買點 (Breakout)"
             order_style = "LIMIT" if close_p > box_high_10 * 1.025 else "STOP"
         elif kk_flag:
-            status_str = "🔥 Kullamägi 動能旗型"
+            status_str = "🟢 強勢股高位窄幅整理突破"
             order_style = "STOP"
         elif is_lei_tight_long:
-            status_str = "🟢 LEI 均線密集張嘴突破"
+            status_str = "🟢 多條均線密集突破買點"
             order_style = "STOP"
         else:
-            status_str = "🟢 VCP緊密壓縮突破買點"
+            status_str = "🟢 波幅收窄突破買點 (縮量平台整理)"
             order_style = "STOP"
 
         _bt_slope = compute_ma_slope_and_pullback_trigger(sub_df)
@@ -5523,7 +5846,7 @@ def compute_backtest_institutional_metrics(equity_curve: pd.Series, trades_df: p
                 sqn_raw = float(np.sqrt(min(len(rets_arr), 100)) * (np.mean(rets_arr) / np.std(rets_arr)))
                 metrics["sqn_score"] = round(sqn_raw, 2)
                 if sqn_raw >= 3.0:
-                    metrics["sqn_rating"] = "🏆 聖杯級 (≥3.0)"
+                    metrics["sqn_rating"] = "🏆 極佳 (≥3.0)"
                 elif sqn_raw >= 2.0:
                     metrics["sqn_rating"] = "🟢 優秀機構級 (2.0~2.9)"
                 elif sqn_raw >= 1.5:
@@ -5557,7 +5880,69 @@ def compute_backtest_institutional_metrics(equity_curve: pd.Series, trades_df: p
         swing_logger.warning(f"回測指標計算異常: {e}")
     return metrics
 
-st.set_page_config(layout="wide", page_title="專業量化交易終端系統 v24.10 (長短空頭融合版)")
+st.set_page_config(layout="wide", page_title="專業波段量化交易系統 v47.0")
+
+def inject_parent_dom_and_translate_shield() -> None:
+    """[v47.0 終極根治 Chrome Google 翻譯與模式切換觸發之 NotFoundError: Failed to execute 'removeChild' on 'Node']
+    1. 透過同源 iframe 訪問 window.parent，直接對瀏覽器底層 Node.prototype.removeChild 與 insertBefore 注入安全容錯保護：
+       當 Chrome 翻譯將文字包裹進 <font> 標籤導致 child.parentNode !== this 時，自動安全退回而不拋出 DOMException 紅框！
+    2. 同時在父視窗 <html>、<head>、<body> 寫入 translate="no" 與 class="notranslate"，阻止 Chrome 把「5個分組」亂譯為「5個包」、「短線阻力」亂譯為「短線電阻」！
+    """
+    st.markdown('<meta name="google" content="notranslate">', unsafe_allow_html=True)
+    _shield_js = """
+    <script>
+    (function() {
+        function patchWindowDOM(win) {
+            if (!win || win.__swingDomShieldApplied) return;
+            try {
+                var doc = win.document;
+                if (doc && doc.documentElement) {
+                    doc.documentElement.setAttribute("translate", "no");
+                    doc.documentElement.classList.add("notranslate");
+                }
+                if (doc && doc.body) {
+                    doc.body.setAttribute("translate", "no");
+                    doc.body.classList.add("notranslate");
+                }
+                if (doc && doc.head && !doc.head.querySelector('meta[name="google"][content="notranslate"]')) {
+                    var m = doc.createElement("meta");
+                    m.name = "google";
+                    m.content = "notranslate";
+                    doc.head.appendChild(m);
+                }
+                if (win.Node && win.Node.prototype) {
+                    var origRemoveChild = win.Node.prototype.removeChild;
+                    win.Node.prototype.removeChild = function(child) {
+                        if (child && child.parentNode !== this) {
+                            if (child.parentNode) {
+                                return origRemoveChild.call(child.parentNode, child);
+                            }
+                            return child;
+                        }
+                        return origRemoveChild.apply(this, arguments);
+                    };
+                    var origInsertBefore = win.Node.prototype.insertBefore;
+                    win.Node.prototype.insertBefore = function(newNode, referenceNode) {
+                        if (referenceNode && referenceNode.parentNode !== this) {
+                            return this.appendChild(newNode);
+                        }
+                        return origInsertBefore.apply(this, arguments);
+                    };
+                }
+                win.__swingDomShieldApplied = true;
+            } catch (e) {}
+        }
+        patchWindowDOM(window);
+        try { patchWindowDOM(window.parent); } catch (e) {}
+    })();
+    </script>
+    """
+    try:
+        st.components.v1.html(_shield_js, height=0, width=0)
+    except Exception:
+        pass
+
+inject_parent_dom_and_translate_shield()
 
 # ==========================================
 # 0. 伺服器級持久化快取 (徹底解決雷達刷新消失的問題)
@@ -5632,8 +6017,42 @@ target_strict_from_radar = qp.get("strict", "")
 # ==========================================
 # 1. 智能代碼格式化與市場識別
 # ==========================================
+# [v46.0 新增：中英文股票名稱智能反查表] 支援直接輸入「騰訊」、「藥明生物」、「美團」、「泡泡瑪特」、「輝達」、「蘋果」等名稱自動轉換為標準代碼
+CN_STOCK_NAME_TO_TICKER: Dict[str, str] = {
+    "騰訊": "0700.HK", "騰訊控股": "0700.HK", "美團": "3690.HK", "小米": "1810.HK", "小米集團": "1810.HK",
+    "比亞迪": "1211.HK", "比亞迪股份": "1211.HK", "阿里": "9988.HK", "阿里巴巴": "9988.HK", "中芯": "0981.HK", "中芯國際": "0981.HK",
+    "港交所": "0388.HK", "香港交易所": "0388.HK", "匯豐": "0005.HK", "匯豐控股": "0005.HK", "中移動": "0941.HK", "中國移動": "0941.HK",
+    "中海油": "0883.HK", "中國海洋石油": "0883.HK", "建行": "0939.HK", "建設銀行": "0939.HK", "工行": "1398.HK", "工商銀行": "1398.HK",
+    "平保": "2318.HK", "中國平安": "2318.HK", "友邦": "1299.HK", "友邦保險": "1299.HK", "理想": "2015.HK", "理想汽車": "2015.HK",
+    "小鵬": "9868.HK", "小鵬汽車": "9868.HK", "藥明生物": "2269.HK", "藥明康德": "2359.HK", "康方生物": "9926.HK", "信達生物": "1801.HK",
+    "快手": "1024.HK", "京東": "9618.HK", "網易": "9999.HK", "攜程": "9961.HK", "泡泡瑪特": "9992.HK", "名創優品": "9896.HK",
+    "美圖": "1357.HK", "美圖公司": "1357.HK", "金山軟件": "3888.HK", "金蝶": "0268.HK", "金蝶國際": "0268.HK", "比亞迪電子": "0285.HK",
+    "舜宇": "2382.HK", "舜宇光學": "2382.HK", "紫金": "2899.HK", "紫金礦業": "2899.HK", "招金": "1818.HK", "江西銅業": "0358.HK",
+    "眾安": "6060.HK", "眾安在線": "6060.HK", "心動": "2400.HK", "心動公司": "2400.HK", "同程": "0780.HK", "同程旅行": "0780.HK",
+    "東方甄選": "1797.HK", "百度": "9888.HK", "嗶哩嗶哩": "9626.HK", "B站": "9626.HK", "華虹": "1347.HK", "華虹半導體": "1347.HK",
+    "中遠海控": "1919.HK", "安踏": "2020.HK", "李寧": "2331.HK", "海底撈": "6862.HK", "閱文": "0772.HK",
+    "蘋果": "AAPL", "微軟": "MSFT", "輝達": "NVDA", "英偉達": "NVDA", "亞馬遜": "AMZN", "谷歌": "GOOGL", "特斯拉": "TSLA",
+    "博通": "AVGO", "超微": "AMD", "網飛": "NFLX", "甲骨文": "ORCL", "台積電": "TSM", "阿斯麥": "ASML", "美光": "MU",
+    "超微電腦": "SMCI", "多鄰國": "DUOL", "優步": "UBER", "昂跑": "ONON"
+}
+
+def resolve_raw_ticker_input(raw_str: str, default_val: str = "0700.HK") -> str:
+    s = str(raw_str or "").strip()
+    if not s:
+        return default_val
+    # 若包含空格或括號 (例如從下拉選單帶入 "0700.HK 騰訊控股 (🟢 做多)")，自動提取第一段代碼
+    first_tok = s.split()[0].strip()
+    if first_tok in CN_STOCK_NAME_TO_TICKER:
+        return CN_STOCK_NAME_TO_TICKER[first_tok]
+    if s in CN_STOCK_NAME_TO_TICKER:
+        return CN_STOCK_NAME_TO_TICKER[s]
+    for cn_k, tk_v in CN_STOCK_NAME_TO_TICKER.items():
+        if len(cn_k) >= 2 and cn_k in s:
+            return tk_v
+    return sanitize_ticker_input(first_tok, default_val=default_val)
+
 def format_and_detect_market(ticker):
-    ticker = sanitize_ticker_input(str(ticker), default_val="0700.HK")
+    ticker = resolve_raw_ticker_input(str(ticker), default_val="0700.HK")
     if ticker.isdigit():
         ticker = f"{int(ticker):04d}.HK"
     elif len(ticker) <= 4 and ticker.replace('.', '').isdigit():
@@ -5672,7 +6091,36 @@ def get_stock_name(ticker):
         "2899.HK": "紫金礦業", "3311.HK": "中國建築國際", "9888.HK": "百度集團-SW", "9626.HK": "嗶哩嗶哩-W", "3908.HK": "中金公司",
         "6030.HK": "中信証券", "6110.HK": "滔搏", "9926.HK": "康方生物", "3888.HK": "金山軟件", "6060.HK": "眾安在線",
         "9896.HK": "名創優品", "1357.HK": "美圖公司", "1797.HK": "東方甄選", "0358.HK": "江西銅業", "2158.HK": "醫渡科技",
-        "6186.HK": "中國飛鶴", "9698.HK": "萬國數據-SW", "2400.HK": "心動公司", "0780.HK": "同程旅行"
+        "6186.HK": "中國飛鶴", "9698.HK": "萬國數據-SW", "2400.HK": "心動公司", "0780.HK": "同程旅行",
+        "6993.HK": "藍月亮集團", "1368.HK": "特步國際", "3998.HK": "波司登", "2155.HK": "森松國際", "2273.HK": "固生堂",
+        "1958.HK": "北京汽車", "0175.HK": "吉利汽車", "6865.HK": "福萊特玻璃", "0968.HK": "信義光能", "3808.HK": "中國重汽",
+        "1138.HK": "中遠海能", "0316.HK": "東方海外國際", "6078.HK": "海吉亞醫療",
+        # [v43.0 新增美股核心池本地名稱映射，徹底消除掃描美股時 50+ 次 yf.Ticker.info 同步 HTTP 阻塞]
+        "AAPL": "Apple 蘋果", "MSFT": "Microsoft 微軟", "NVDA": "NVIDIA 輝達", "AMZN": "Amazon 亞馬遜",
+        "META": "Meta Platforms", "GOOGL": "Alphabet 谷歌", "TSLA": "Tesla 特斯拉", "AVGO": "Broadcom 博通",
+        "AMD": "AMD 超微半導體", "NFLX": "Netflix 網飛", "CRM": "Salesforce", "ORCL": "Oracle 甲骨文",
+        "PLTR": "Palantir", "APP": "AppLovin", "CRWD": "CrowdStrike", "PANW": "Palo Alto Networks",
+        "SNOW": "Snowflake", "NOW": "ServiceNow", "UBER": "Uber 優步", "SHOP": "Shopify",
+        "SPOT": "Spotify", "AXON": "Axon Enterprise", "DUOL": "Duolingo 多鄰國", "CAVA": "CAVA Group",
+        "DECK": "Deckers Outdoor", "ONON": "On Holding 昂跑", "CELH": "Celsius Holdings", "ELF": "e.l.f. Beauty",
+        "ANET": "Arista Networks", "SMCI": "Super Micro 超微電腦", "ARM": "Arm Holdings", "MU": "Micron 美光",
+        "MRVL": "Marvell 邁威爾", "TSM": "TSMC 台積電", "ASML": "ASML 阿斯麥", "VRT": "Vertiv 維諦技術",
+        "VST": "Vistra Energy", "CEG": "Constellation Energy", "GEV": "GE Vernova", "PWR": "Quanta Services",
+        "EME": "EMCOR Group", "FIX": "Comfort Systems", "URI": "United Rentals", "ROAD": "Construction Partners",
+        "MOD": "Modine Mfg", "POWL": "Powell Industries", "IESC": "IES Holdings", "PRIM": "Primoris Services",
+        "DY": "Dycom Industries", "RKLB": "Rocket Lab", "ASTS": "AST SpaceMobile", "LUNR": "Intuitive Machines",
+        "IONQ": "IonQ 量子計算", "RGTI": "Rigetti Computing", "QBTS": "D-Wave Quantum", "SOUN": "SoundHound AI",
+        "BBAI": "BigBear.ai", "TEM": "Tempus AI", "RDDT": "Reddit", "HOOD": "Robinhood",
+        "SOFI": "SoFi Technologies", "AFRM": "Affirm Holdings", "UPST": "Upstart Holdings", "COIN": "Coinbase",
+        "MSTR": "MicroStrategy", "MARA": "MARA Holdings", "RIOT": "Riot Platforms", "CLSK": "CleanSpark",
+        "IREN": "Iris Energy", "CORZ": "Core Scientific", "WULF": "TeraWulf", "HUT": "Hut 8",
+        "HIMS": "Hims & Hers Health", "DOCS": "Doximity", "TMDX": "TransMedics", "ADMA": "ADMA Biologics",
+        "HALO": "Halozyme", "RVMD": "Revolution Medicines", "CRNX": "Crinetics Pharma", "VERA": "Vera Therapeutics",
+        "SG": "Sweetgreen", "SHAK": "Shake Shack", "WING": "Wingstop", "BROS": "Dutch Bros",
+        "CART": "Instacart", "TOST": "Toast", "KVYO": "Klaviyo", "IOT": "Samsara",
+        "GTLB": "GitLab", "ZS": "Zscaler", "NET": "Cloudflare", "DDOG": "Datadog",
+        "MDB": "MongoDB", "TTD": "The Trade Desk", "ZETA": "Zeta Global", "SE": "Sea Limited",
+        "MELI": "MercadoLibre", "NU": "Nu Holdings", "CPNG": "Coupang", "CYBR": "CyberArk"
     }
     
     if ticker in hk_names:
@@ -5727,15 +6175,20 @@ def get_index_data(index_ticker, interval="1d"):
         idx_df['PriceChange'] = idx_df['Close'].pct_change()
         if 'Volume' in idx_df.columns:
             idx_df['VolumeSMA50'] = idx_df['Volume'].rolling(window=50).mean()
-            # OLD: idx_df['Is_Distribution'] = (idx_df['PriceChange'] <= -0.002) & (idx_df['Volume'] > idx_df['Volume'].shift(1))
-            # NEW: [J Law 影片10 15:10] 排除 3/6/9/12 月第 3 個星期五期貨結算日 (四巫日) 異常成交量，並涵蓋放量滯漲出貨日
+            # OLD:
+            # idx_df['Is_Distribution'] = (
+            #     (idx_df['PriceChange'] <= 0.002)
+            #     & (idx_df['Volume'] > idx_df['Volume'].shift(1))
+            #     & (idx_df['Volume'] > idx_df['VolumeSMA50'])
+            #     & (~_qw_mask_idx)
+            # )
+            # NEW: [v43.0 修復 P0-1 機構派發日正負號反轉漏洞]
+            # 嚴格區分：(1) 標準派發日 (跌幅 <= -0.20% 且量增)；(2) 真實放量滯漲日 (微幅變動 -0.20% ~ +0.20%、放量 > 50MA 均量 1.1 倍，且收在日內波幅下半部 <= 45%)，杜絕正常平盤或微升日被誤判為出貨日！
             _qw_mask_idx = is_quad_witching_friday(idx_df.index)
-            idx_df['Is_Distribution'] = (
-                (idx_df['PriceChange'] <= 0.002)
-                & (idx_df['Volume'] > idx_df['Volume'].shift(1))
-                & (idx_df['Volume'] > idx_df['VolumeSMA50'])
-                & (~_qw_mask_idx)
-            )
+            _idx_close_pos = (idx_df['Close'] - idx_df['Low']) / ((idx_df['High'] - idx_df['Low']) + 1e-9) if ('High' in idx_df.columns and 'Low' in idx_df.columns) else 0.5
+            _is_std_dist_idx = (idx_df['PriceChange'] <= -0.002) & (idx_df['Volume'] > idx_df['Volume'].shift(1)) & (idx_df['Volume'] > idx_df['VolumeSMA50'] * 0.95)
+            _is_stall_dist_idx = (idx_df['PriceChange'] > -0.002) & (idx_df['PriceChange'] <= 0.002) & (idx_df['Volume'] > idx_df['Volume'].shift(1)) & (idx_df['Volume'] > idx_df['VolumeSMA50'] * 1.10) & (_idx_close_pos <= 0.45)
+            idx_df['Is_Distribution'] = (_is_std_dist_idx | _is_stall_dist_idx) & (~_qw_mask_idx)
             idx_df['Dist_Days_20d'] = idx_df['Is_Distribution'].rolling(window=20).sum()
         else:
             idx_df['Dist_Days_20d'] = 0
@@ -5897,62 +6350,62 @@ def evaluate_global_market_regime_gate(
             if is_above_50 and is_above_20 and b_dist < 4:
                 res.update({
                     "regime_code": "BULL_CONFIRMED",
-                    "regime_badge": f"🐂 確認牛市主升段 (今日 {idx_ret_pct:+.2f}%｜支援 100% 滿倉做多)",
+                    "regime_badge": f"🐂 確認牛市上升期 (今日 {idx_ret_pct:+.2f}%｜建議總倉位 80%~100%)",
                     "allow_breakout_long": True,
                     "allow_pullback_long": True,
                     "allow_short": not strict_hide_countertrend,
                     "tp1_full_exit_mode": False,
                     "recommended_pos_pct": 100,
-                    "regime_reason": f"基準指數 ({b_close:.0f}) 穩守 20MA ({b_sma20:.0f}) 與 50MA ({b_sma50:.0f}) 之上 (出貨日僅 {b_dist} 次)，屬《超級績效》確認牛市，可積極滿倉做多領頭羊。"
+                    "regime_reason": f"大市指數 ({b_close:.0f}) 穩守 20MA ({b_sma20:.0f}) 與 50MA ({b_sma50:.0f}) 之上 (近20日放量下跌日僅 {b_dist} 次)，市場環境健康，可正常參與突破或回調買點。"
                 })
             elif is_above_50 and is_above_20 and b_dist >= 4:
                 res.update({
                     "regime_code": "TOPPING_WARNING",
-                    "regime_badge": f"🌩️ 牛市見頂派發預警 (出貨日達 {b_dist} 次｜禁追高、只准低吸並鎖潤)",
+                    "regime_badge": f"🌩️ 大市高位派發預警 (近20日放量下跌達 {b_dist} 次｜忌追高、宜低吸及鎖定利潤)",
                     "allow_breakout_long": False if strict_hide_countertrend else True,
                     "allow_pullback_long": True,
                     "allow_short": True,
                     "tp1_full_exit_mode": True,
                     "recommended_pos_pct": 65,
-                    "regime_reason": f"基準指數雖在 20MA/50MA 之上，但近20日已累積 {b_dist} 個機構派發日 (Distribution Cluster)，屬於牛市見頂轉弱高危期 (如10月8日美股見頂前夕)，嚴禁高追突破！"
+                    "regime_reason": f"大市指數雖在 20MA/50MA 之上，但近20日已累積 {b_dist} 個放量下跌/滯漲日，顯示高位沽壓增加，不宜高追突破，建議控制在 65% 倉位內並及時鎖定利潤。"
                 })
             elif (not is_above_50 or not is_above_20) and is_reversal_bounce:
-                _turn_title = "🌤️ 大盤修正結束 / 重拾升勢" if is_above_50 else "🌤️ 熊轉牛初段 / 回調見底轉勢日 (彈簧股爆發期)"
+                _turn_title = "🌤️ 大市回調結束 / 重新轉強" if is_above_50 else "🌤️ 大市見底轉勢初段 (抗跌領頭股優先領漲期)"
                 res.update({
                     "regime_code": "BOTTOM_REVERSAL",
-                    "regime_badge": f"{_turn_title} (今日 {idx_ret_pct:+.2f}%｜捉超級績效彈簧股)",
+                    "regime_badge": f"{_turn_title} (今日 {idx_ret_pct:+.2f}%｜建議總倉位 50%~75%)",
                     "allow_breakout_long": True,
                     "allow_pullback_long": True,
                     "allow_short": True,
                     "tp1_full_exit_mode": False,
                     "recommended_pos_pct": 75,
                     "regime_reason": (
-                        f"基準指數 ({b_close:.0f}) 今日強勢反攻 ({idx_ret_pct:+.2f}%) 並站回短線均線 (9EMA {b_ema9:.0f}) 之上！"
-                        f"《超級績效》指出：大盤修正結束或熊轉牛初段，具備『3/4 或 4/4 重疊篩網 + 網球強彈 / Low Cheat』的領頭羊會像鬆開的彈簧一樣升得最快！"
+                        f"大市指數 ({b_close:.0f}) 今日轉強上升 ({idx_ret_pct:+.2f}%) 並站回短期均線 (9EMA {b_ema9:.0f}) 之上。"
+                        f"在大市回調結束或轉勢初段，符合『3/4 或 4/4 多維度篩選 + 底部/平台轉強買點』的抗跌領頭股往往最先啟動。"
                     )
                 })
             elif is_above_50 and not is_above_20:
                 res.update({
                     "regime_code": "BULL_PULLBACK",
-                    "regime_badge": f"🟡 牛市中期正常修正 (今日 {idx_ret_pct:+.2f}%｜宜 Low Cheat / 回踩低吸)",
+                    "regime_badge": f"🟡 牛市中期正常回調 (今日 {idx_ret_pct:+.2f}%｜宜等待回調支撐低吸)",
                     "allow_breakout_long": False if strict_hide_countertrend else True,
                     "allow_pullback_long": True,
                     "allow_short": True,
                     "tp1_full_exit_mode": True,
                     "recommended_pos_pct": 75,
-                    "regime_reason": f"基準指數處於 50MA ({b_sma50:.0f}) 之上但回落至 20MA ({b_sma20:.0f}) 下方進行中期修正，最佳策略是尋找抗跌的『Low Cheat 低位作弊點』或『網球強彈』個股埋伏。"
+                    "regime_reason": f"大市指數處於 50MA ({b_sma50:.0f}) 之上但回落至 20MA ({b_sma20:.0f}) 下方整理，建議減少追高突破，優先選擇『底部轉強買點』或『回調承接力強』的個股低吸。"
                 })
             else:
                 res.update({
                     "regime_code": "BEAR_WEAK",
-                    "regime_badge": f"🐻 確認熊市 / 尋底期 (今日 {idx_ret_pct:+.2f}%｜順勢做空或僅試單 3/4 重疊抗跌股)",
+                    "regime_badge": f"🐻 弱勢尋底期 (今日 {idx_ret_pct:+.2f}%｜宜保守觀望、順勢做空或小注試水抗跌股)",
                     "allow_breakout_long": False,
                     "allow_pullback_long": False if strict_hide_countertrend else True,
                     "allow_short": True,
                     "tp1_full_exit_mode": True,
                     "recommended_pos_pct": 50,
                     "regime_reason": (
-                        f"基準指數 ({b_close:.0f}) 位於 50MA ({b_sma50:.0f}) 與 9EMA ({b_ema9:.0f}) 下方且尚未出現轉勢陽燭。"
+                        f"大市指數 ({b_close:.0f}) 位於 50MA ({b_sma50:.0f}) 與 9EMA ({b_ema9:.0f}) 下方且尚未出現轉強訊號。"
                         f"主方向宜順勢做空，若做多僅限『多重小篩網重疊 (≥3/4) + 網球抗跌』之獨立強勢股並嚴守 HK$1,000 止損。"
                     )
                 })
@@ -6069,10 +6522,19 @@ def calculate_indicators(df, bg_df, interval="1d", market_type="US/Global"):
     df['VCPRange20'] = df['DailyPctRange'].rolling(20).mean()
     df['VCPSignal'] = df['VCPRange3'] < (df['VCPRange20'] * 0.5)
 
+    # OLD:
+    # delta = df['Close'].diff()
+    # gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    # loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    # df['RSI'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
+    # NEW: [v43.0 修復 P1-1 指標計算順序漏洞] 在計算 Clock_12 / Is_Climax_Run 之前，先行注入正統 Wilder RMA 平滑之 ATR 與 RSI，確保急漲過熱判定與富途/TradingView 100% 一致！
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
+    _rsi_sma = 100 - (100 / (1 + (gain / (loss + 1e-9))))
+    df['ATR_Wilder'], df['RSI_Wilder'] = compute_wilder_atr_and_rsi(df)
+    df['ATR'] = df['ATR_Wilder'].fillna(df['ATR'])
+    df['RSI'] = df['RSI_Wilder'].fillna(_rsi_sma)
 
     # 斜率時鐘判定與黏合度計算
     if len(df) >= 120:
@@ -6100,16 +6562,15 @@ def calculate_indicators(df, bg_df, interval="1d", market_type="US/Global"):
     # df['Is_Distribution'] = (
     #     (df['PriceChange'] <= 0.002) & 
     #     (df['Volume'] > df['Volume'].shift(1)) & 
-    #     (df['Volume'] > df['VolumeSMA50'])
+    #     (df['Volume'] > df['VolumeSMA50']) &
+    #     (~_qw_mask_stk)
     # )
-    # NEW: [J Law 影片10] 排除四巫日結算量干擾
+    # NEW: [v43.0 修復 P0-1 個股機構派發日正負號反轉漏洞]
     _qw_mask_stk = is_quad_witching_friday(df.index)
-    df['Is_Distribution'] = (
-        (df['PriceChange'] <= 0.002) & 
-        (df['Volume'] > df['Volume'].shift(1)) & 
-        (df['Volume'] > df['VolumeSMA50']) &
-        (~_qw_mask_stk)
-    )
+    _stk_close_pos = (df['Close'] - df['Low']) / ((df['High'] - df['Low']) + 1e-9)
+    _is_std_dist_stk = (df['PriceChange'] <= -0.002) & (df['Volume'] > df['Volume'].shift(1)) & (df['Volume'] > df['VolumeSMA50'] * 0.95)
+    _is_stall_dist_stk = (df['PriceChange'] > -0.002) & (df['PriceChange'] <= 0.002) & (df['Volume'] > df['Volume'].shift(1)) & (df['Volume'] > df['VolumeSMA50'] * 1.15) & (_stk_close_pos <= 0.42)
+    df['Is_Distribution'] = (_is_std_dist_stk | _is_stall_dist_stk) & (~_qw_mask_stk)
     df['Dist_Days_20d'] = df['Is_Distribution'].rolling(window=20).sum()
     df['Is_Abnormal_Drop'] = (df['PriceChange'] < -0.03) & (df['Volume'] > df['VolumeSMA50'])
     df['Is_Climax_Run'] = df['Clock_12']
@@ -6193,6 +6654,7 @@ def calculate_indicators(df, bg_df, interval="1d", market_type="US/Global"):
     df.attrs["sepa_vcp_3c_info"] = compute_minervini_vcp_and_3c_cheats(df, lookback_base=65)
     df.attrs["sepa_tennis_squat_info"] = evaluate_tennis_ball_and_squat_action(df)
     df.attrs["sepa_mini_screens_info"] = evaluate_minervini_overlapping_mini_screens(df)
+    df.attrs["three_books_info"] = compute_weinstein_stage_and_pring_kst(df)
 
     return df
 
@@ -6200,10 +6662,20 @@ def calculate_indicators(df, bg_df, interval="1d", market_type="US/Global"):
 # 4.1 大週期週線共振監測
 # ==========================================
 @st.cache_data(ttl=3600)
-def get_weekly_alignment_signal(ticker):
+def _fetch_remote_weekly_df(ticker: str):
+    return yf.download(ticker, period="3y", interval="1wk", auto_adjust=True, progress=False)
+
+def get_weekly_alignment_signal(ticker, daily_df: Optional[pd.DataFrame] = None):
     try:
-        wk_df = yf.download(ticker, period="3y", interval="1wk", auto_adjust=True, progress=False)
-        if wk_df.empty:
+        # [v43.0 修復 P1-1 雷達掃描 55 次重複週線 HTTP 請求與 High_52W 分母錯誤]
+        # 若已傳入記憶體日線 daily_df (>=120 根 K 線)，直接以 W-FRI 本地重取樣合成週線，耗時 <0.5ms 且零網絡請求！
+        if daily_df is not None and not daily_df.empty and len(daily_df) >= 120:
+            wk_df = daily_df[['Open', 'High', 'Low', 'Close', 'Volume']].resample('W-FRI').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+            }).dropna(subset=['Close'])
+        else:
+            wk_df = _fetch_remote_weekly_df(ticker)
+        if wk_df is None or wk_df.empty:
             return {"warning": "", "label": "⚪ 無法取得週線資料", "detail": {}}
 
         if isinstance(wk_df.columns, pd.MultiIndex):
@@ -6218,16 +6690,18 @@ def get_weekly_alignment_signal(ticker):
         if wk_df.index.tz is not None:
             wk_df.index = wk_df.index.tz_localize(None)
 
-        wk_df['SMA50'] = wk_df['Close'].rolling(50).mean()
+        wk_df['SMA50'] = wk_df['Close'].rolling(50, min_periods=20).mean()
         wk_df['High_52W'] = wk_df['High'].rolling(52, min_periods=1).max()
 
         delta = wk_df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        gain = delta.clip(lower=0.0).ewm(alpha=1.0/14.0, min_periods=14, adjust=False).mean()
+        loss = (-delta.clip(upper=0.0)).ewm(alpha=1.0/14.0, min_periods=14, adjust=False).mean()
         wk_df['RSI'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
 
         last = wk_df.iloc[-1]
-        dist_to_high = ((last['High_52W'] - last['Close']) / max(last['Close'], 1e-9)) * 100
+        # OLD: dist_to_high = ((last['High_52W'] - last['Close']) / max(last['Close'], 1e-9)) * 100
+        # NEW: [v43.0 修正分母為 High_52W]
+        dist_to_high = ((last['High_52W'] - last['Close']) / max(last['High_52W'], 1e-9)) * 100
 
         return {
             "warning": "",
@@ -6388,7 +6862,9 @@ def quick_historical_win_rate(df, market_type, score_threshold: int = 5):
     _be_days_q = int(_stop_prof_q.get("breakeven_min_days", 3))
     _time_stop_q = int(_stop_prof_q.get("time_stop_days", 18))
     n_bars = len(df)
-    full_eval_start = max(25, n_bars - 280)
+    # OLD: full_eval_start = max(25, n_bars - 280)
+    # NEW: [v43.1 提速 5 倍防掃描超時] 近 45 根 K 線執行深度多引擎切片，其餘歷史區間採用高速因果向量評估，確保 50 隻美股/港股掃描於數秒內完成
+    full_eval_start = max(25, n_bars - 45)
 
     for i in range(25, n_bars):
         row = df.iloc[i]
@@ -6444,7 +6920,12 @@ def quick_historical_win_rate(df, market_type, score_threshold: int = 5):
                         if sig == "LONG":
                             _planned_sl = round(max(_planned_e - 1.55 * atr_val, low20_p - 0.35 * atr_val, _planned_e * 0.93), 2)
                             _rk = max(_planned_e - _planned_sl, 1e-4)
-                            _planned_tp = round(min(_planned_e + 2.4 * atr_val, _planned_e + 2.1 * _rk), 2)
+                            # OLD: _planned_tp = round(min(_planned_e + 2.4 * atr_val, _planned_e + 2.1 * _rk), 2)
+                            # NEW: [v45.0 P0-3 修復] 與港美雙軌 R:R 引擎對齊 (港股採用 max(3.6x ATR, 2.2R)，美股採用 2.15R~2.6x ATR)
+                            if str(market_type).upper() == "HK":
+                                _planned_tp = round(max(_planned_e + 3.6 * atr_val, _planned_e + 2.2 * _rk), 2)
+                            else:
+                                _planned_tp = round(min(_planned_e * 1.095, max(_planned_e + 2.6 * atr_val, _planned_e + 2.05 * _rk)), 2)
                             _planned_rr = (_planned_tp - _planned_e) / _rk
 
             if sig == "LONG" and _planned_rr >= 1.8 and _planned_e > 0:
@@ -6462,7 +6943,12 @@ def quick_historical_win_rate(df, market_type, score_threshold: int = 5):
 
                 if _cand_entry > 0:
                     init_risk_q = max(_cand_entry - _planned_sl, 1e-4)
-                    if float(row['Low']) <= _planned_sl and (float(row['Close']) < _cand_entry or float(row['Close']) < float(row['Open'])):
+                    _q_same_bar_sl = (
+                        (float(row['Low']) <= _planned_sl)
+                        if ("IMMEDIATE" in order_style or "LIMIT" in order_style)
+                        else (float(row['Low']) <= _planned_sl and (float(row['Close']) < _cand_entry or float(row['Close']) < float(row['Open'])))
+                    )
+                    if _q_same_bar_sl:
                         long_trades.append(-1.0)
                     else:
                         position = "LONG"
@@ -6511,14 +6997,21 @@ def quick_historical_win_rate(df, market_type, score_threshold: int = 5):
             _soft_sl_q = stop_loss + 0.25 * atr_val if stop_loss < entry_price else stop_loss
             _hard_hit_q = float(row['Low']) <= stop_loss
             _soft_close_hit_q = (stage_q == 0) and (float(row['Close']) <= _soft_sl_q) and (float(row['Close']) < float(row['Open']))
+            # [v45.0 P0-3 修復] 區分「真止盈獲勝 (+1.0)」、「觸及 TP0 減半後餘倉保本出場 (計 +0.5 半勝而非虛報 100% 全勝)」與「僅推保本未減倉之打和單 (0.0 不計入勝負分母)」
             if _hard_hit_q or _soft_close_hit_q:
-                long_trades.append(1.0 if (stage_q >= 1 or stop_loss > entry_price) else -1.0)
+                if stage_q >= 1:
+                    long_trades.append(0.5)
+                elif stop_loss <= entry_price:
+                    long_trades.append(-1.0)
                 position, days_held, stage_q = None, 0, 0
             elif float(row['High']) >= tp_target:
                 long_trades.append(1.0)
                 position, days_held, stage_q = None, 0, 0
             elif days_held >= _time_stop_q and float(row['Close']) < entry_price * 1.025:
-                long_trades.append(1.0 if (stage_q >= 1 or float(row['Close']) > entry_price * 1.003) else -1.0)
+                if stage_q >= 1 or float(row['Close']) >= entry_price + 0.8 * init_risk_q:
+                    long_trades.append(0.5 if stage_q >= 1 else 1.0)
+                elif float(row['Close']) < entry_price * 0.998:
+                    long_trades.append(-1.0)
                 position, days_held, stage_q = None, 0, 0
 
         elif position == "SHORT":
@@ -6550,45 +7043,65 @@ def quick_historical_win_rate(df, market_type, score_threshold: int = 5):
 # ==========================================
 # 6.5 批量預載快取引擎 (加速全景雷達掃描 4~6 倍，並統一使用 auto_adjust=True 前複權數據)
 # ==========================================
-_PRELOADED_DAILY_CACHE: Dict[str, pd.DataFrame] = {}
+# [v43.1 伺服器級持久化 OHLCV 快取] 將 _PRELOADED_DAILY_CACHE 綁定至 _global_persistent_data，防止 Streamlit 每次 Rerun 清空快取並觸發 Yahoo HTTP 429 限流
+_PRELOADED_DAILY_CACHE: Dict[str, pd.DataFrame] = _global_persistent_data.setdefault("ohlcv_daily_cache", {})
+_PRELOADED_CACHE_TS: Dict[str, float] = _global_persistent_data.setdefault("ohlcv_daily_cache_ts", {})
 
 def batch_preload_ohlcv_cache(tickers: List[str]) -> None:
-    """在全景雷達掃描前，一次性批量下載多隻股票近 2 年日線前複權數據，消除逐隻 HTTP 請求與 sleep 阻塞"""
+    """在全景雷達掃描前，分批安全預載股票池日線數據 (每批 18 隻 + 雙通道回退)，徹底根治美股/港股 50+ 隻同時請求觸發 Yahoo 429 空數據之問題"""
     clean_syms = []
+    now_ts = time.time()
     for t in tickers:
         if isinstance(t, str) and t.strip():
             fmt_t, _, _, _, _ = format_and_detect_market(t)
+            # 若快取內已有 30 分鐘內之有效數據，直接重用，不重複發起 HTTP 請求
+            if fmt_t in _PRELOADED_DAILY_CACHE and (now_ts - _PRELOADED_CACHE_TS.get(fmt_t, 0)) < 1800 and len(_PRELOADED_DAILY_CACHE[fmt_t]) >= 50:
+                continue
             clean_syms.append(fmt_t)
     clean_syms = list(dict.fromkeys(clean_syms))
-    if len(clean_syms) < 2:
+    if len(clean_syms) < 1:
         return
-    try:
-        raw = yf.download(clean_syms, period="2y", interval="1d", group_by="ticker", auto_adjust=True, progress=False, threads=True)
-        if raw is None or raw.empty:
-            return
-        now_ts = time.time()
-        for sym in clean_syms:
-            try:
-                if isinstance(raw.columns, pd.MultiIndex):
-                    if sym in raw.columns.get_level_values(0):
-                        sub = raw[sym].copy()
-                    elif sym in raw.columns.get_level_values(1):
-                        sub = raw.xs(sym, axis=1, level=1).copy()
+    # 分批每組最多 18 隻下載，防止 Yahoo Finance 因為單次 URL 過長或 32 線程併發而封鎖美股/港股請求
+    chunk_size = 18
+    for c_idx in range(0, len(clean_syms), chunk_size):
+        chunk = clean_syms[c_idx: c_idx + chunk_size]
+        try:
+            raw = yf.download(chunk, period="2y", interval="1d", group_by="ticker", auto_adjust=True, progress=False, threads=True)
+            if raw is None or raw.empty:
+                continue
+            for sym in chunk:
+                try:
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        lvl0 = [str(x).upper() for x in raw.columns.get_level_values(0)]
+                        lvl1 = [str(x).upper() for x in raw.columns.get_level_values(1)]
+                        if sym.upper() in lvl0:
+                            sub = raw[sym].copy()
+                        elif sym.upper() in lvl1:
+                            sub = raw.xs(sym, axis=1, level=1).copy()
+                        else:
+                            continue
                     else:
-                        continue
-                else:
-                    sub = raw.copy()
-                sub = sub.dropna(subset=['Open', 'High', 'Low', 'Close'])
-                if len(sub) >= 50:
-                    sub.index = pd.to_datetime(sub.index)
-                    if sub.index.tz is not None:
-                        sub.index = sub.index.tz_localize(None)
-                    sub.attrs["_preload_ts"] = now_ts
-                    _PRELOADED_DAILY_CACHE[sym] = sub
-            except Exception as e:
-                swing_logger.debug(f"預載 {sym} 略過: {e}")
-    except Exception as e:
-        swing_logger.warning(f"批量預載異常: {e}")
+                        sub = raw.copy()
+                    if isinstance(sub.columns, pd.MultiIndex):
+                        sub.columns = sub.columns.get_level_values(-1)
+                    sub = sub.loc[:, ~sub.columns.duplicated()]
+                    sub = sub.dropna(subset=['Open', 'High', 'Low', 'Close'])
+                    if len(sub) >= 50:
+                        sub.index = pd.to_datetime(sub.index)
+                        if sub.index.tz is not None:
+                            sub.index = sub.index.tz_localize(None)
+                        sub.attrs["_preload_ts"] = time.time()
+                        # [v45.0 P2-1 記憶體上限保護] 限制快取最多保留 180 隻股票，超出時自動淘汰最舊項目，防止長期運行 OOM
+                        if len(_PRELOADED_DAILY_CACHE) >= 180 and sym not in _PRELOADED_DAILY_CACHE:
+                            _oldest_k = min(_PRELOADED_CACHE_TS, key=_PRELOADED_CACHE_TS.get) if _PRELOADED_CACHE_TS else next(iter(_PRELOADED_DAILY_CACHE))
+                            _PRELOADED_DAILY_CACHE.pop(_oldest_k, None)
+                            _PRELOADED_CACHE_TS.pop(_oldest_k, None)
+                        _PRELOADED_DAILY_CACHE[sym] = sub
+                        _PRELOADED_CACHE_TS[sym] = time.time()
+                except Exception as e:
+                    swing_logger.debug(f"預載 {sym} 略過: {e}")
+        except Exception as e:
+            swing_logger.warning(f"分批預載異常: {e}")
 
 # ==========================================
 # 7. 核心診斷引擎 (完美融合新舊做空邏輯)
@@ -6602,7 +7115,7 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         df = None
         if interval == "1d" and ticker in _PRELOADED_DAILY_CACHE:
             cached_df = _PRELOADED_DAILY_CACHE[ticker]
-            if (time.time() - cached_df.attrs.get("_preload_ts", 0)) < 900:
+            if (time.time() - _PRELOADED_CACHE_TS.get(ticker, cached_df.attrs.get("_preload_ts", 0))) < 1800:
                 df = cached_df.copy()
 
         if df is None or df.empty:
@@ -6613,11 +7126,20 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
             elif interval in ["1h", "4h", "90m"]:
                 period = "730d"
             else:
-                period = "3y"
+                period = "2y"
 
             _dl_stk_interval = "1h" if interval == "4h" else interval
-            df = yf.download(ticker, period=period, interval=_dl_stk_interval, auto_adjust=True, progress=False)
-            if df.empty:
+            try:
+                df = yf.download(ticker, period=period, interval=_dl_stk_interval, auto_adjust=True, progress=False)
+            except Exception:
+                df = pd.DataFrame()
+            # [v43.1 雙通道防失敗回退] 若 yf.download 因 Yahoo 併發鎖定返回空表，自動改用 yf.Ticker(ticker).history() 獨立通道抓取
+            if df is None or df.empty:
+                try:
+                    df = yf.Ticker(ticker).history(period=period, interval=_dl_stk_interval, auto_adjust=True)
+                except Exception:
+                    df = pd.DataFrame()
+            if df is None or df.empty:
                 return {"error": "無數據返回，請確認代號正確。"}
 
             if isinstance(df.columns, pd.MultiIndex):
@@ -6637,6 +7159,9 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         df.index = pd.to_datetime(df.index)
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
+        if interval == "1d":
+            _PRELOADED_DAILY_CACHE[ticker] = df.copy()
+            _PRELOADED_CACHE_TS[ticker] = time.time()
         if interval == "4h" and len(df) >= 4:
             df = df.resample("4h").agg({
                 "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
@@ -6912,82 +7437,92 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
 
         if (_allow_bo_long or _is_bottom_rev_day) and is_kk_htf and not invalidation_info["long_stop_hit"] and not invalidation_info["downtrend_veto_long"] and not _is_exhausted_bar:
             plan_type = "LONG"
-            status = "🔥 Kullamägi 高階動能旗型"
+            # OLD: status = "🔥 Kullamägi 高階動能旗型"
+            status = "🟢 強勢股高位窄幅整理突破 (動能旗型)"
         elif is_martin_ep_long:
             plan_type = "LONG"
-            status = f"🚀 EP 跳空爆量突破 (波段結構止損約 {martin_luk_info.get('stop_width_pct', 4.0):.1f}%)"
+            status = f"🟢 利好裂口放量突破 (跳空轉強 ｜ 結構止損約 {martin_luk_info.get('stop_width_pct', 4.0):.1f}%)"
         elif is_martin_pb_long:
             plan_type = "LONG"
             _conf_txt = "+".join(martin_luk_info.get("confluence_supports", [])[:2])
-            status = f"🎯 強勢回踩多重支撐匯聚買點 ({_conf_txt} 收回 ｜ 波段止損約 {martin_luk_info.get('stop_width_pct', 4.0):.1f}%)"
+            status = f"🟢 回調多重均線支撐買點 ({_conf_txt} 支撐確認 ｜ 止損約 {martin_luk_info.get('stop_width_pct', 4.0):.1f}%)"
         elif is_martin_id_long and (pass_count >= strictness_threshold - 1 or early_stage_bypass):
             plan_type = "LONG"
-            status = f"🟢 Inside Day 均線雲帶壓縮突破 (升穿 {martin_luk_info.get('pdh_trigger', 0):.2f} 觸發 ｜ 波段止損約 {martin_luk_info.get('stop_width_pct', 4.0):.1f}%)"
+            status = f"🟢 窄幅收縮突破買點 (升穿前日高點 {martin_luk_info.get('pdh_trigger', 0):.2f} 觸發 ｜ 止損約 {martin_luk_info.get('stop_width_pct', 4.0):.1f}%)"
         elif (_allow_bo_long or _is_bottom_rev_day) and is_long_trigger and is_breakout_long and not invalidation_info["long_stop_hit"] and not _is_exhausted_bar:
             plan_type = "LONG"
-            status = "🟢 放量強勢突破 (Breakout)"
+            status = "🟢 放量突破前高買點 (Breakout)"
         elif _allow_pb_long and is_long_trigger and is_tight_setup and not invalidation_info["long_stop_hit"]:
             plan_type = "LONG"
-            status = "🟢 極限壓縮潛伏 (VCP/緊密箱體 Setup)"
+            status = "🟢 波幅收窄待變買點 (縮量平台整理)"
         elif _allow_pb_long and is_lei_ma_convergence_long and not has_active_short_signal:
             plan_type = "LONG"
-            status = "🟢 LEI 均線高度密集 (<2.5%) 張嘴突破埋伏"
+            status = "🟢 多條均線密集突破買點 (趨勢剛起步)"
         elif _allow_pb_long and is_long_trigger and not invalidation_info["long_stop_hit"] and not ma_slope_info.get("ma_ribbon_sloping_down", False):
             plan_type = "LONG"
-            status = "🟢 20MA 右側收復回踩做多" if ma_slope_info.get("reclaimed_9ema_right_side", False) else "🟢 20MA 回踩做多信號"
+            status = "🟢 回調 20MA 止跌轉強買點" if ma_slope_info.get("reclaimed_9ema_right_side", False) else "🟢 回調 20MA 支撐買點"
         elif _allow_pb_long and lei_struct_info.get("bullish_2b", False) and (last['Close'] >= last['SMA50'] * 0.98) and not invalidation_info["long_stop_hit"]:
             plan_type = "LONG"
-            status = "🟢 LEI 2B 破底翻買點 (洗盤跌穿前低後強勢收陽確認反轉)"
+            status = "🟢 跌穿前低後迅速收復買點 (假跌破轉強)"
         elif _allow_pb_long and is_deduction_pullback and not has_active_short_signal:
             plan_type = "LONG"
-            _b_tag = " + 底構造確認" if lei_struct_info.get("bottom_structure") else ""
-            status = f"🟡 趨勢回撤買點 (2點鐘方向，抵扣價防守成功{_b_tag})"
+            _b_tag = " + 底部確認" if lei_struct_info.get("bottom_structure") else ""
+            status = f"🟡 上升趨勢回調買點 (均線支撐穩健{_b_tag})"
         elif _allow_pb_long and (df.attrs.get("vbp_vsa_info", {}).get("vsa_no_supply", False) or df.attrs.get("vbp_vsa_info", {}).get("vsa_spring_absorption", False)) and is_long_candidate and is_near_20ma:
             plan_type = "LONG"
-            status = "🟢 Wyckoff VSA 縮量無供給/彈簧洗盤測試買點 (均線支撐確認)"
+            status = "🟢 縮量回測支撐買點 (沽壓減輕確認)"
         elif _allow_pb_long and _is_bottom_rev_day and _is_reversal_leader_long and is_near_20ma:
             plan_type = "LONG"
-            status = "🌤️ 大市見底同步反攻買點 (陽燭重上 9EMA/20MA 右側轉強)"
+            status = "🌤️ 大市見底同步轉強買點 (重上 9EMA/20MA)"
         elif _allow_pb_long and df.attrs.get("sepa_vcp_3c_info", {}).get("entry_tier") in ["LOW_CHEAT", "MID_CHEAT_3C"] and df.attrs.get("sepa_mini_screens_info", {}).get("overlap_count", 0) >= 2 and not invalidation_info["long_stop_hit"] and not invalidation_info["downtrend_veto_long"]:
             plan_type = "LONG"
-            _3c_badge = df.attrs.get("sepa_vcp_3c_info", {}).get("entry_tier_badge", "💎 3C作弊買點")
-            status = f"🟢 《超級績效》{_3c_badge} ({df.attrs.get('sepa_mini_screens_info', {}).get('overlap_badge', '')})"
+            _3c_badge = df.attrs.get("sepa_vcp_3c_info", {}).get("entry_tier_badge", "🟢 提前轉強買點")
+            status = f"🟢 {_3c_badge} ({df.attrs.get('sepa_mini_screens_info', {}).get('overlap_badge', '')})"
         elif _allow_pb_long and df.attrs.get("sepa_tennis_squat_info", {}).get("is_tennis_ball", False) and df.attrs.get("sepa_mini_screens_info", {}).get("overlap_count", 0) >= 2 and not invalidation_info["long_stop_hit"]:
             plan_type = "LONG"
-            status = f"🎾 《超級績效》網球強彈買點 (回測均線迅速收陽彈起 ｜ {df.attrs.get('sepa_mini_screens_info', {}).get('overlap_badge', '')})"
+            status = f"🟢 回調承接力強買點 (觸及均線迅速回升 ｜ {df.attrs.get('sepa_mini_screens_info', {}).get('overlap_badge', '')})"
         elif _allow_pb_long and df.attrs.get("sepa_mini_screens_info", {}).get("overlap_count", 0) >= 3 and not invalidation_info["long_stop_hit"] and not invalidation_info["downtrend_veto_long"] and not _is_exhausted_bar:
+            # [v44.0 遵從《超級績效》多重雙標準小篩網重疊原則] 4 組獨立雙標準小篩網命中 >= 3 組 (3/4 或 4/4) 之高潛力強勢股直接入選做多清單
             plan_type = "LONG"
-            status = f"🌟 《超級績效》多重小篩網重疊潛力股 ({df.attrs.get('sepa_mini_screens_info', {}).get('overlap_badge', '')})"
+            status = f"🟢 多維度篩選高分潛力股 ({df.attrs.get('sepa_mini_screens_info', {}).get('overlap_badge', '')})"
+        elif _allow_pb_long and df.attrs.get("three_books_info", {}).get("is_stage_1_to_2_buy", False) and df.attrs.get("three_books_info", {}).get("pring_kst_bullish", False) and not df.attrs.get("three_books_info", {}).get("pring_false_breakout_trap", False) and not invalidation_info["long_stop_hit"] and not invalidation_info["downtrend_veto_long"] and not _is_exhausted_bar:
+            # [v47.0 新增：《多空操作秘笈》Stage 1→2 底部轉勢突破/首次縮量回測 +《技術分析精論》Pring KST 動能金叉買點]
+            plan_type = "LONG"
+            status = "🟢 一轉二階段底部轉強買點 (突破或縮量回測 150MA + KST 動能向上)"
+        elif _allow_pb_long and df.attrs.get("sepa_mini_screens_info", {}).get("overlap_count", 0) == 2 and (pass_count >= strictness_threshold or early_stage_bypass) and (is_near_20ma or is_tight_setup or _reclaimed_short_ma_today) and not invalidation_info["long_stop_hit"] and not invalidation_info["downtrend_veto_long"] and not _is_exhausted_bar:
+            # [v44.0 早期二階段與回調企穩捕捉] 命中 2/4 小篩網且同時通過基本趨勢門檻並處於 20MA 支撐/波幅收窄/轉強陽燭位置
+            plan_type = "LONG"
+            status = f"🟢 雙篩網重疊轉強買點 ({df.attrs.get('sepa_mini_screens_info', {}).get('overlap_badge', '')})"
         elif _allow_short_gate and is_jlaw_short_trigger and is_breakdown and not _is_short_overextended:
             plan_type = "SHORT"
-            status = "🔴 帶量破底做空 (Breakdown)"
+            status = "🔴 放量跌穿底部做空 (Breakdown)"
         elif _allow_short_gate and is_jlaw_short_trigger and is_weak_bounce:
             plan_type = "SHORT"
-            status = "🔴 均線蓋頭弱反彈 (Bear Flag)"
+            status = "🔴 均線壓制弱勢反彈做空"
         elif _allow_short_gate and is_short_candidate_original and not _is_short_overextended:
             plan_type = "SHORT"
-            status = "🟠 空頭趨勢成型做空 (長線結構)"
+            status = "🟠 下跌趨勢順勢做空 (中長線結構)"
         elif _allow_short_gate and is_cohodes_short and not _is_short_overextended:
             plan_type = "SHORT"
-            status = "🏴‍☠️ Cohodes 絕佳空點 (破位+反彈無力)"
+            status = "🔴 跌穿支撐且反彈無力做空"
         elif _allow_short_gate and is_rebound_short:
             plan_type = "SHORT"
-            status = "🩸 弱勢反彈受阻 (高勝率空點)"
+            status = "🔴 弱勢反彈遇阻做空 (均線阻力壓制)"
         elif is_martin_fade_short:
             plan_type = "SHORT"
             _cres_txt = "+".join(martin_luk_info.get("confluence_resistances", [])[:2])
-            status = f"🩸 Martin Luk 下彎EMA/AVWAP弱反抽做空 ({_cres_txt} 受阻 ｜ HOD極緊止損)"
-        elif _allow_short_gate and (is_jlaw_short_trigger or is_cohodes_short) and _is_short_overextended:
+            status = f"🔴 下跌趨勢反彈受阻做空 ({_cres_txt} 壓力區)"
+        elif _allow_short_gate and (is_jlaw_short_trigger or is_cohodes_short or is_short_candidate) and _is_short_overextended:
             plan_type = "WATCH"
-            status = f"⚪ 空頭超賣觀察 (已連跌或偏離 20MA 達 {_dist_below_20ma_atr:.1f}x ATR，嚴禁低位追空，等待反抽 10/20MA 受阻)"
+            status = f"⚪ 空頭超賣觀察 (已連跌或偏離 20MA 達 {_dist_below_20ma_atr:.1f}x ATR，不宜低位追空，等待反彈受阻)"
         elif is_short_candidate:
-            # [v35.0 核心重構] 僅具備空頭背景但無破底或弱反抽受阻觸發點時，歸類為 WATCH 觀察，嚴禁混入可執行做空清單
+            # [v44.0 還原精準篩選原則] 僅具備空頭均線背景但當下無破底或弱勢反彈受阻觸發點時，歸類為 WATCH 觀察，避免無訊號盲目沽空
             plan_type = "WATCH"
-            status = "⚪ 空頭排列觀察 (等待反抽受阻或破底觸發點)"
+            status = f"⚪ 空頭趨勢觀察 ({short_pass_count}/7 項符合｜目前無破底或反彈受阻觸發點，等待反抽阻力位)"
         elif is_long_candidate:
-            # [v35.0 核心重構] 僅具備多頭均線背景但無突破或支撐收復觸發點時，歸類為 WATCH 觀察，杜絕無買點市價盲買！
+            # [v44.0 還原精準篩選原則] 僅具備多頭均線背景但處於波段中途、無突破/回調買點且未達 3/4 小篩網重疊時，歸類為 WATCH 觀察，避免半山腰盲目追買
             plan_type = "WATCH"
-            status = "⚪ 多頭排列觀察 (目前處於波段中途，等待回踩支撐或緊密突破買點)"
+            status = f"⚪ 多頭趨勢觀察 ({pass_count}/7 項符合｜目前處於波段中途，等待回調支撐或波幅收窄突破買點)"
         else:
             plan_type = "WATCH"
             if invalidation_info["long_stop_hit"]:
@@ -7061,12 +7596,21 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         df.attrs["long_plan_eval"] = long_plan_eval
         df.attrs["short_plan_eval"] = short_plan_eval
 
-        # [v39.0 動態結構風險門控] 尊重側欄止損模式 (STOP_PROFILE_CONFIGS) 與個股 ADR% 動態止損上限，消除 6.2% 硬編碼誤殺美股高動能股之矛盾
+        # OLD:
+        # if plan_type in ["LONG", "SHORT"] and float(trade_plan_eval.get("stop_pct", 0.0)) > _max_allowed_stop_m:
+        #     plan_type = "WATCH"
+        # NEW: [v44.0 結合「滿倉 HK$21,500 + 單筆止損 HK$1,000」與個股 ADR% 之動態結構止損門控]
+        # 港股與美股根據側欄止損模式及個股 ADR% 設定合理上限 (約 7.0% ~ 10.8%)：
+        # - 若止損在合理波段範圍內 (<= 動態上限)，保留於做多/做空清單，並由 HK$1,000 紅綠燈提供「方案 A 掛低吸單滿倉」與「方案 B 按 HK$1,000 定額縮減股數」；
+        # - 若結構止損超過動態上限 (代表波幅過於鬆散、遠離支撐)，則轉為 WATCH 觀望，等待波幅收窄！
         _active_prof_m = get_active_stop_profile()
-        _max_allowed_stop_m = max(float(_active_prof_m.get("max_stop_pct", 0.056)) * 100.0 + 0.6, min(10.8, (float(atr_val) / max(float(last['Close']), 1e-6)) * 195.0))
+        _max_allowed_stop_m = max(
+            float(_active_prof_m.get("max_stop_pct", 0.056)) * 100.0 + 1.4,
+            min(10.8 if market_type != "HK" else 9.5, (float(atr_val) / max(float(last['Close']), 1e-6)) * 205.0)
+        )
         if plan_type in ["LONG", "SHORT"] and float(trade_plan_eval.get("stop_pct", 0.0)) > _max_allowed_stop_m:
             plan_type = "WATCH"
-            status = f"⚪ 觀望 (結構止損過寬達 {trade_plan_eval.get('stop_pct', 0):.1f}% > {_max_allowed_stop_m:.1f}% 動態上限，等待結構收窄)"
+            status = f"⚪ 觀望 (結構止損過寬達 {trade_plan_eval.get('stop_pct', 0):.1f}% > {_max_allowed_stop_m:.1f}% 動態上限，等待波幅收窄)"
         target_entry = trade_plan_eval["entry"]
         if plan_type == "LONG":
             stop_loss = trade_plan_eval["sl"]
@@ -7108,7 +7652,7 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         # --- 🌐 大週期週線共振監測 ---
         weekly_alignment = {"warning": "", "label": "", "detail": {}}
         if interval == "1d":
-            weekly_alignment = get_weekly_alignment_signal(ticker)
+            weekly_alignment = get_weekly_alignment_signal(ticker, daily_df=df)
             wk = weekly_alignment.get("detail", {})
             weekly_warnings = []
 
@@ -7147,7 +7691,7 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
 # ==========================================
 # 8. 雙向歷史回測引擎 (v25.1 富途牛牛中線波段專版 - 唯一標準引擎，已刪除底部重複定義)
 # ==========================================
-def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, score_threshold, trade_mode, is_relaxed):
+def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, score_threshold, trade_mode, is_relaxed, use_full_pos_1k_risk: bool = True):
     """
     [v25.1 全面升級與漏洞修復]
     1. 富途牛牛 (Futu) 港美股真實收費模型：每筆進出場精確扣除富途佣金、平台費、港股 0.1% 印花稅與交收規費
@@ -7229,7 +7773,9 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
             bench_dist = prev_row.get('Bench_Dist_Days', 0)
             is_market_health_ok = True
             if pd.notna(bench_close) and pd.notna(bench_200):
-                if bench_close < bench_200 or bench_dist >= 5:
+                _bt_bench_50 = prev_row.get('SMA50BenchValue', np.nan)
+                _bt_leader_rs = bool(float(prev_row.get('Mansfield_RS', 0)) > 0.3 and float(prev_row['Close']) >= float(prev_row.get('SMA50', prev_row['Close'])))
+                if (bench_close < bench_200 and (pd.isna(_bt_bench_50) or bench_close < _bt_bench_50 * 0.985) and not _bt_leader_rs) or bench_dist >= 6:
                     is_market_health_ok = False
 
             if position_type == "LONG":
@@ -7360,20 +7906,33 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                             _dist_cnt_bar = float(prev_row.get('Dist_Days_20d', 0))
                             _bt_peak_equity = max(_bt_peak_equity, current_equity)
                             _bt_curr_dd_pct = ((_bt_peak_equity - current_equity) / max(_bt_peak_equity, 1.0)) * 100.0
-                            _eff_risk_frac = 0.005 if (_dist_cnt_bar >= 4 or bench_dist >= 3) else 0.0075
-                            if _bt_loss_streak >= 4 or _bt_curr_dd_pct >= 12.0:
-                                _eff_risk_frac = min(_eff_risk_frac, 0.0020)
-                            elif _bt_loss_streak >= 2 or _bt_curr_dd_pct >= 6.0:
-                                _eff_risk_frac = min(_eff_risk_frac, 0.0035)
-                            risk_amount = current_equity * _eff_risk_frac
+                            # [v43.0 修復 P0-3 回測倉位與用戶「滿倉 HK$18,000~25,000 + 單筆 HK$1,000 定額止損」脫節漏洞]
+                            _u_cfg_bt = get_user_risk_and_full_pos_config(market_type)
+                            _is_full_pos_acct = bool(use_full_pos_1k_risk or (initial_capital <= 65000.0 if market_type == "HK" else initial_capital <= 10000.0))
+                            if _is_full_pos_acct:
+                                _base_fixed_risk = float(_u_cfg_bt["max_loss_local"]) * (current_equity / max(float(initial_capital), 1.0))
+                                if _bt_loss_streak >= 3 or _bt_curr_dd_pct >= 12.0:
+                                    _base_fixed_risk *= 0.65
+                                risk_amount = _base_fixed_risk
+                                _max_notional_cap = current_equity * 0.98
+                            else:
+                                _eff_risk_frac = 0.005 if (_dist_cnt_bar >= 4 or bench_dist >= 3) else 0.0075
+                                if _bt_loss_streak >= 4 or _bt_curr_dd_pct >= 12.0:
+                                    _eff_risk_frac = min(_eff_risk_frac, 0.0020)
+                                elif _bt_loss_streak >= 2 or _bt_curr_dd_pct >= 6.0:
+                                    _eff_risk_frac = min(_eff_risk_frac, 0.0035)
+                                risk_amount = current_equity * _eff_risk_frac
+                                _adr_bar = float(prev_row.get('ADR_Pct', 4.0))
+                                _max_notional_cap = current_equity * (0.25 if _adr_bar >= 6.0 else 0.35)
                             target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
-                            _adr_bar = float(prev_row.get('ADR_Pct', 4.0))
-                            _max_notional_cap = current_equity * (0.25 if _adr_bar >= 6.0 else 0.35)
-                            if (target_shares * entry_price) > min(cash * 0.99, _max_notional_cap):
-                                target_shares = int(min(cash * 0.99, _max_notional_cap) / entry_price)
+                            if (target_shares * entry_price) > min(cash * 0.985, _max_notional_cap):
+                                target_shares = int(min(cash * 0.985, _max_notional_cap) / entry_price)
                             if market_type == "HK":
                                 lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
                                 target_shares = (target_shares // lot_sz) * lot_sz
+                                # 若滿倉帳戶因每手股數向下取整為 0，但 1 手總成本 <= 可用現金且風險 <= 1.35x 目標風險，允許買入 1 手
+                                if target_shares == 0 and _is_full_pos_acct and (lot_sz * entry_price * 1.005 <= cash) and (lot_sz * risk_per_share <= risk_amount * 1.35):
+                                    target_shares = lot_sz
                             if target_shares > 0:
                                 buy_fee_info = compute_futu_real_fees(market_type, entry_price, target_shares, is_sell=False)
                                 buy_fee = buy_fee_info["single_leg_fee"]
@@ -7402,11 +7961,15 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                                         "最終止盈": "結構TP1減半 + 20MA/21EMA波段跟蹤",
                                         "結構止損": round(entry_structural_sl, 2)
                                     }
-                                    # OLD: if float(row['Low']) <= stop_loss and float(row['Close']) < entry_price:
-                                    # NEW: [v25.2 修復 P0-2 盤中收盤價前視偏差] 只要進場當日盤中低點跌穿止損位 (且對突破單而言收盤未能強勢站穩開盤之上，或對低吸單而言直接殺穿止損)，即誠實觸發止損！
-                                    # OLD: if float(row['Low']) <= stop_loss and (float(row['Close']) < entry_price or "LIMIT" in _order_style or float(row['Close']) < float(row['Open'])):
-                                    # NEW: [v30.0 修復低吸單進場當日收長下影強勢陽線仍被誤判止損之漏洞] 只有跌穿硬止損且收盤未能站回進場價之上 (或收陰線) 才觸發當日止損
-                                    if float(row['Low']) <= stop_loss and (float(row['Close']) < entry_price or float(row['Close']) < float(row['Open'])):
+                                    # OLD: if float(row['Low']) <= stop_loss and (float(row['Close']) < entry_price or float(row['Close']) < float(row['Open'])):
+                                    # NEW: [v43.0 根治 P0-3 進場當日收盤價前視偏差]
+                                    # 對 IMMEDIATE (開盤已持倉) 與 LIMIT (下跌途中先觸及買點後再跌穿下方止損) 而言，盤中低點跌穿硬止損必然觸發券商止損單，不可用收盤價豁免！
+                                    _same_bar_stop_hit = (
+                                        (float(row['Low']) <= stop_loss)
+                                        if ("IMMEDIATE" in _order_style or "LIMIT" in _order_style)
+                                        else (float(row['Low']) <= stop_loss and (float(row['Close']) < entry_price or float(row['Close']) < float(row['Open'])))
+                                    )
+                                    if _same_bar_stop_hit:
                                         exit_price = stop_loss * (1.0 - market_slippage)
                                         sell_fee = compute_futu_real_fees(market_type, exit_price, shares, is_sell=True)["single_leg_fee"]
                                         cash += (shares * exit_price - sell_fee)
@@ -7473,16 +8036,28 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                         if _planned_rr >= 1.8:
                             _bt_peak_equity = max(_bt_peak_equity, current_equity)
                             _bt_curr_dd_pct = ((_bt_peak_equity - current_equity) / max(_bt_peak_equity, 1.0)) * 100.0
-                            _eff_short_risk_frac = 0.0035 if (_bt_loss_streak >= 2 or _bt_curr_dd_pct >= 6.0) else 0.0075
-                            risk_amount = current_equity * _eff_short_risk_frac
+                            # [v45.0 P0-2 修復] 空頭回測同步支援用戶「滿倉 HK$18,000~25,000 + 單筆 HK$1,000 定額止損」設定
+                            _u_cfg_short_bt = get_user_risk_and_full_pos_config(market_type)
+                            _is_full_pos_short = bool(use_full_pos_1k_risk or (initial_capital <= 65000.0 if market_type == "HK" else initial_capital <= 10000.0))
+                            if _is_full_pos_short:
+                                _base_s_risk = float(_u_cfg_short_bt["max_loss_local"]) * (current_equity / max(float(initial_capital), 1.0))
+                                if _bt_loss_streak >= 3 or _bt_curr_dd_pct >= 12.0:
+                                    _base_s_risk *= 0.65
+                                risk_amount = _base_s_risk
+                                _max_notional_cap = current_equity * 0.95
+                            else:
+                                _eff_short_risk_frac = 0.0035 if (_bt_loss_streak >= 2 or _bt_curr_dd_pct >= 6.0) else 0.0075
+                                risk_amount = current_equity * _eff_short_risk_frac
+                                _adr_bar = float(prev_row.get('ADR_Pct', 4.0))
+                                _max_notional_cap = current_equity * (0.25 if _adr_bar >= 6.0 else 0.35)
                             target_shares = int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
-                            _adr_bar = float(prev_row.get('ADR_Pct', 4.0))
-                            _max_notional_cap = current_equity * (0.25 if _adr_bar >= 6.0 else 0.35)
                             if (target_shares * entry_price) > min(cash * 0.95, _max_notional_cap):
                                 target_shares = int(min(cash * 0.95, _max_notional_cap) / entry_price)
                             if market_type == "HK":
                                 lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
                                 target_shares = (target_shares // lot_sz) * lot_sz
+                                if target_shares == 0 and _is_full_pos_short and (lot_sz * entry_price * 1.005 <= cash) and (lot_sz * risk_per_share <= risk_amount * 1.35):
+                                    target_shares = lot_sz
                             if target_shares > 0:
                                 short_open_fee = compute_futu_real_fees(market_type, entry_price, target_shares, is_sell=True)["single_leg_fee"]
                                 req_margin = target_shares * entry_price
@@ -7588,7 +8163,11 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
                     position_stage = 0
 
                 elif row['High'] >= tp_target and position_stage < 2:
-                    if is_trending_market:
+                    # [v46.0 回測與港美雙軌 R:R 止盈完全對齊]
+                    # - 美股 (US)：TP1 為 2.0R~2.4R 強勢減半點，無論大盤指數是否剛站上 50MA，觸及 TP1 均先賣出 50% 鎖潤，尾倉 50% 沿 21EMA 奔跑搏 TP2；
+                    # - 港股 (HK)：TP1 已跨過箱體小阻力直取 main7 波段目標 (+9%~+14% / 2.2R~2.8R)，若僅持 1 手或非強勢大牛市則 100% 落袋，若持有多手且大盤順風則減半並沿 20MA/21EMA 跟蹤！
+                    _should_partial_trail = True if market_type != "HK" else bool(is_trending_market and shares >= POPULAR_HK_LOTS.get(ticker, 100) * 2)
+                    if _should_partial_trail:
                         sold_shares = int(shares * 0.5)
                         if market_type == "HK":
                             lot_sz = POPULAR_HK_LOTS.get(ticker, 100)
@@ -7955,7 +8534,7 @@ st.sidebar.markdown("---")
 mode_options = [
     "🔎 1. 市場動能掃描雷達",
     "📊 2. 個股量化分析與技術診斷",
-    "⭐ 3. 自選股動能面板",
+    "⭐ 3. 自選股票名單",
     "📈 4. 策略歷史回測系統",
     "📖 5. 實戰教學與大師戰法指南 (新手必看)"
 ]
@@ -7963,8 +8542,226 @@ mode_options = [
 default_idx = 0
 if default_mode_val == "診斷":
     default_idx = 1
+elif default_mode_val in ["自選", "自選股票名單"]:
+    default_idx = 2
 elif default_mode_val == "教學":
     default_idx = 4
+
+# ==============================================================================
+# [v46.0 新增：仿富途牛牛「自選股票名單」全域快捷組件與分組重命名/即時報價引擎]
+# ==============================================================================
+def rename_watchlist_group_in_place(old_cat: str, new_cat: str) -> Tuple[bool, str]:
+    """原位修改自選分組名稱，完整保留分組排序位置、組內股票及已掃描之雷達快取結果"""
+    new_cat_clean = str(new_cat or "").strip()
+    if not old_cat or old_cat not in st.session_state.watchlist_dict:
+        return False, "請先選擇要修改名稱的分組。"
+    if not new_cat_clean:
+        return False, "新分組名稱不能為空。"
+    if new_cat_clean == old_cat:
+        return False, "新名稱與原名稱相同。"
+    if new_cat_clean in st.session_state.watchlist_dict:
+        return False, f"分組「{new_cat_clean}」已存在，請使用其他名稱。"
+
+    # 保持原有字典順序重建 watchlist_dict
+    new_wl_dict = {}
+    for k, v in st.session_state.watchlist_dict.items():
+        if k == old_cat:
+            new_wl_dict[new_cat_clean] = list(v)
+        else:
+            new_wl_dict[k] = list(v)
+    st.session_state.watchlist_dict = new_wl_dict
+    persistent_data["_disk_watchlist_dict"] = new_wl_dict
+
+    # 遷移該分組之雷達結果、相關性警告與時間戳
+    if old_cat in st.session_state.watchlist_radar_results:
+        st.session_state.watchlist_radar_results[new_cat_clean] = st.session_state.watchlist_radar_results.pop(old_cat)
+    old_rk, new_rk = f"自選_{old_cat}", f"自選_{new_cat_clean}"
+    for store_dict in [
+        st.session_state.radar_correlation_warnings,
+        st.session_state.radar_correlation_matrices,
+        persistent_data.get("radar_timestamps", {}),
+        persistent_data.get("radar_breadth_stats", {}),
+    ]:
+        if isinstance(store_dict, dict) and old_rk in store_dict:
+            store_dict[new_rk] = store_dict.pop(old_rk)
+
+    with _CACHE_LOCK:
+        _global_persistent_data["_disk_watchlist_dict"] = new_wl_dict
+        if old_cat in _global_persistent_data.get("watchlist_radar_results", {}):
+            _global_persistent_data["watchlist_radar_results"][new_cat_clean] = _global_persistent_data["watchlist_radar_results"].pop(old_cat)
+        save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+    return True, f"✅ 已將分組「{old_cat}」改名為「{new_cat_clean}」（組內股票與掃描記錄已自動保留）！"
+
+def render_futu_quick_watchlist_bar(fmt_ticker: str, stock_name: str, context_key: str = "diag") -> None:
+    """在「個股診斷頁」頂部提供仿富途牛牛的一鍵加入/移出自選分組快捷工具列"""
+    wl_dict = st.session_state.watchlist_dict
+    all_cats = list(wl_dict.keys())
+    in_cats = [c for c, t_list in wl_dict.items() if fmt_ticker in t_list]
+
+    status_html = (
+        f"⭐ **自選狀態**：已收藏於 " + " 、 ".join([f"**【{c}】**" for c in in_cats])
+        if in_cats else
+        f"☆ **自選狀態**：`{fmt_ticker} {stock_name}` 尚未加入自選股票名單"
+    )
+    with st.container():
+        bar_c1, bar_c2, bar_c3, bar_c4 = st.columns([2.1, 2.2, 1.3, 1.2])
+        with bar_c1:
+            render_atomic_alert(status_html, "success" if in_cats else "info")
+        with bar_c2:
+            default_sel = in_cats if in_cats else ([all_cats[0]] if all_cats else [])
+            selected_cats = st.multiselect(
+                "📂 選擇要放入的自選分組 (可多選):",
+                options=all_cats,
+                default=default_sel,
+                key=f"futu_wl_ms_{context_key}_{fmt_ticker}"
+            )
+        with bar_c3:
+            new_quick_cat = st.text_input(
+                "➕ 或新建分組並放入:",
+                placeholder="輸入新分組名 (選填)",
+                key=f"futu_wl_newcat_{context_key}_{fmt_ticker}"
+            ).strip()
+        with bar_c4:
+            st.write("")
+            if st.button("⭐ 存入自選分組", key=f"futu_wl_save_{context_key}_{fmt_ticker}", use_container_width=True):
+                target_cats = list(selected_cats)
+                if new_quick_cat:
+                    if new_quick_cat not in wl_dict:
+                        wl_dict[new_quick_cat] = []
+                    if new_quick_cat not in target_cats:
+                        target_cats.append(new_quick_cat)
+                for c in list(wl_dict.keys()):
+                    if c in target_cats:
+                        if fmt_ticker not in wl_dict[c]:
+                            wl_dict[c].append(fmt_ticker)
+                    else:
+                        if fmt_ticker in wl_dict[c]:
+                            wl_dict[c].remove(fmt_ticker)
+                save_persisted_state_to_disk(persistent_data, wl_dict)
+                st.toast(f"⭐ 已更新 {fmt_ticker} ({stock_name}) 的自選分組設定！")
+                st.rerun()
+            if in_cats and st.button("❌ 移出全部自選", key=f"futu_wl_rm_{context_key}_{fmt_ticker}", use_container_width=True):
+                for c in list(wl_dict.keys()):
+                    if fmt_ticker in wl_dict[c]:
+                        wl_dict[c].remove(fmt_ticker)
+                save_persisted_state_to_disk(persistent_data, wl_dict)
+                st.toast(f"已將 {fmt_ticker} 從所有自選分組移除")
+                st.rerun()
+
+def build_watchlist_instant_quote_df(tickers: List[str]) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """仿富途牛牛自選股行情列表：秒速讀取/批量預載分組內股票的即時報價、今日漲跌、5日漲跌、ADR%、均線趨勢與持倉狀態"""
+    stats = {
+        "total": len(tickers), "hk_cnt": 0, "us_cnt": 0,
+        "up_cnt": 0, "down_cnt": 0, "flat_cnt": 0,
+        "avg_chg_pct": 0.0, "above_50ma_pct": 0.0, "locked_cnt": 0
+    }
+    if not tickers:
+        return pd.DataFrame(), stats
+
+    batch_preload_ohlcv_cache(tickers)
+    locked_map = persistent_data.get("user_locked_positions", {})
+    rows = []
+    chg_list = []
+    above_50_cnt = 0
+
+    for idx, raw_t in enumerate(tickers, 1):
+        fmt_t, mkt_t, _, _, cur_t = format_and_detect_market(raw_t)
+        if mkt_t == "HK":
+            stats["hk_cnt"] += 1
+        else:
+            stats["us_cnt"] += 1
+        stk_name = get_stock_name(fmt_t)
+        sec_name = get_ticker_sector(fmt_t)
+        in_other_groups = [g for g, gl in st.session_state.watchlist_dict.items() if fmt_t in gl]
+
+        df_sub = _PRELOADED_DAILY_CACHE.get(fmt_t)
+        if df_sub is None or df_sub.empty:
+            try:
+                df_sub = yf.Ticker(fmt_t).history(period="6mo", interval="1d", auto_adjust=True)
+                if df_sub is not None and not df_sub.empty and len(df_sub) >= 20:
+                    df_sub.index = pd.to_datetime(df_sub.index)
+                    if df_sub.index.tz is not None:
+                        df_sub.index = df_sub.index.tz_localize(None)
+                    _PRELOADED_DAILY_CACHE[fmt_t] = df_sub
+                    _PRELOADED_CACHE_TS[fmt_t] = time.time()
+            except Exception:
+                df_sub = None
+
+        if df_sub is not None and not df_sub.empty and len(df_sub) >= 5:
+            c_last = float(df_sub['Close'].iloc[-1])
+            c_prev = float(df_sub['Close'].iloc[-2]) if len(df_sub) >= 2 else c_last
+            c_prev5 = float(df_sub['Close'].iloc[-6]) if len(df_sub) >= 6 else float(df_sub['Close'].iloc[0])
+            chg_1d = ((c_last - c_prev) / max(c_prev, 1e-6)) * 100.0
+            chg_5d = ((c_last - c_prev5) / max(c_prev5, 1e-6)) * 100.0
+            chg_list.append(chg_1d)
+            if chg_1d > 0.05:
+                stats["up_cnt"] += 1
+            elif chg_1d < -0.05:
+                stats["down_cnt"] += 1
+            else:
+                stats["flat_cnt"] += 1
+
+            sma20_v = float(df_sub['Close'].tail(20).mean())
+            sma50_v = float(df_sub['Close'].tail(50).mean()) if len(df_sub) >= 30 else sma20_v
+            sma200_v = float(df_sub['Close'].tail(200).mean()) if len(df_sub) >= 120 else sma50_v
+            high_52w_v = float(df_sub['High'].tail(252).max())
+            dist_52w = ((high_52w_v - c_last) / max(high_52w_v, 1e-6)) * 100.0
+            adr_v = float(((df_sub['High'].tail(20) / (df_sub['Low'].tail(20) + 1e-9)) - 1.0).mean() * 100.0)
+
+            if c_last >= sma50_v:
+                above_50_cnt += 1
+            if c_last >= sma20_v and c_last >= sma50_v and sma20_v >= sma50_v:
+                ma_badge = "🟢 站穩 20MA & 50MA (多頭強勢)"
+            elif c_last >= sma50_v and c_last < sma20_v:
+                ma_badge = "🟡 50MA之上・回調測試20MA"
+            elif c_last < sma50_v and c_last >= sma20_v:
+                ma_badge = "🌤️ 低位站回 20MA (底部轉強)"
+            else:
+                ma_badge = "🔴 位於 20MA & 50MA 下方 (弱勢)"
+
+            l_pos = locked_map.get(fmt_t)
+            if l_pos:
+                stats["locked_cnt"] += 1
+                pos_str = f"🔒 已鎖定 ({'做空' if l_pos.get('dir_code')=='SHORT' else '做多'} @{float(l_pos.get('entry', 0)):.2f})"
+            else:
+                pos_str = "-"
+
+            rows.append({
+                "次序": f"#{idx}",
+                "跳轉診斷": f"/?mode=診斷&ticker={fmt_t}&strict={strictness}",
+                "代碼": fmt_t,
+                "股票名稱": stk_name,
+                "行業板塊": sec_name,
+                "最新價": f"{c_last:.2f} {cur_t}",
+                "今日漲跌(%)": f"{'🟢 ' if chg_1d > 0 else ('🔴 ' if chg_1d < 0 else '⚪ ')}{chg_1d:+.2f}%",
+                "5日漲跌(%)": f"{chg_5d:+.2f}%",
+                "20日ADR波幅": f"{adr_v:.1f}%",
+                "均線趨勢位置": ma_badge,
+                "距52W高點": f"-{dist_52w:.1f}%",
+                "實戰持倉鎖定": pos_str,
+                "所屬分組": " / ".join(in_other_groups)
+            })
+        else:
+            rows.append({
+                "次序": f"#{idx}",
+                "跳轉診斷": f"/?mode=診斷&ticker={fmt_t}&strict={strictness}",
+                "代碼": fmt_t,
+                "股票名稱": stk_name,
+                "行業板塊": sec_name,
+                "最新價": "待載入",
+                "今日漲跌(%)": "-",
+                "5日漲跌(%)": "-",
+                "20日ADR波幅": "-",
+                "均線趨勢位置": "⚪ 點擊診斷載入數據",
+                "距52W高點": "-",
+                "實戰持倉鎖定": "-",
+                "所屬分組": " / ".join(in_other_groups)
+            })
+
+    if chg_list:
+        stats["avg_chg_pct"] = round(float(np.mean(chg_list)), 2)
+    stats["above_50ma_pct"] = round((above_50_cnt / max(len(tickers), 1)) * 100.0, 1)
+    return pd.DataFrame(rows), stats
 
 mode = st.sidebar.radio("請選擇功能", mode_options, index=default_idx)
 
@@ -8080,13 +8877,13 @@ def render_radar_results(df_results, title, market_key=None):
             if is_radar_cache_expired(persistent_data, market_key) and is_radar_cache_expired(persistent_data, _base_mk):
                 st.warning(f"⏰ **雷達緩存過期提示 ({market_key})**：距離上次掃描已超過 30 分鐘或已跨交易日，建議重新點擊上方「🚀 啟動掃描」以獲取最新盤中/收盤報價。")
             _b_stats = persistent_data.get("radar_breadth_stats", {}).get(market_key)
-            if _b_stats:
+            if _b_stats and len(df_results) >= 12:
                 _p50 = _b_stats.get("pct_above_50ma", 0.0)
                 _p200 = _b_stats.get("pct_above_200ma", 0.0)
                 if _p50 < 45.0:
-                    st.warning(f"📉 **J Law 市場寬度預警 ({market_key})**：目前池內僅 **{_p50:.1f}%** 股票高於 50MA、**{_p200:.1f}%** 高於 200MA。若大盤指數仍在高位，屬「指數與成分股背馳」見頂信號，宜縮減倉位或冬眠！")
+                    st.warning(f"📉 **市場內部寬度預警 ({market_key}，樣本 {len(df_results)} 隻)**：目前池內僅 **{_p50:.1f}%** 股票高於 50MA、**{_p200:.1f}%** 高於 200MA。若大市指數仍在高位，顯示多數個股並未跟漲，宜控制倉位。")
                 else:
-                    st.info(f"🌐 **J Law 市場內部體質 ({market_key})**：高於 50MA 比例 **{_p50:.1f}%** ｜ 高於 200MA 比例 **{_p200:.1f}%**")
+                    st.info(f"🌐 **市場內部健康度 ({market_key}，樣本 {len(df_results)} 隻)**：高於 50MA 比例 **{_p50:.1f}%** ｜ 高於 200MA 比例 **{_p200:.1f}%**")
 
         with st.expander("🧭 新手必看：3步看懂並使用此掃描器 (點擊展開教學)", expanded=False):
             st.markdown(
@@ -8123,11 +8920,17 @@ def render_radar_results(df_results, title, market_key=None):
                 _b_s50 = float(_bg_b['SMA50'].iloc[-1])
                 _b_e9 = float(_bg_b['Close'].ewm(span=9, adjust=False).mean().iloc[-1])
                 _b_dist = int(float(_bg_b['Dist_Days_20d'].iloc[-1])) if 'Dist_Days_20d' in _bg_b.columns else 0
-                if _b_c >= _b_s50 and _b_c >= _b_s20:
+                if _b_c >= _b_s50 and _b_c >= _b_s20 and _b_dist < 4:
                     st.success(
-                        f"🧭 **【大市判準：🟢 {_idx_name_b} 強勢多頭期】** 最新 **{_b_c:,.0f}**（今日 **{_b_ret:+.2f}%**）｜ "
-                        f"站穩 **20MA ({_b_s20:,.0f})** 與 **50MA ({_b_s50:,.0f})** 之上 ｜ 近20日出貨日 **{_b_dist}** 次。\n\n"
-                        f"👉 **實戰導航**：大市順風向好，優先從下方 **🟢 做多清單** 挑選結構緊湊（止損 ≤4.8%）之領頭羊 **100% 滿倉** 進場！"
+                        f"🧭 **【大市判準：🐂 {_idx_name_b} 確認牛市上升期】** 最新 **{_b_c:,.0f}**（今日 **{_b_ret:+.2f}%**）｜ "
+                        f"站穩 **20MA ({_b_s20:,.0f})** 與 **50MA ({_b_s50:,.0f})** 之上 ｜ 近20日放量下跌日僅 **{_b_dist}** 次。\n\n"
+                        f"👉 **實戰導航**：市場環境健康，優先從下方 **🟢 做多清單** 挑選結構緊湊（止損 ≤4.8%）之強勢股進場。"
+                    )
+                elif _b_c >= _b_s50 and _b_c >= _b_s20 and _b_dist >= 4:
+                    st.warning(
+                        f"🧭 **【大市判準：🌩️ {_idx_name_b} 大市高位派發預警】** 最新 **{_b_c:,.0f}**（今日 **{_b_ret:+.2f}%**）｜ "
+                        f"雖在 20MA/50MA 之上，但近20日已累積 **{_b_dist}** 個放量下跌/滯漲日。\n\n"
+                        f"👉 **實戰導航**：高位沽壓增加，不宜高追突破，建議控制在 65% 倉位內並優先選擇回調低吸買點。"
                     )
                 elif (_b_ret >= 1.0 or _b_c >= _b_e9) and _b_c < _b_s50:
                     st.info(
@@ -8171,7 +8974,10 @@ def render_radar_results(df_results, title, market_key=None):
                         _is_hk_r = str(r_row['代碼']).upper().endswith(".HK")
                         _mkt_r = "HK" if _is_hk_r else "US/Global"
                         _lot_r = POPULAR_HK_LOTS.get(r_row['代碼'], 100) if _is_hk_r else 1
-                        _sz_g = compute_equal_risk_position_cap(float(r_row['最新價']), float(r_row['ATR防守止損']), lot_size=_lot_r, market_type=_mkt_r)
+                        # OLD: _sz_g = compute_equal_risk_position_cap(float(r_row['最新價']), float(r_row['ATR防守止損']), lot_size=_lot_r, market_type=_mkt_r)
+                        # NEW: [v45.0 P0-2 修復] 以「建議進場價」計算計畫止損幅度與滿倉股數，避免回調低吸單因現價較高而被誤判為止損過寬
+                        _plan_e_val = float(r_row['建議進場價']) if str(r_row.get('建議進場價', '-')) not in ['-', ''] else float(r_row['最新價'])
+                        _sz_g = compute_equal_risk_position_cap(_plan_e_val, float(r_row['ATR防守止損']), lot_size=_lot_r, market_type=_mkt_r)
                         _cur_lbl = _sz_g.get("currency_symbol", "HK$" if _is_hk_r else "US$")
                         _rk_b_lbl = f"{_cur_lbl}{_sz_g.get('risk_budget_used', 1000 if _is_hk_r else 128):,.0f}"
                         _full_b_lbl = f"{_cur_lbl}{_sz_g.get('target_full_notional', 21500 if _is_hk_r else 2756):,.0f}"
@@ -8223,20 +9029,30 @@ def render_radar_results(df_results, title, market_key=None):
                 st.info("目前無同時滿足「空頭觸發 + 結構盈虧比 ≥ 1.8R」的優先沽空股票。")
 
         st.markdown("---")
-        st.markdown("#### ⚡ 快速無縫跳轉診斷 (揀選上方 #1, #2 股票一鍵查看 K 線買賣位)")
+        st.markdown("#### ⚡ 快速跳轉個股診斷 & ⭐ 富途式快捷存入自選股票名單")
         all_tickers = []
         if not df_long.empty: all_tickers.extend(df_long['代碼'].tolist())
         if not df_short.empty: all_tickers.extend(df_short['代碼'].tolist())
         if not df_watch.empty: all_tickers.extend(df_watch['代碼'].tolist())
         
         if all_tickers:
+            _tk_label_map = {}
+            for _, _r_item in df_results.iterrows():
+                _tc = str(_r_item.get('代碼', ''))
+                _tn = str(_r_item.get('股票名稱', ''))
+                _td = str(_r_item.get('交易方向', ''))
+                if _tc:
+                    _tk_label_map[_tc] = f"{_tc} {_tn} ({_td})"
+            _labeled_opts = [_tk_label_map.get(t, t) for t in all_tickers]
+
             c1, c2 = st.columns([3, 1])
             with c1:
-                jump_ticker = st.selectbox("選擇要診斷的標的:", all_tickers, index=None, placeholder="點擊此處輸入或搜尋代碼...", key=f"jump_sel_{market_key}")
+                jump_ticker_raw = st.selectbox("🔍 選擇要深度診斷的股票:", _labeled_opts, index=None, placeholder="點擊此處輸入或搜尋代碼 / 名稱...", key=f"jump_sel_{market_key}")
             with c2:
                 st.write("")
-                if st.button("🚀 進入診斷", key=f"jump_btn_{market_key}"):
-                    if jump_ticker:
+                if st.button("🚀 進入個股診斷", key=f"jump_btn_{market_key}", use_container_width=True):
+                    if jump_ticker_raw:
+                        jump_ticker = jump_ticker_raw.split()[0].strip()
                         st.query_params["mode"] = "診斷"
                         st.query_params["ticker"] = jump_ticker
                         st.query_params["strict"] = str(strictness)
@@ -8247,6 +9063,54 @@ def render_radar_results(df_results, title, market_key=None):
                         st.rerun()
                     else:
                         st.warning("請先選擇或輸入代碼")
+
+            # [v46.0 新增：掃描雷達內置「富途式快捷加入自選分組」面板]
+            with st.expander("⭐ 快捷將雷達篩選股票存入「自選股票名單」分組 (支援單選 / 批量多選 / 新建分組)", expanded=True):
+                _top_l_default = [_tk_label_map.get(t, t) for t in (top_long['代碼'].tolist()[:3] if ('top_long' in locals() and not top_long.empty) else all_tickers[:2])]
+                rw_c1, rw_c2, rw_c3, rw_c4 = st.columns([2.4, 1.5, 1.3, 1.2])
+                with rw_c1:
+                    _radar_pick_list = st.multiselect(
+                        "📌 勾選要加入自選的股票 (預設已選今日優先精選股):",
+                        options=_labeled_opts,
+                        default=_top_l_default,
+                        key=f"radar_wl_picks_{market_key}"
+                    )
+                with rw_c2:
+                    _wl_cats_avail = list(st.session_state.watchlist_dict.keys())
+                    _radar_target_cat = st.selectbox(
+                        "📂 選擇目標自選分組:",
+                        options=_wl_cats_avail + ["➕ 新建自選分組..."],
+                        key=f"radar_wl_target_cat_{market_key}"
+                    )
+                with rw_c3:
+                    _radar_new_cat_name = st.text_input(
+                        "✏️ 新分組名稱 (若選新建):",
+                        placeholder="例: 今日突破精選",
+                        disabled=(_radar_target_cat != "➕ 新建自選分組..."),
+                        key=f"radar_wl_new_cat_{market_key}"
+                    ).strip()
+                with rw_c4:
+                    st.write("")
+                    if st.button("⭐ 一鍵存入自選", key=f"radar_wl_add_btn_{market_key}", use_container_width=True):
+                        _dest_cat = _radar_new_cat_name if _radar_target_cat == "➕ 新建自選分組..." else _radar_target_cat
+                        if not _dest_cat:
+                            st.warning("請輸入新分組名稱！")
+                        elif not _radar_pick_list:
+                            st.warning("請至少勾選一隻股票！")
+                        else:
+                            if _dest_cat not in st.session_state.watchlist_dict:
+                                st.session_state.watchlist_dict[_dest_cat] = []
+                            _added_syms = []
+                            for _item_lbl in _radar_pick_list:
+                                _sym_code = _item_lbl.split()[0].strip()
+                                if _sym_code not in st.session_state.watchlist_dict[_dest_cat]:
+                                    st.session_state.watchlist_dict[_dest_cat].append(_sym_code)
+                                    _added_syms.append(_sym_code)
+                            save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                            if _added_syms:
+                                st.success(f"✅ 已將 {', '.join(_added_syms)} 存入自選分組【{_dest_cat}】！")
+                            else:
+                                st.info(f"所選股票已全部在分組【{_dest_cat}】內。")
         st.markdown("---")
 
         f_col1, f_col2 = st.columns([2, 2])
@@ -8272,7 +9136,7 @@ def render_radar_results(df_results, title, market_key=None):
         # ]
         # NEW: [v25.0] 精簡視圖加入 MartinLuk設置 與 ADR波幅(%)
         simple_cols = [
-            "優先次序", "跳轉診斷", "代碼", "股票名稱", "交易方向", "超級績效重疊網", "VCP與3C買點", "機會評級", "入場時機", "優先總分",
+            "優先次序", "跳轉診斷", "代碼", "股票名稱", "交易方向", "超級績效重疊網", "VCP與3C買點", "多空四階段", "Pring動能", "機會評級", "入場時機", "優先總分",
             "最新價", "建議進場價", "掛單與買入位說明", "ATR防守止損", "ATR目標止盈",
             "預估盈虧比(R:R)", "DeepChart空單消化", "MartinLuk設置", "ADR波幅(%)", "META多重優勢", "J Law 強勢形態", "診斷結果"
         ]
@@ -8372,29 +9236,21 @@ def run_all_inclusive_radar(stock_list):
             _trend_bonus = (passcount if ptype == "LONG" else shortpasscount) * 2.5
             _rs_bonus = min(max(abs(rs_strength) * 2.0, 0.0), 12.0)
             _rr_penalty = -25.0 if _planned_rr < 1.8 else 0.0
-            _priority_score = round(min(99.9, max(10.0, _fresh_bonus + _immediate_bonus + _dc_bonus + _conv_bonus + _meta_bonus + _rr_bonus + _trend_bonus + _rs_bonus + _rr_penalty)), 1) if ptype in ["LONG", "SHORT"] else 0.0
+            # [v45.0 P1-2 修復] 將《超級績效》四組小篩網重疊數 (overlap_count) 與 3-C 提前買點 / 回調強承接納入優先總分，確保重疊出現的高潛力領頭股排在最前
+            _ov_cnt_r = int(df.attrs.get("sepa_mini_screens_info", {}).get("overlap_count", 0)) if ptype == "LONG" else 0
+            _3c_tier_r = str(df.attrs.get("sepa_vcp_3c_info", {}).get("entry_tier", "NONE")) if ptype == "LONG" else "NONE"
+            _tb_ok_r = bool(df.attrs.get("sepa_tennis_squat_info", {}).get("is_tennis_ball", False)) if ptype == "LONG" else False
+            _3b_r = df.attrs.get("three_books_info", {})
+            _w_s12_bonus = 4.5 if (ptype == "LONG" and _3b_r.get("is_stage_1_to_2_buy")) else (4.0 if (ptype == "SHORT" and _3b_r.get("is_stage_4_short")) else 0.0)
+            _kst_bonus = 3.0 if (ptype == "LONG" and _3b_r.get("pring_kst_bullish") and not _3b_r.get("pring_bearish_divergence")) else (-5.0 if (ptype == "LONG" and (_3b_r.get("pring_false_breakout_trap") or _3b_r.get("minervini_violation_warn"))) else 0.0)
+            _sepa_bonus = (_ov_cnt_r * 3.5) + (5.0 if _3c_tier_r in ["LOW_CHEAT", "MID_CHEAT_3C", "HANDLE_PIVOT"] else 0.0) + (3.5 if _tb_ok_r else 0.0) + _w_s12_bonus + _kst_bonus
+            _priority_score = round(min(99.9, max(10.0, _fresh_bonus + _immediate_bonus + _dc_bonus + _conv_bonus + _meta_bonus + _rr_bonus + _trend_bonus + _rs_bonus + _sepa_bonus + _rr_penalty)), 1) if ptype in ["LONG", "SHORT"] else 0.0
 
+            # OLD: 若歷史 _sig_store 曾觸及舊止損則永久強制改為 ⚪ 觀望
+            # NEW: [v43.1 修復歷史舊止損記錄永久封殺新買點之漏洞] 每次掃描以當日最新結構買點與止損為準並即時更新記錄
             _sig_store = persistent_data.get("signal_lifecycle_store", {})
-            _existing_sig = _sig_store.get(ticker)
             _lifecycle_status = "✅ 有效"
-            if _existing_sig and _existing_sig.get("plan_type") == "LONG":
-                if float(last['Low']) <= float(_existing_sig["sl"]):
-                    _lifecycle_status = f"⛔ 已觸及前次止損 ({_existing_sig['sl']:.2f})"
-                    if ptype == "LONG":
-                        tactical_dir = "⚪ 觀望"
-                        status = f"⚪ 觀望 (已跌穿 {_existing_sig['scan_date']} 止損位 {_existing_sig['sl']:.2f})"
-                        entry_str, sl_str, tp_str, _rr_str = "-", "-", "-", "-"
-                        _priority_score = 0.0
-            elif _existing_sig and _existing_sig.get("plan_type") == "SHORT":
-                if float(last['High']) >= float(_existing_sig["sl"]):
-                    _lifecycle_status = f"⛔ 已觸及前次空頭止損 ({_existing_sig['sl']:.2f})"
-                    if ptype == "SHORT":
-                        tactical_dir = "⚪ 觀望"
-                        status = f"⚪ 觀望 (已升穿 {_existing_sig['scan_date']} 空頭止損 {_existing_sig['sl']:.2f})"
-                        entry_str, sl_str, tp_str, _rr_str = "-", "-", "-", "-"
-                        _priority_score = 0.0
-
-            if tactical_dir in ["🟢 做多", "🔴 做空"] and (_existing_sig is None or _existing_sig.get("plan_type") != ptype):
+            if tactical_dir in ["🟢 做多", "🔴 做空"]:
                 _sig_store[ticker] = {
                     "plan_type": ptype,
                     "entry": float(entry),
@@ -8427,6 +9283,8 @@ def run_all_inclusive_radar(stock_list):
                 "止盈阻力依據": _tp_desc if tactical_dir != "⚪ 觀望" else "-",
                 "預估盈虧比(R:R)": _rr_str,
                 "超級績效重疊網": df.attrs.get("sepa_mini_screens_info", {}).get("overlap_badge", "-"),
+                "多空四階段": df.attrs.get("three_books_info", {}).get("weinstein_badge", "-"),
+                "Pring動能": df.attrs.get("three_books_info", {}).get("pring_badge", "-"),
                 "VCP與3C買點": (
                     df.attrs.get("sepa_vcp_3c_info", {}).get("entry_tier_badge", "-")
                     if df.attrs.get("sepa_vcp_3c_info", {}).get("entry_tier") != "NONE"
@@ -8523,7 +9381,7 @@ def render_global_quick_guide_banner():
 
 def render_interactive_tutorial_hub():
     """模式 5：完整網頁版互動教學與靈活運用指南"""
-    st.title("📖 專業量化交易終端 — 網頁版實戰教學與靈活運用指南")
+    render_atomic_section_header("📖 實戰教學與大師戰法指南 (富途牛牛實盤落地專版)", level=1)
     st.markdown(
         "歡迎使用本系統！本指南專為讓你**在網頁內邊看邊用**而設，結合 **Martin Luk (@martinlukkt，2025 USIC 美股交易大賽 +969.8% 冠軍)**、"
         "**J Law (@jlawstock)** 與 **LEI (@TheMarketMemo)** 三大體系，教你如何由選股、判斷買點、計算富途牛牛真實手數，到持倉分批鎖潤。"
@@ -8705,7 +9563,7 @@ def render_interactive_tutorial_hub():
 # 12. 模式 1：雷達
 # ==========================================
 if mode == mode_options[0]:
-    st.title("🔎 市場動能掃描雷達")
+    render_atomic_section_header("🔎 市場動能掃描雷達", level=1)
     render_global_quick_guide_banner()
     st.markdown("💡 **提示：** 系統已智能分辨美/港股。")
 
@@ -8801,121 +9659,262 @@ if mode == mode_options[0]:
         render_radar_results(st.session_state.radar_results["自訂"], "### 📋 自訂名單雷達結果 (暫存)", market_key="自訂")
 
 # ==========================================
-# 🌟 13. 模式 3：自選股 (仿富途牛牛多重分組優化版)
+# 🌟 13. 模式 3：自選股票名單 (仿富途牛牛 / TradingView 旗艦分組與實時行情管理系統 v46.0)
 # ==========================================
 elif mode == mode_options[2]:
     st.query_params.clear()
-    st.title("⭐ 自選股動能面板 (專業分組版)")
+    render_atomic_section_header("⭐ 自選股票名單", level=1)
     render_global_quick_guide_banner()
-    st.markdown("管理你的核心觀察名單，可仿效富途牛牛建立多個分類標籤 (如：科技股、收息股、觀察中)，並分組進行雷達掃描。")
+    render_atomic_caption("仿效富途牛牛與主流投資 App 設計：支援自訂與隨時修改分組名稱、中英文名稱搜尋加股、跨分組移動/複製/置頂、分組實時行情總覽表，以及一鍵深度量化買賣點掃描。")
 
-    # --- 管理分組 ---
-    with st.expander("📁 管理分組 (新增 / 刪除分類)", expanded=False):
-        col_add_cat, col_del_cat = st.columns(2)
-        with col_add_cat:
-            new_cat = st.text_input("➕ 新增分組名稱", placeholder="例如: 港股精選, 潛力妖股...")
-            if st.button("建立分組"):
+    _all_wl_groups = list(st.session_state.watchlist_dict.keys())
+    _all_unique_wl_stocks = list(dict.fromkeys([s for gl in st.session_state.watchlist_dict.values() for s in gl]))
+
+    # --- 頂部總覽與一鍵全掃描工具列 ---
+    top_wl_c1, top_wl_c2, top_wl_c3, top_wl_c4 = st.columns([1.4, 1.4, 1.4, 1.8])
+    top_wl_c1.metric("📁 自選分組總數", f"{len(_all_wl_groups)} 個分組", "支援隨時改名與排序")
+    top_wl_c2.metric("📌 自選股票總數 (去重)", f"{len(_all_unique_wl_stocks)} 隻股票", f"港股 {sum(1 for x in _all_unique_wl_stocks if x.endswith('.HK'))} ｜ 美股 {sum(1 for x in _all_unique_wl_stocks if not x.endswith('.HK'))}")
+    top_wl_c3.metric("🔒 已鎖定實戰持倉", f"{len(persistent_data.get('user_locked_positions', {}))} 筆", "自動連動個股持倉導航")
+    with top_wl_c4:
+        st.write("")
+        if st.button("⚡ 一鍵深度掃描全部自選分組", use_container_width=True, key="btn_scan_all_wl_groups"):
+            with st.spinner("正在批量預載並掃描所有自選分組..."):
+                if _all_unique_wl_stocks:
+                    batch_preload_ohlcv_cache(_all_unique_wl_stocks)
+                for _g_name, _g_list in st.session_state.watchlist_dict.items():
+                    if _g_list:
+                        _g_df = run_all_inclusive_radar(_g_list)
+                        if _g_df is not None:
+                            st.session_state.watchlist_radar_results[_g_name] = _g_df
+                            mark_radar_cache_updated(persistent_data, f"自選_{_g_name}")
+                            with _CACHE_LOCK:
+                                _global_persistent_data.setdefault("watchlist_radar_results", {})[_g_name] = _g_df
+                save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                st.toast("✅ 已完成全部自選分組深度掃描！")
+                st.rerun()
+
+    # --- 📁 分組管理中心 (新增 / 修改分組名稱 / 複製合併 / 清空與刪除) ---
+    with st.expander("📁 分組管理中心 (➕ 新增分組 ／ ✏️ 修改分組名稱 ／ 📋 複製合併 ／ 🗑️ 清空或刪除)", expanded=True):
+        gm_c1, gm_c2, gm_c3, gm_c4 = st.columns(4)
+
+        with gm_c1:
+            st.markdown("##### ➕ 1. 新增自選分組")
+            new_cat = st.text_input("輸入新分組名稱:", placeholder="例如: 港股精選, 波段觀察名單...", key="wl_mgr_new_cat").strip()
+            if st.button("➕ 建立新分組", use_container_width=True, key="wl_mgr_btn_create"):
                 if new_cat and new_cat not in st.session_state.watchlist_dict:
                     st.session_state.watchlist_dict[new_cat] = []
                     save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
-                    st.success(f"已建立分組: {new_cat}")
-                    time.sleep(0.5)
+                    st.toast(f"✅ 已建立分組：{new_cat}")
                     st.rerun()
-                elif new_cat in st.session_state.watchlist_dict:
-                    st.warning("分組名稱已存在！")
-        with col_del_cat:
-            cat_to_del = st.selectbox("🗑️ 刪除分組", ["-- 請選擇 --"] + list(st.session_state.watchlist_dict.keys()))
-            if st.button("確認刪除分組"):
-                if cat_to_del != "-- 請選擇 --" and len(st.session_state.watchlist_dict) > 1:
-                    del st.session_state.watchlist_dict[cat_to_del]
-                    if cat_to_del in st.session_state.watchlist_radar_results:
-                        del st.session_state.watchlist_radar_results[cat_to_del]
+                elif not new_cat:
+                    st.warning("請輸入分組名稱！")
+                else:
+                    st.warning("該分組名稱已存在！")
+
+        with gm_c2:
+            st.markdown("##### ✏️ 2. 修改分組名稱 (重命名)")
+            cat_to_rename = st.selectbox("選擇要改名的分組:", _all_wl_groups, key="wl_mgr_ren_src")
+            renamed_cat_str = st.text_input("輸入修改後的新名稱:", value=cat_to_rename, placeholder="輸入新分組名稱...", key="wl_mgr_ren_dst").strip()
+            if st.button("✏️ 確認修改分組名稱", use_container_width=True, key="wl_mgr_btn_rename"):
+                ok_ren, msg_ren = rename_watchlist_group_in_place(cat_to_rename, renamed_cat_str)
+                if ok_ren:
+                    st.toast(msg_ren)
+                    st.rerun()
+                else:
+                    st.warning(msg_ren)
+
+        with gm_c3:
+            st.markdown("##### 📋 3. 跨分組複製 / 合併")
+            copy_src_cat = st.selectbox("來源分組:", _all_wl_groups, key="wl_mgr_cp_src")
+            copy_dst_cat = st.selectbox("目標分組:", [c for c in _all_wl_groups if c != copy_src_cat] or _all_wl_groups, key="wl_mgr_cp_dst")
+            if st.button("📋 將來源股票合併至目標", use_container_width=True, key="wl_mgr_btn_merge"):
+                if copy_src_cat != copy_dst_cat:
+                    _src_items = st.session_state.watchlist_dict.get(copy_src_cat, [])
+                    _dst_items = st.session_state.watchlist_dict.setdefault(copy_dst_cat, [])
+                    _merged_cnt = 0
+                    for _s_tk in _src_items:
+                        if _s_tk not in _dst_items:
+                            _dst_items.append(_s_tk)
+                            _merged_cnt += 1
                     save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
-                    st.success(f"已刪除分組: {cat_to_del}")
-                    time.sleep(0.5)
+                    st.toast(f"✅ 已將 {_merged_cnt} 隻股票合併至【{copy_dst_cat}】！")
                     st.rerun()
-                elif len(st.session_state.watchlist_dict) <= 1:
-                    st.error("⚠️ 至少需要保留一個分組！")
+                else:
+                    st.info("來源與目標分組相同。")
+
+        with gm_c4:
+            st.markdown("##### 🗑️ 4. 清空或刪除分組")
+            cat_to_del = st.selectbox("選擇要操作的分組:", _all_wl_groups, key="wl_mgr_del_target")
+            d_col_a, d_col_b = st.columns(2)
+            with d_col_a:
+                if st.button("🧹 清空股票", use_container_width=True, key="wl_mgr_btn_clear"):
+                    st.session_state.watchlist_dict[cat_to_del] = []
+                    save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                    st.toast(f"已清空【{cat_to_del}】內的股票")
+                    st.rerun()
+            with d_col_b:
+                if st.button("🗑️ 刪除分組", use_container_width=True, key="wl_mgr_btn_delete"):
+                    if len(st.session_state.watchlist_dict) > 1:
+                        del st.session_state.watchlist_dict[cat_to_del]
+                        st.session_state.watchlist_radar_results.pop(cat_to_del, None)
+                        save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                        st.toast(f"已刪除分組：{cat_to_del}")
+                        st.rerun()
+                    else:
+                        st.error("⚠️ 至少需要保留一個分組！")
 
     st.markdown("---")
-    
+
     # --- 渲染分組 Tab 介面 ---
     cat_names = list(st.session_state.watchlist_dict.keys())
-    tabs = st.tabs(cat_names)
+    tabs = st.tabs([f"{c} ({len(st.session_state.watchlist_dict[c])})" for c in cat_names])
 
     for i, cat in enumerate(cat_names):
         with tabs[i]:
-            col_add, col_del = st.columns(2)
-            with col_add:
-                # 使用唯一的 key 防止 Streamlit 報錯
-                add_ticker = st.text_input(f"➕ 輸入代碼加入「{cat}」", placeholder="例如: MSFT, 0700.HK", key=f"add_{cat}").strip()
-                if add_ticker:
-                    fmt, _, _, _, _ = format_and_detect_market(add_ticker)
-                    if fmt not in st.session_state.watchlist_dict[cat]:
-                        st.session_state.watchlist_dict[cat].append(fmt)
+            current_list = st.session_state.watchlist_dict[cat]
+
+            # 1. 股票增刪、批量匯入、跨分組移動/複製/置頂控制面板
+            op_c1, op_c2, op_c3 = st.columns([2.0, 2.2, 1.6])
+            with op_c1:
+                raw_add_str = st.text_input(
+                    f"➕ 加入股票至「{cat}」(支援代碼、中文名或多個代碼空格分隔):",
+                    placeholder="例: 700, 藥明生物, NVDA, TSLA",
+                    key=f"wl_batch_add_input_{cat}"
+                ).strip()
+                if st.button(f"➕ 加入至「{cat}」", key=f"wl_batch_add_btn_{cat}", use_container_width=True):
+                    if raw_add_str:
+                        tokens = [x.strip() for x in re.split(r'[\s,，、;；]+', raw_add_str) if x.strip()]
+                        added_now, existed_now = [], []
+                        for tok in tokens:
+                            fmt_t, _, _, _, _ = format_and_detect_market(tok)
+                            if fmt_t not in st.session_state.watchlist_dict[cat]:
+                                st.session_state.watchlist_dict[cat].append(fmt_t)
+                                added_now.append(f"{fmt_t}({get_stock_name(fmt_t)})")
+                            else:
+                                existed_now.append(fmt_t)
                         save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
-                        st.success(f"已加入 {fmt} 到 {cat}")
-                        time.sleep(0.5)
+                        if added_now:
+                            st.toast(f"✅ 已加入 {', '.join(added_now)} 至【{cat}】")
                         st.rerun()
                     else:
-                        st.warning(f"{fmt} 已存在於 {cat}")
+                        st.warning("請先輸入股票代碼或名稱！")
 
-            with col_del:
-                current_list = st.session_state.watchlist_dict[cat]
-                if current_list:
-                    del_ticker = st.selectbox(f"🗑️ 從「{cat}」移除", ["-- 請選擇 --"] + current_list, key=f"del_{cat}")
-                    if del_ticker != "-- 請選擇 --":
-                        st.session_state.watchlist_dict[cat].remove(del_ticker)
+            with op_c2:
+                _labeled_curr = [f"{t} {get_stock_name(t)}" for t in current_list]
+                sel_manage_raw = st.multiselect(
+                    f"📂 勾選「{cat}」內股票進行置頂 / 跨組移動 / 移除:",
+                    options=_labeled_curr,
+                    key=f"wl_ms_manage_{cat}"
+                )
+                sel_manage_syms = [x.split()[0].strip() for x in sel_manage_raw]
+                other_cats = [c for c in cat_names if c != cat]
+                mv_c1, mv_c2, mv_c3 = st.columns([1.6, 1.1, 1.1])
+                with mv_c1:
+                    dest_grp = st.selectbox("目標分組:", other_cats if other_cats else [cat], key=f"wl_dest_grp_{cat}", label_visibility="collapsed")
+                with mv_c2:
+                    if st.button("📂 移至該組", key=f"wl_btn_mv_{cat}", use_container_width=True, disabled=(not sel_manage_syms or not other_cats)):
+                        for s_tk in sel_manage_syms:
+                            if s_tk in st.session_state.watchlist_dict[cat]:
+                                st.session_state.watchlist_dict[cat].remove(s_tk)
+                            if s_tk not in st.session_state.watchlist_dict[dest_grp]:
+                                st.session_state.watchlist_dict[dest_grp].append(s_tk)
                         save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
-                        st.success(f"已移除 {del_ticker}")
-                        time.sleep(0.5)
+                        st.toast(f"已將 {len(sel_manage_syms)} 隻股票移至【{dest_grp}】")
                         st.rerun()
-                else:
-                    st.info("此分組目前沒有自選股")
+                with mv_c3:
+                    if st.button("📋 複製該組", key=f"wl_btn_cp_{cat}", use_container_width=True, disabled=(not sel_manage_syms or not other_cats)):
+                        for s_tk in sel_manage_syms:
+                            if s_tk not in st.session_state.watchlist_dict[dest_grp]:
+                                st.session_state.watchlist_dict[dest_grp].append(s_tk)
+                        save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                        st.toast(f"已將 {len(sel_manage_syms)} 隻股票複製至【{dest_grp}】")
+                        st.rerun()
 
-            st.markdown("---")
+            with op_c3:
+                st.write("")
+                act_b1, act_b2 = st.columns(2)
+                with act_b1:
+                    if st.button("⬆️ 勾選置頂", key=f"wl_btn_pin_{cat}", use_container_width=True, disabled=(not sel_manage_syms)):
+                        rem_items = [t for t in current_list if t not in sel_manage_syms]
+                        st.session_state.watchlist_dict[cat] = sel_manage_syms + rem_items
+                        save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                        st.toast(f"已將所選股票置頂於【{cat}】")
+                        st.rerun()
+                with act_b2:
+                    if st.button("❌ 移除勾選", key=f"wl_btn_rm_sel_{cat}", use_container_width=True, disabled=(not sel_manage_syms)):
+                        st.session_state.watchlist_dict[cat] = [t for t in current_list if t not in sel_manage_syms]
+                        save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                        st.toast(f"已從【{cat}】移除 {len(sel_manage_syms)} 隻股票")
+                        st.rerun()
+
             if current_list:
-                st.write(f"📋 **{cat}** 當前名單：", ", ".join(current_list))
-                if st.button(f"🚀 掃描「{cat}」板塊", use_container_width=True, key=f"scan_{cat}"):
-                    with st.spinner(f"正在獨立掃描 {cat} 板塊..."):
-                        df_res = run_all_inclusive_radar(current_list)
-                        if df_res is not None:
-                            st.session_state.watchlist_radar_results[cat] = df_res
-                            
-                            # 針對該板塊獨立計算動態相關性
-                            active_df = df_res[df_res['交易方向'].astype(str).str.contains("做多|做空", na=False)].copy()
-                            rs_map = dict(zip(active_df['代碼'], active_df['RS強度']))
-                            warnings, corr_matrix = build_dynamic_correlation_report(
-                                list(active_df['代碼']),
-                                rs_map=rs_map,
-                                lookback=50,
-                                threshold=0.75
-                            )
-                            # 將相關性數據存入特定的 key 並同步至全域快取
-                            st.session_state.radar_correlation_warnings[f"自選_{cat}"] = warnings
-                            st.session_state.radar_correlation_matrices[f"自選_{cat}"] = corr_matrix
-                            mark_radar_cache_updated(persistent_data, f"自選_{cat}")
-                            with _CACHE_LOCK:
-                                _global_persistent_data.setdefault("watchlist_radar_results", {})[cat] = df_res
-                                _global_persistent_data["radar_correlation_warnings"][f"自選_{cat}"] = warnings
-                                _global_persistent_data["radar_correlation_matrices"][f"自選_{cat}"] = corr_matrix
-                                _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
-                                save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
-                            
-                        else:
-                            st.error("掃描失敗，未取得有效數據。")
-            else:
-                st.warning("此分組列表為空，請先加入股票。")
+                # 2. 仿富途牛牛：分組實時行情與均線趨勢總覽表
+                quote_df, q_stats = build_watchlist_instant_quote_df(current_list)
+                qm1, qm2, qm3, qm4 = st.columns(4)
+                qm1.metric("📌 分組成分股", f"{q_stats['total']} 隻", f"港股 {q_stats['hk_cnt']} ｜ 美股 {q_stats['us_cnt']}")
+                qm2.metric("📈 今日漲跌分佈", f"升 {q_stats['up_cnt']} / 跌 {q_stats['down_cnt']}", f"平均漲跌 {q_stats['avg_chg_pct']:+.2f}%")
+                qm3.metric("🛡️ 站穩 50MA 比例", f"{q_stats['above_50ma_pct']:.1f}%", "中線多頭健康度")
+                qm4.metric("🔒 組內已鎖定持倉", f"{q_stats['locked_cnt']} 筆", "點擊下方進入診斷可查看")
 
-            # 獨立渲染每個分組的雷達結果
+                st.markdown(f"#### 📊 「{cat}」實時報價與技術位置總覽表 (點擊【進入診斷】一鍵查看 K 線與買賣位)")
+                if not quote_df.empty:
+                    st.dataframe(
+                        quote_df,
+                        column_config={
+                            "跳轉診斷": st.column_config.LinkColumn("🔍 個股診斷", display_text="進入診斷"),
+                            "代碼": st.column_config.TextColumn("股票代碼"),
+                        },
+                        use_container_width=True,
+                        hide_index=True,
+                        key=f"wl_instant_quote_tbl_{cat}"
+                    )
+
+                # 3. 啟動此分組深度量化雷達掃描
+                scan_col1, scan_col2 = st.columns([3, 1])
+                with scan_col1:
+                    if st.button(f"🚀 啟動「{cat}」深度買賣點與《超級績效》盈虧比雷達掃描", use_container_width=True, key=f"scan_{cat}"):
+                        with st.spinner(f"正在對「{cat}」({len(current_list)} 隻股票) 執行完整買賣位與盈虧比運算..."):
+                            df_res = run_all_inclusive_radar(current_list)
+                            if df_res is not None:
+                                st.session_state.watchlist_radar_results[cat] = df_res
+                                active_df = df_res[df_res['交易方向'].astype(str).str.contains("做多|做空", na=False)].copy()
+                                rs_map = dict(zip(active_df['代碼'], active_df['RS強度']))
+                                warnings, corr_matrix = build_dynamic_correlation_report(
+                                    list(active_df['代碼']),
+                                    rs_map=rs_map,
+                                    lookback=50,
+                                    threshold=0.75
+                                )
+                                st.session_state.radar_correlation_warnings[f"自選_{cat}"] = warnings
+                                st.session_state.radar_correlation_matrices[f"自選_{cat}"] = corr_matrix
+                                mark_radar_cache_updated(persistent_data, f"自選_{cat}")
+                                with _CACHE_LOCK:
+                                    _global_persistent_data.setdefault("watchlist_radar_results", {})[cat] = df_res
+                                    _global_persistent_data["radar_correlation_warnings"][f"自選_{cat}"] = warnings
+                                    _global_persistent_data["radar_correlation_matrices"][f"自選_{cat}"] = corr_matrix
+                                    _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
+                                    save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
+                            else:
+                                st.error("掃描失敗，未取得有效數據。")
+                with scan_col2:
+                    _quick_wl_jump = st.selectbox("快速跳轉:", current_list, index=0, key=f"wl_qjump_sel_{cat}", label_visibility="collapsed")
+                    if st.button("🔍 診斷選中股", key=f"wl_qjump_btn_{cat}", use_container_width=True):
+                        st.query_params["mode"] = "診斷"
+                        st.query_params["ticker"] = _quick_wl_jump
+                        st.query_params["strict"] = str(strictness)
+                        st.rerun()
+            else:
+                render_atomic_alert(f"⚪ **「{cat}」分組目前為空**：請在上方輸入股票代碼或中文名稱（如 `0700`、`藥明生物`、`NVDA`）加入自選，或在「掃描雷達 / 個股診斷」頁面一鍵存入。", "info")
+
             if cat in st.session_state.watchlist_radar_results and st.session_state.watchlist_radar_results[cat] is not None:
-                render_radar_results(st.session_state.watchlist_radar_results[cat], f"### ⭐ 「{cat}」板塊掃描結果", market_key=f"自選_{cat}")
+                st.markdown("---")
+                render_radar_results(st.session_state.watchlist_radar_results[cat], f"### ⭐ 「{cat}」深度買賣點與盈虧比掃描結果", market_key=f"自選_{cat}")
 
 # ==========================================
 # 14. 模式 2：個股診斷
 # ==========================================
 elif mode == mode_options[1]:
-    st.title("📊 個股量化分析與技術診斷")
+    render_atomic_section_header("📊 個股量化分析與技術診斷", level=1)
     render_global_quick_guide_banner()
 
     c_ticker, c_tf = st.columns([3, 1])
@@ -8931,20 +9930,33 @@ elif mode == mode_options[1]:
 
     if ticker_input:
         fmt_ticker, market_type, _, benchmark_name, _ = format_and_detect_market(ticker_input)
-        res = analyze_stock_master(ticker_input, strictness_threshold=strictness, interval=selected_interval)
+        # [v46.0 根治手動輸入新代碼時殘留舊 URL dir=SHORT/LONG 參數與 DOM 衝突]
+        _qp_fmt_tk, _, _, _, _ = format_and_detect_market(qp.get("ticker", "0700.HK"))
+        if fmt_ticker != _qp_fmt_tk:
+            target_dir_from_radar = ""
+            try:
+                st.query_params["ticker"] = fmt_ticker
+                if "dir" in st.query_params:
+                    del st.query_params["dir"]
+            except Exception:
+                pass
+
+        res = analyze_stock_master(fmt_ticker, strictness_threshold=strictness, interval=selected_interval)
 
         if isinstance(res, dict) and "error" in res:
-            st.error(f"❌ {res['error']}")
+            render_atomic_alert(f"❌ {res['error']}", "error")
         elif res is None:
-            st.error("❌ 分析失敗")
+            render_atomic_alert("❌ 分析失敗", "error")
         else:
             df, status, target_entry, stop_loss, take_profit, plan_type, checklist, pass_count, benchmark_name, low_52w, high_52w, currency, name, short_checklist, short_pass_count, long_win, short_win, l_t, s_t, jl_chk, jl_pass, jl_title, is_near_20ma, is_kk_htf, weekly_alignment, ms_metrics, ms_score, jlaw_alert, dist_days, is_deduction_pullback = res
             last = df.iloc[-1]
 
-            st.markdown(f"## 💎 {ticker_input} - {name} ({tf_choice})")
+            render_atomic_section_header(f"💎 {fmt_ticker} - {name} ({tf_choice})", level=2)
+            # [v46.0 新增：個股診斷頁頂部「富途式一鍵加入/管理自選股票分組」工具列]
+            render_futu_quick_watchlist_bar(fmt_ticker, name, context_key="diag_hdr")
 
             # ==============================================================================
-            # [NEW INCREMENTAL PATCH v25.4] 診斷視角與持倉方向主控台 (徹底解決「前幾日做空股票重新輸入卻顯示做多提示與盤中跌穿當時止損」漏洞)
+            # [NEW INCREMENTAL PATCH v25.4] 診斷視角與持倉方向主控台
             # ==============================================================================
             _sig_mem = persistent_data.get("signal_lifecycle_store", {}).get(fmt_ticker, {})
             _saved_pos_map = persistent_data.setdefault("user_locked_positions", {})
@@ -8966,11 +9978,15 @@ elif mode == mode_options[1]:
                     key=f"view_mode_radio_{fmt_ticker}"
                 )
             with persp_col2:
+                _sig_mem_slot = st.empty()
                 if _sig_mem:
-                    st.caption(
+                    render_atomic_caption(
                         f"🕒 **歷史雷達信號記憶 ({_sig_mem.get('scan_date', '-')})**：上次掃描方向為 **{'🔴 做空' if _sig_mem.get('plan_type') == 'SHORT' else '🟢 做多'}** ｜ "
-                        f"當時建議進場價 **{_sig_mem.get('entry', 0):.2f}** ｜ 初始止損 **{_sig_mem.get('sl', 0):.2f}** ｜ 目標 **{_sig_mem.get('tp', 0):.2f}**"
+                        f"當時建議進場價 **{_sig_mem.get('entry', 0):.2f}** ｜ 初始止損 **{_sig_mem.get('sl', 0):.2f}** ｜ 目標 **{_sig_mem.get('tp', 0):.2f}**",
+                        slot=_sig_mem_slot
                     )
+                else:
+                    render_atomic_caption("", slot=_sig_mem_slot)
 
             # 若用戶選擇「強制做空視角」或「強制做多視角」，即時切換 plan_type、target_entry、stop_loss、take_profit、_tp_eval、jlaw_meta_info 與狀態提示！
             _inv_info_top = df.attrs.get("invalidation_info", {})
@@ -9037,7 +10053,7 @@ elif mode == mode_options[1]:
                     
             # 雙均線 (MA+EMA) 趨勢診斷
             st.markdown("### 🎯 雙均線 (MA+EMA) 趨勢診斷")
-            st.caption("EMA (指數均線) 更為敏感，MA (簡單均線) 較為穩定。當兩者共振向上時，趨勢最為明確。")
+            render_atomic_caption("EMA (指數均線) 更為敏感，MA (簡單均線) 較為穩定。當兩者共振向上時，趨勢最為明確。")
             col_ema1, col_ema2, col_ema3 = st.columns(3)
             
             ema20, ma20 = last.get('EMA20', 0), last.get('SMA20', 0)
@@ -9085,12 +10101,13 @@ elif mode == mode_options[1]:
                 _wk_status_alerts.append(("info", status))
             render_atomic_alert_group(_wk_status_alerts)
 
-            st.markdown("### 🌟 J Law / Minervini / 空頭濾網")
+            # OLD: st.markdown("### 🌟 J Law / Minervini / 空頭濾網")
+            st.markdown("### 📋 核心趨勢與基本篩選條件檢查表")
             c_left, c_mid, c_right, c_short = st.columns(4)
 
             with c_left:
                 st.markdown(f"#### {jl_title}")
-                st.caption("J Law 核心條件")
+                render_atomic_caption("J Law 核心條件")
                 for criterion, passed in jl_chk.items():
                     # OLD: st.checkbox(criterion, value=passed, disabled=True, key=f"jlchk_{criterion}")
                     # NEW: [v25.5 綁定 fmt_ticker 防止切換港美股時因項目文字不同引發 React removeChild 錯誤]
@@ -9098,21 +10115,21 @@ elif mode == mode_options[1]:
 
             with c_mid:
                 st.markdown(f"#### Minervini 趨勢條件 ({pass_count}/7)")
-                st.caption(f"做多歷史勝率：{long_win:.1f}%")
+                render_atomic_caption(f"做多歷史勝率：{long_win:.1f}%")
                 for criterion, passed in checklist.items():
                     # OLD: st.checkbox(criterion, value=passed, disabled=True, key=f"longchk_{criterion}")
                     st.checkbox(criterion, value=passed, disabled=True, key=f"longchk_{fmt_ticker}_{criterion}")
 
             with c_right:
                 st.markdown(f"#### 空頭趨勢條件 ({short_pass_count}/7)")
-                st.caption(f"做空歷史勝率：{short_win:.1f}%")
+                render_atomic_caption(f"做空歷史勝率：{short_win:.1f}%")
                 for criterion, passed in short_checklist.items():
                     # OLD: st.checkbox(criterion, value=passed, disabled=True, key=f"shortchk_{criterion}")
                     st.checkbox(criterion, value=passed, disabled=True, key=f"shortchk_{fmt_ticker}_{criterion}")
                     
             with c_short:
                 st.markdown(f"#### 🏴‍☠️ 大師做空法 ({ms_score}/4)")
-                st.caption("O'Neil & Cohodes 實戰")
+                render_atomic_caption("O'Neil & Cohodes 實戰")
                 st.checkbox("大盤處於熊市/跌破50MA", value=ms_metrics["market_bear"], disabled=True, key=f"ms1_{fmt_ticker}")
                 st.checkbox("前高跌落且反彈受阻 50MA", value=ms_metrics["rebound_resist"], disabled=True, key=f"ms2_{fmt_ticker}")
                 st.checkbox("反彈量能嚴重萎縮", value=ms_metrics["low_vol_rebound"], disabled=True, key=f"ms3_{fmt_ticker}")
@@ -9129,10 +10146,13 @@ elif mode == mode_options[1]:
             _jlaw_m = df.attrs.get("jlaw_meta_info", {})
 
             # [NEW INCREMENTAL PATCH v25.0 / v31.0 多空雙向語義對齊] Martin Luk (@martinlukkt) USIC 冠軍實戰診斷、拋物線 R 倍數與資金曲線反饋面板
-            render_locked_portfolio_summary_and_export(persistent_data)
+            _locked_port_slot = st.empty()
+            with _locked_port_slot.container():
+                render_locked_portfolio_summary_and_export(persistent_data)
             _ml_diag = df.attrs.get("martin_luk_info", {})
             _is_short_view = (plan_type == "SHORT")
-            st.markdown("### 🏆 Martin Luk (@martinlukkt) USIC 冠軍體系診斷 (9/21/50 EMA雲帶 × 前高AVWAP × 極緊止損拋物線效應)")
+            # OLD: st.markdown("### 🏆 Martin Luk (@martinlukkt) USIC 冠軍體系診斷 (9/21/50 EMA雲帶 × 前高AVWAP × 極緊止損拋物線效應)")
+            st.markdown("### 📐 均線支撐匯聚與成本均價 (AVWAP) 診斷")
             # OLD:
             # if _ml_diag.get("index_filter_warning"):
             #     st.warning(_ml_diag["index_filter_warning"])
@@ -9176,7 +10196,7 @@ elif mode == mode_options[1]:
                 _ml_conf_lines.append("🛡️ **Martin Luk 下方多重支撐匯聚 (Stacked Support Confluence)**：" + " ＋ ".join(_ml_diag["confluence_supports"]))
             if _ml_diag.get("confluence_resistances"):
                 _ml_conf_lines.append("🩸 **Martin Luk 上方空頭反壓匯聚 (Short Fade Confluence)**：" + " ＋ ".join(_ml_diag["confluence_resistances"]))
-            st.caption(" ｜ ".join(_ml_conf_lines) if _ml_conf_lines else "⚪ 目前價格未貼近多重均線/AVWAP匯聚區")
+            render_atomic_caption(" ｜ ".join(_ml_conf_lines) if _ml_conf_lines else "⚪ 目前價格未貼近多重均線/AVWAP匯聚區")
 
             with st.expander("🧮 Martin Luk 0.5% 基準風控、資金曲線反饋 (Equity Curve Feedback) 與防跳空倉位計算器", expanded=False):
                 ml_eq_c1, ml_eq_c2, ml_eq_c3 = st.columns(3)
@@ -9219,9 +10239,9 @@ elif mode == mode_options[1]:
             # ... (原本無論做多或做空均顯示「前高空單消化總分」、「阻力區賣壓枯竭度」、「防假突破」與「關注 VAL 支撐承接力，若跌穿需嚴守止損」)
             # NEW: [v31.0 多空雙向獨立渲染 VBP 籌碼分佈、Wyckoff VSA 與 DeepChart 訂單流診斷]
             if _is_short_view:
-                st.markdown("### 🧠 機構級 Volume-by-Price (VBP) 籌碼分佈、Wyckoff VSA 與空頭壓制/支撐擊穿診斷 (v31.0 空頭專版)")
+                render_atomic_section_header("🧠 成交量價格分佈 (VBP)、量價結構與空頭壓制/支撐擊穿診斷", level=3)
             else:
-                st.markdown("### 🧠 機構級 Volume-by-Price (VBP) 籌碼分佈、Wyckoff VSA 與前高空單消化診斷 (v31.0)")
+                render_atomic_section_header("🧠 成交量價格分佈 (VBP)、量價結構與前高阻力消化診斷", level=3)
             _heat_and_gap_alerts = [(_heat_diag["alert_level"], _heat_diag["status_msg"])]
             if _gap_diag.get("gap_warning_msg"):
                 _heat_and_gap_alerts.append(("warning", _gap_diag["gap_warning_msg"]))
@@ -9272,9 +10292,9 @@ elif mode == mode_options[1]:
             )
             df.attrs["holistic_grade_info"] = _hol_diag
             if _is_short_view:
-                st.markdown("### 🏆 機構級 8 維度空頭品質評級 (Short Setup Grade) 與急跌超賣回補導航 (v31.0 空頭專版)")
+                render_atomic_section_header("📊 綜合空頭信號評級與超賣回補提示", level=3)
             else:
-                st.markdown("### 🏆 機構級 8 維度交易品質評級 (Setup Grade) 與高潮延伸主動鎖潤導航 (v31.0)")
+                render_atomic_section_header("📊 綜合買入信號評級與高位鎖利提示", level=3)
             hg1, hg2, hg3, hg4 = st.columns(4)
             hg1.metric("🏆 綜合交易品質評級", _hol_diag.get("setup_grade", "-"), f"信心指數 {_hol_diag.get('conviction_score', 0):.1f}/100")
             hg2.metric("⚖️ 建議動態倉位權重", f"{_hol_diag.get('sizing_multiplier', 0)*100:.0f}% 標準倉", "S/A+級集中火力，B/C級防守")
@@ -9304,54 +10324,82 @@ elif mode == mode_options[1]:
             _sepa_tb = df.attrs.get("sepa_tennis_squat_info") or evaluate_tennis_ball_and_squat_action(df)
             _sepa_ov = df.attrs.get("sepa_mini_screens_info") or evaluate_minervini_overlapping_mini_screens(df)
             _reg_gate_diag = df.attrs.get("market_regime_gate", {})
-            st.markdown("### 📚 《超級績效 1～4》SEPA 冠軍診斷面板 (多重小篩網重疊 × 3-C 低位作弊點 × 網球強彈檢驗)")
+            # OLD: st.markdown("### 📚 《超級績效 1～4》SEPA 冠軍診斷面板 (多重小篩網重疊 × 3-C 低位作弊點 × 網球強彈檢驗)")
+            st.markdown("### 📊 波幅收窄度 ‧ 買點位置 ‧ 回調承接力與雙軌目標診斷")
             sp_c1, sp_c2, sp_c3, sp_c4 = st.columns(4)
             sp_c1.metric(
-                "🕸️ 四組雙標準小篩網重疊",
+                "📊 四維度條件符合度",
                 _sepa_ov.get("overlap_badge", "-"),
-                f"命中 {_sepa_ov.get('overlap_count', 0)} / 4 個獨立篩網"
+                f"符合 {_sepa_ov.get('overlap_count', 0)} / 4 項核心標準"
             )
             sp_c2.metric(
-                "💎 VCP 收縮足跡與 3-C 買點",
+                "🎯 波幅收窄與買點位置",
                 _sepa_vcp.get("entry_tier_badge", "-") if _sepa_vcp.get("entry_tier") != "NONE" else _sepa_vcp.get("vcp_footprint_str", "常規形態"),
-                f"低位作弊樞紐: {_sepa_vcp.get('cheat_pivot_price', 0):.2f} (止損 -{_sepa_vcp.get('cheat_stop_pct', 0):.1f}%)" if _sepa_vcp.get("cheat_pivot_price", 0) > 0 else "觀察右側收斂"
+                f"觸發買入位: {_sepa_vcp.get('cheat_pivot_price', 0):.2f} (止損 -{_sepa_vcp.get('cheat_stop_pct', 0):.1f}%)" if _sepa_vcp.get("cheat_pivot_price", 0) > 0 else "等待波幅進一步收窄"
             )
             sp_c3.metric(
-                "🎾 網球 vs 雞蛋 & 蹲伏反應",
+                "🛡️ 回調買盤承接力",
                 _sepa_tb.get("action_badge", "⚪ 常規量價"),
-                "機構承接強勁" if _sepa_tb.get("is_tennis_ball") else ("切勿左側接刀" if _sepa_tb.get("is_egg_slump") else "觀察突破延續性")
+                "下方買盤承接強" if _sepa_tb.get("is_tennis_ball") else ("買盤偏弱宜觀望" if _sepa_tb.get("is_egg_slump") else "觀察突破延續性")
             )
             sp_c4.metric(
-                "🧭 大市牛熊與轉勢階段",
+                "🧭 大市環境與建議倉位",
                 _reg_gate_diag.get("regime_badge", "-")[:16],
                 f"建議總倉位上限 {_reg_gate_diag.get('recommended_pos_pct', 100)}%"
             )
+            _3b_diag = df.attrs.get("three_books_info") or compute_weinstein_stage_and_pring_kst(df)
+            tb_c1, tb_c2, tb_c3 = st.columns(3)
+            tb_c1.metric(
+                "📘 《多空操作秘笈》四階段位置",
+                _3b_diag.get("weinstein_badge", "-")[:18],
+                "🌟 一轉二早期轉勢買點" if _3b_diag.get("is_stage_1_to_2_buy") else ("⚠️ 第三階段高位震盪" if _3b_diag.get("is_stage_3_topping") else "150MA 中長線週期定位")
+            )
+            tb_c2.metric(
+                "📗 《技術分析精論》Pring KST 動能",
+                _3b_diag.get("pring_badge", "-")[:18],
+                f"KST: {_3b_diag.get('pring_kst_val', 0):+.1f} (訊號線 {_3b_diag.get('pring_kst_sig', 0):+.1f})"
+            )
+            tb_c3.metric(
+                "📕 《超級績效》回調健康度檢驗",
+                "⚠️ 出現結構違規" if _3b_diag.get("minervini_violation_warn") else "🟢 量價回調正常",
+                "非正常洗盤宜守止損" if _3b_diag.get("minervini_violation_warn") else "未見放量破位違規"
+            )
+            _sepa_note_slot = st.empty()
+            _combined_book_notes = []
             if _sepa_tb.get("action_note"):
-                render_atomic_alert(f"📖 **《超級績效》量價行為解讀**：{_sepa_tb['action_note']}", "success" if _sepa_tb.get("is_tennis_ball") else "warning")
+                _combined_book_notes.append(f"📖 **《超級績效》量價行為**：{_sepa_tb['action_note']}")
+            if _3b_diag.get("three_books_summary_note"):
+                _combined_book_notes.append(f"📚 **三大名著交叉印證**：{_3b_diag['three_books_summary_note']}")
+            if _combined_book_notes:
+                _note_kind = "warning" if (_3b_diag.get("minervini_violation_warn") or _3b_diag.get("pring_false_breakout_trap")) else ("success" if (_sepa_tb.get("is_tennis_ball") or _3b_diag.get("is_stage_1_to_2_buy")) else "info")
+                render_atomic_alert("\n\n".join(_combined_book_notes), _note_kind, slot=_sepa_note_slot)
+            else:
+                render_atomic_caption("", slot=_sepa_note_slot)
 
-            st.markdown("### 🎯 一眼看懂：結構買賣執行計劃與雙大師認證 (v42.0 港美雙軌 R:R 版)")
+            # OLD: st.markdown("### 🎯 一眼看懂：結構買賣執行計劃與雙大師認證 (v42.0 港美雙軌 R:R 版)")
+            st.markdown("### 🎯 交易執行計劃總覽 (建議買入位 / 止損位 / 目標價 / 盈虧比)")
             mc1, mc2, mc3, mc4 = st.columns(4)
             mc1.metric(
-                "💎 J Law META 多重優勢",
+                "📊 多重技術優勢匯聚",
                 _jlaw_m.get("meta_badge", "-"),
                 f"漲跌量比 {_jlaw_m.get('up_down_vol_ratio', 1.0):.2f}x"
             )
             mc2.metric(
-                "⚡ 強勁趨勢 (Power Trend)",
+                "📈 中長線趨勢強度",
                 "🔥 已發動" if _jlaw_m.get("is_power_trend") else "⚪ 一般趨勢",
                 "1M & 6M 雙週期領先" if (_jlaw_m.get("rs_1m_outperform") and _jlaw_m.get("rs_6m_outperform")) else "RS 常規表現"
             )
             mc3.metric(
-                "🧱 LEI 頂底與 2B 構造",
+                "🧱 底部 / 頂部形態結構",
                 _lei_st.get("structure_summary", "⚪ 無明顯構造"),
                 _lei_st.get("lei_turn_step", "")
             )
             mc4.metric(
-                "📐 LEI 六線密集度 (20/60/120)",
+                "📐 均線密集程度 (20/60/120MA)",
                 f"{float(last.get('LEI_MA_Spread_Pct', 0.0)):.2f}%",
                 "🔥 <2.5% 高度密集" if last.get('LEI_MA_Tight_2Pct', False) else f"120EMA乖離 {float(last.get('Bias_EMA120_Pct', 0.0)):+.1f}%"
             )
-            st.caption("🎯 **當前匯聚之交易優勢 (Multiple Edges)**：" + (" ｜ ".join(_jlaw_m["meta_edges_list"]) if _jlaw_m.get("meta_edges_list") else "暫無明顯匯聚優勢"))
+            render_atomic_caption("🎯 **當前匯聚之交易優勢 (Multiple Edges)**：" + (" ｜ ".join(_jlaw_m["meta_edges_list"]) if _jlaw_m.get("meta_edges_list") else "暫無明顯匯聚優勢"))
 
             # [v25.5 / v25.6 修復 NotFoundError: removeChild] 在實際渲染位置緊接建立 st.columns(2) 並使用 render_atomic_alert
             rationale_col1, rationale_col2 = st.columns(2)
@@ -9417,11 +10465,11 @@ elif mode == mode_options[1]:
 
             # 抵扣價防禦判定顯示 (v31.0 多空雙向語義對齊)
             if _is_short_view:
-                st.markdown("### 🧱 支撐阻力與抵扣價分析 (空頭防假突破 & 均線助跌診斷)")
-                st.caption("空頭判斷真假反抽的秘訣：只要【現價】低於高企的【抵扣價】，即使股價短暫反彈刺穿均線，該均線未來仍會繼續下彎蓋頭助跌（假突破真壓制）。")
+                render_atomic_section_header("🧱 支撐阻力與抵扣價分析 (空頭防假突破 & 均線助跌診斷)", level=3)
+                render_atomic_caption("空頭判斷真假反抽的秘訣：只要【現價】低於高企的【抵扣價】，即使股價短暫反彈刺穿均線，該均線未來仍會繼續下彎蓋頭助跌（假突破真壓制）。")
             else:
-                st.markdown("### 🧱 支撐阻力與抵扣價分析 (防假跌破)")
-                st.caption("判斷真假跌破的秘訣：只要【現價】大於【抵扣價】，即使股價跌破均線，該均線未來仍會繼續向上發散。")
+                render_atomic_section_header("🧱 支撐阻力與抵扣價分析 (防假跌破)", level=3)
+                render_atomic_caption("判斷真假跌破的秘訣：只要【現價】大於【抵扣價】，即使股價跌破均線，該均線未來仍會繼續向上發散。")
             sr1, sr2, sr3, sr4, sr5 = st.columns(5)
             
             deduct_20 = last.get('SMA20_Deduction', 0)
@@ -9443,9 +10491,9 @@ elif mode == mode_options[1]:
             sr4.metric("🟢 長期支撐 (60日低點)", f"{last['SupLong']:.2f}", f"60MA抵扣: {float(last.get('SMA60_Deduction', 0)):.2f}")
             sr5.metric("🔴 長期阻力 (60日高點)", f"{last['ResLong']:.2f}", f"5日箱體波幅: {float(last.get('Tight_Box_5d_Pct', 0)):.1f}%")
             if _is_short_view:
-                st.caption(f"🔮 **LEI 未來兩週空頭抵扣價推演**：20MA → {_lei_ded.get('short_forecast_20_label', _lei_ded.get('forecast_20_label', ''))} ｜ 60MA → {_lei_ded.get('short_forecast_60_label', _lei_ded.get('forecast_60_label', ''))}")
+                render_atomic_caption(f"🔮 **未來兩週空頭抵扣價推演**：20MA → {_lei_ded.get('short_forecast_20_label', _lei_ded.get('forecast_20_label', ''))} ｜ 60MA → {_lei_ded.get('short_forecast_60_label', _lei_ded.get('forecast_60_label', ''))}")
             else:
-                st.caption(f"🔮 **LEI 未來兩週抵扣價方框推演**：20MA → {_lei_ded.get('forecast_20_label', '')} ｜ 60MA → {_lei_ded.get('forecast_60_label', '')}")
+                render_atomic_caption(f"🔮 **未來兩週抵扣價推演**：20MA → {_lei_ded.get('forecast_20_label', '')} ｜ 60MA → {_lei_ded.get('forecast_60_label', '')}")
 
             st.markdown("### 💰 富途牛牛 (Futu) 實戰投資門檻與交易成本試算")
             col_lot1, col_lot2, col_lot3, col_lot4 = st.columns(4)
@@ -9453,7 +10501,7 @@ elif mode == mode_options[1]:
             default_lot = 1 if market_type != "HK" else POPULAR_HK_LOTS.get(fmt_ticker, 100)
             
             with col_lot1:
-                lot_size = st.number_input("一手股數 (自動匹配/手動修改):", min_value=1, value=default_lot, step=100 if market_type == "HK" else 1)
+                lot_size = st.number_input("一手股數 (自動匹配/手動修改):", min_value=1, value=default_lot, step=100 if market_type == "HK" else 1, key=f"lot_sz_inp_{fmt_ticker}")
             
             min_invest_amount = lot_size * last['Close']
             _lot_futu_fee = compute_futu_real_fees(market_type=market_type, price=float(last['Close']), shares=int(lot_size), is_sell=_is_short_view)
@@ -9475,7 +10523,8 @@ elif mode == mode_options[1]:
             # [v29.0 新增：1D × 4H × 1H × 15m 多時間框架 (MTF) 精準入場與離場狙擊中心]
             # 結合 J Law × Brian Shannon (Anchored VWAP) × Qullamägi (ORB) 解決「買入即被套、離場賣太差」
             # ==============================================================================
-            st.markdown("### ⏱️ 四週期共振狙擊儀表板 (1D 戰略方向 × 4H 波段中繼 × 1H 右側AVWAP轉折 × 15m ORB/VWAP 扳機)")
+            # OLD: st.markdown("### ⏱️ 四週期共振狙擊儀表板 (1D 戰略方向 × 4H 波段中繼 × 1H 右側AVWAP轉折 × 15m ORB/VWAP 扳機)")
+            st.markdown("### ⏱️ 多時間框架趨勢對齊 (日線 / 4小時 / 1小時 / 15分鐘)")
             _mtf_sniper = compute_mtf_execution_and_exit_sniper(
                 ticker=fmt_ticker,
                 daily_df=df,
@@ -9505,13 +10554,16 @@ elif mode == mode_options[1]:
                 f"{_mtf_sniper['sniper_profit_lock_exit']:.2f} {currency}",
                 f"1H 20EMA: {_mtf_sniper['h1_ema20'] if pd.notna(_mtf_sniper['h1_ema20']) else '-'}"
             )
-            st.caption(
+            render_atomic_caption(
                 f"📡 **四週期實時狀態** — **【4H 半日線】**：{_mtf_sniper['tf_4h_state']} ｜ "
                 f"**【1H 小時線】**：{_mtf_sniper['tf_1h_state']} ｜ "
                 f"**【15m 分鐘線】**：{_mtf_sniper['tf_15m_state']}"
             )
+            _mtf_cards_slot = st.empty()
             if _mtf_sniper.get("entry_timing_cards"):
-                render_atomic_alert_group(_mtf_sniper["entry_timing_cards"])
+                render_atomic_alert_group(_mtf_sniper["entry_timing_cards"], slot=_mtf_cards_slot)
+            else:
+                render_atomic_caption("", slot=_mtf_cards_slot)
             st.markdown("---")
 
             st.markdown("### 🎯 結構支撐阻力交易計畫 (依據關鍵價位動態計算)")
@@ -9540,7 +10592,7 @@ elif mode == mode_options[1]:
 
             # [UI 更新] 完全植入動態強勢鎖潤提示與保本提醒
             st.markdown("### 🛡️ 實戰持倉防守與風控導航")
-            st.info("💡 輸入您的實際進場價，系統將根據 **9 EMA** 的狀態，即時判斷您處於 **[忍耐洗盤期]** 還是 **[安全保本期]**，並為您制定最優的分批止盈策略！")
+            render_atomic_alert("💡 輸入您的實際進場價，系統將根據 **9 EMA / 20 MA** 的狀態，即時判斷您處於 **[忍耐洗盤期]** 還是 **[安全保本期]**，並為您制定最優的分批止盈策略！", "info")
             
             # OLD:
             # col_pos1, col_pos2 = st.columns(2)
@@ -9577,17 +10629,25 @@ elif mode == mode_options[1]:
                 held_lots_input = st.number_input(_lot_label, min_value=1, value=max(1, _default_saved_lots), step=1, key=f"held_lots_{fmt_ticker}")
                 actual_held_shares = int(held_lots_input * lot_size) if market_type == "HK" else int(held_lots_input)
                 actual_invested_amt = round(actual_held_shares * (actual_entry if actual_entry > 0 else float(last['Close'])), 2)
-                st.caption(f"💵 持倉本金: **{actual_invested_amt:,.1f} {currency}** ({actual_held_shares:,} 股)")
+                render_atomic_caption(f"💵 持倉本金: **{actual_invested_amt:,.1f} {currency}** ({actual_held_shares:,} 股)")
             with col_pos3:
                 pos_dir = st.selectbox("🔄 持倉方向:", ["做多 (Long)", "做空 (Short)"], index=_default_pos_idx, key=f"pos_dir_{fmt_ticker}")
             with col_pos4:
+                _edt_key = f"entry_dt_{fmt_ticker}_{selected_interval}"
+                if _edt_key in st.session_state:
+                    try:
+                        _cur_ss_dt = pd.to_datetime(st.session_state[_edt_key]).date()
+                        if _cur_ss_dt < _min_avail_dt or _cur_ss_dt > _max_avail_dt:
+                            st.session_state[_edt_key] = _default_entry_dt
+                    except Exception:
+                        st.session_state[_edt_key] = _default_entry_dt
                 entry_date_input = st.date_input(
                     "📅 開倉日期 (錨定結構):",
                     value=_default_entry_dt,
                     min_value=_min_avail_dt,
                     max_value=_max_avail_dt,
                     help="系統根據開倉當日 K 線結構與 ATR 計算初始止損與目標價，跨日查看 100% 恆定不漂移！",
-                    key=f"entry_dt_{fmt_ticker}"
+                    key=_edt_key
                 )
             with col_pos5:
                 st.write("")
@@ -9741,7 +10801,7 @@ elif mode == mode_options[1]:
                         _user_risk = _anchored_plan["user_risk"]
                         _user_rr = _anchored_plan["initial_rr"]
                         _be_price_long = _anchored_plan["be_price"]
-                        st.caption(
+                        render_atomic_caption(
                             f"📐 **錨定於開倉日 ({_anchored_plan['anchor_date']}) 之買入結構計劃**："
                             f"初始防洗盤止損 **{fixed_sl:.2f}** ({_anchored_plan['sl_basis_lbl']}，固定風險 -{_anchored_plan['initial_stop_pct']:.2f}%) ｜ "
                             f"富途打和價 **{_be_price_long:.2f}** ｜ 初始結構目標 **{fixed_tp:.2f}** ({_anchored_plan['tp_basis_lbl']}) ｜ "
@@ -9908,7 +10968,7 @@ elif mode == mode_options[1]:
                         _user_risk = _anchored_plan["user_risk"]
                         _user_rr = _anchored_plan["initial_rr"]
                         _be_price_short = _anchored_plan["be_price"]
-                        st.caption(
+                        render_atomic_caption(
                             f"📐 **錨定於開倉日 ({_anchored_plan['anchor_date']}) 之沽空結構計劃**："
                             f"初始防軋空止損 **{fixed_sl:.2f}** ({_anchored_plan['sl_basis_lbl']}，固定風險 +{_anchored_plan['initial_stop_pct']:.2f}%) ｜ "
                             f"富途打和價 **{_be_price_short:.2f}** ｜ 初始回補目標 **{fixed_tp:.2f}** ({_anchored_plan['tp_basis_lbl']}) ｜ "
@@ -10041,8 +11101,11 @@ elif mode == mode_options[1]:
                 "🚨 發現高危利空字眼" if _news_intel.get("has_black_swan_news") else "✅ 未見重大黑天鵝字眼",
                 "📡 來源: " + (" / ".join(_news_intel.get("active_sources", [])) if _news_intel.get("active_sources") else "待連線")
             )
+            _news_adv_slot = st.empty()
             if _news_px_div.get("reaction_advice"):
-                render_atomic_alert(_news_px_div["reaction_advice"], _news_px_div.get("alert_kind", "info"))
+                render_atomic_alert(_news_px_div["reaction_advice"], _news_px_div.get("alert_kind", "info"), slot=_news_adv_slot)
+            else:
+                render_atomic_caption("", slot=_news_adv_slot)
 
             with st.expander(f"🗞️ 點擊展開：{fmt_ticker} ({name}) 最新網上搜尋新聞情報與逐則【利好 / 利空】明細 ({len(_news_intel.get('news_items', []))} 則)", expanded=True):
                 if _news_intel.get("news_items"):
@@ -10063,11 +11126,12 @@ elif mode == mode_options[1]:
                             "原文連結": st.column_config.LinkColumn("🔗 新聞連結", display_text="閱讀原文")
                         },
                         use_container_width=True,
-                        hide_index=True
+                        hide_index=True,
+                        key=f"news_df_{fmt_ticker}_{selected_interval}"
                     )
                 else:
                     _dbg_str = " ｜ ".join(_news_intel.get("debug_notes", [])) if _news_intel.get("debug_notes") else "請檢查本地網絡連線或防火牆設定"
-                    st.warning(f"⚠️ 暫未能從外部新聞源取回標題（診斷訊息：{_dbg_str}）。可點擊右上角「🔄 重新抓取最新新聞」重試。")
+                    render_atomic_alert(f"⚠️ 暫未能從外部新聞源取回標題（診斷訊息：{_dbg_str}）。可點擊右上角「🔄 重新抓取最新新聞」重試。", "warning")
 
             # ==========================================
             # 🌟 專業級量化分析圖表 (修復對數座標崩潰問題)
@@ -10091,12 +11155,13 @@ elif mode == mode_options[1]:
                 # NEW: [v24.14 預設關閉對數座標 + 新增顯示 K 線根數選擇器，徹底解決圖表被壓縮到最右邊的問題！]
                 c_sub_opt1, c_sub_opt2 = st.columns(2)
                 with c_sub_opt1:
-                    use_log_scale = st.checkbox("📐 開啟對數座標 (Log Scale)", value=False, help="預設關閉以便清晰檢視買入位、結構止損位與止盈目標價")
+                    use_log_scale = st.checkbox("📐 開啟對數座標 (Log Scale)", value=False, help="預設關閉以便清晰檢視買入位、結構止損位與止盈目標價", key=f"log_scale_{fmt_ticker}_{selected_interval}")
                 with c_sub_opt2:
                     chart_window_choice = st.selectbox(
                         "🔍 圖表顯示 K 線範圍:",
                         ["最近 120 根 K 線 (約半年，最清晰)", "最近 200 根 K 線 (約10個月)", "最近 300 根 K 線 (約1年半)", "全部歷史 K 線"],
-                        index=0
+                        index=0,
+                        key=f"chart_win_{fmt_ticker}_{selected_interval}"
                     )
 
             # OLD: plot_df = df.dropna(subset=['Open', 'High', 'Low', 'Close']).copy()
@@ -10384,7 +11449,7 @@ elif mode == mode_options[1]:
 
             if 'CloseBench' in plot_df.columns and not plot_df['CloseBench'].isna().all():
                 st.markdown(f"### 📈 {benchmark_name} 參考走勢")
-                st.caption("用於觀察個股與大盤趨勢同步性")
+                render_atomic_caption("用於觀察個股與大盤趨勢同步性")
                 fig_bench = go.Figure()
                 x_bench_dates = plot_df.index.strftime('%Y-%m-%d')
                 fig_bench.add_trace(go.Scatter(x=x_bench_dates, y=plot_df['CloseBench'], name=f"{benchmark_name} 走勢", line=dict(color='purple')))
@@ -10413,25 +11478,25 @@ elif mode == mode_options[1]:
             st.markdown("---")
             st.markdown("### ⚡ 快速回測此標的")
             with st.expander("開啟個股快速回測", expanded=False):
+                _def_cap_q = int(get_user_risk_and_full_pos_config(market_type)["full_notional"])
                 cqbt1, cqbt2, cqbt3 = st.columns(3)
                 with cqbt1:
-                    btcapq = st.number_input("初始資金", min_value=1000, value=100000, step=10000, key="btcapq")
+                    btcapq = st.number_input(f"初始資金 ({currency})", min_value=1000, value=_def_cap_q, step=2500 if market_type == "HK" else 500, key=f"btcapq_{fmt_ticker}")
                 with cqbt2:
-                    btmodeq = st.selectbox("方向", ["全部雙向", "僅做多頭(做多)", "僅做空頭(做空)"], key="btmodeq")
+                    btmodeq = st.selectbox("方向", ["全部雙向", "僅做多頭(做多)", "僅做空頭(做空)"], key=f"btmodeq_{fmt_ticker}")
                 with cqbt3:
-                    # OLD: btrelaxq = st.checkbox("寬鬆模式", value=True, help="較重視 SMA50 / MACD 與大盤方向", key="btrelaxq")
-                    # NEW: [v24.15] 預設關閉寬鬆模式 (value=False)，確保回測預設 100% 採用與掃描雷達相同的 J Law × LEI 大師結構選股與動態盈虧比邏輯
-                    btrelaxq = st.checkbox("寬鬆模式 (關閉則 100% 同步掃描雷達嚴格結構邏輯)", value=False, help="預設關閉以確保回測與掃描雷達理念 100% 一致；勾選則僅用 50MA+MACD", key="btrelaxq")
+                    btfullposq = st.checkbox("💵 採用側欄『滿倉 + 單筆 $1,000 定額止損』模式", value=True, key=f"btfullq_{fmt_ticker}")
+                    btrelaxq = st.checkbox("寬鬆模式 (關閉則 100% 同步掃描雷達嚴格結構邏輯)", value=False, help="預設關閉以確保回測與掃描雷達理念 100% 一致；勾選則僅用 50MA+MACD", key=f"btrelaxq_{fmt_ticker}")
 
                 cqdate1, cqdate2 = st.columns(2)
                 with cqdate1:
-                    startdtq = st.date_input("開始日期", value=datetime.now() - timedelta(days=365*5), key="dtsq")
+                    startdtq = st.date_input("開始日期", value=datetime.now() - timedelta(days=365*3), key=f"dtsq_{fmt_ticker}")
                 with cqdate2:
-                    enddtq = st.date_input("結束日期", value=datetime.now(), key="dteq")
+                    enddtq = st.date_input("結束日期", value=datetime.now(), key=f"dteq_{fmt_ticker}")
 
-                if st.button("啟動快速回測", key="btnquickbt"):
+                if st.button("啟動快速回測", key=f"btnquickbt_{fmt_ticker}"):
                     with st.spinner("回測中..."):
-                        bt_res_q = run_bidirectional_backtest(ticker_input, startdtq, enddtq, btcapq, strictness, btmodeq, is_relaxed=btrelaxq)
+                        bt_res_q = run_bidirectional_backtest(fmt_ticker, startdtq, enddtq, btcapq, strictness, btmodeq, is_relaxed=btrelaxq, use_full_pos_1k_risk=btfullposq)
                         if isinstance(bt_res_q, str):
                             st.error(bt_res_q)
                         else:
@@ -10466,31 +11531,32 @@ elif mode == mode_options[1]:
 # ==========================================
 elif mode == mode_options[3]:
     st.query_params.clear()
-    st.title("📈 策略歷史回測系統 (利潤最大化風控版)")
+    render_atomic_section_header("📈 策略歷史回測系統 (利潤最大化風控版)", level=1)
     render_global_quick_guide_banner()
     st.markdown("已套用：**富途牛牛真實收費與印花稅精算**、**中線波段防洗盤結構止損 (≥1.2x ATR / 3.2%~7.8%)**、**滿5日且浮盈≥1R升級富途打和保本**、**20MA/21EMA 中線波段跟蹤**、**進場當日止損檢查**，以及**25日時間停損**。")
 
     cbt1, cbt2, cbt3, cbt4 = st.columns(4)
     with cbt1:
-        bt_ticker = st.text_input("股票代碼", value="3690.HK").strip()
+        bt_ticker = st.text_input("股票代碼或名稱 (例: 2269.HK、藥明生物、NVDA)", value="2269.HK").strip()
+    _bt_fmt_tk, _bt_mkt_t, _, _, _bt_cur_lbl = format_and_detect_market(bt_ticker)
+    _bt_def_cap = int(get_user_risk_and_full_pos_config(_bt_mkt_t)["full_notional"])
     with cbt2:
-        bt_capital = st.number_input("初始資金", min_value=1000, value=100000, step=10000)
+        bt_capital = st.number_input(f"初始資金 ({_bt_cur_lbl})", min_value=1000, value=_bt_def_cap, step=2500 if _bt_mkt_t == "HK" else 500)
     with cbt3:
         bt_mode = st.selectbox("交易方向", ["全部雙向", "僅做多頭(做多)", "僅做空頭(做空)"])
     with cbt4:
-        # OLD: bt_relaxed = st.checkbox("寬鬆模式", value=True, help="偏重 SMA50 / MACD 與大盤濾網")
-        # NEW: [v24.15] 預設關閉寬鬆模式 (value=False)，讓回測系統與掃描系統理念 100% 對齊
+        bt_use_full_1k = st.checkbox("💵 採用側欄『滿倉 + 單筆 $1,000 定額止損』實戰模式", value=True, help="開啟後，回測完全按照你在側欄設定的滿倉本金 (HK$18,000~25,000) 及單筆最大虧損 (HK$1,000 / US$128) 計算每筆股數與雙軌止盈！")
         bt_relaxed = st.checkbox("寬鬆模式 (關閉則 100% 同步掃描雷達嚴格結構邏輯)", value=False, help="預設關閉以確保回測與掃描雷達理念 100% 一致；勾選則僅用 50MA+MACD")
 
     cdate1, cdate2 = st.columns(2)
     with cdate1:
-        startdt = st.date_input("開始日期", value=datetime.now() - timedelta(days=365*5))
+        startdt = st.date_input("開始日期", value=datetime.now() - timedelta(days=365*3))
     with cdate2:
         enddt = st.date_input("結束日期", value=datetime.now())
 
     if st.button("🏁 啟動歷史回測"):
         with st.spinner("回測運算中..."):
-            bt_res = run_bidirectional_backtest(bt_ticker, startdt, enddt, bt_capital, strictness, bt_mode, is_relaxed=bt_relaxed)
+            bt_res = run_bidirectional_backtest(_bt_fmt_tk, startdt, enddt, bt_capital, strictness, bt_mode, is_relaxed=bt_relaxed, use_full_pos_1k_risk=bt_use_full_1k)
             if isinstance(bt_res, str):
                 st.error(bt_res)
             else:
@@ -10515,7 +11581,7 @@ elif mode == mode_options[3]:
                 wfo2.metric("🔄 Walk-Forward 四期勝率", f"{_inst_m.get('wfo_consistency_pct', 0.0):.0f}% 正回報", _inst_m.get("wfo_windows_summary", "-"))
                 wfo3.metric("🛡️ 最大連續止損筆數", f"{_inst_m.get('max_consec_losses', 0)} 筆", "評估心理承受極限")
                 wfo4.metric("⏳ 最長水下恢復期 (TUW)", f"{_inst_m.get('max_tuw_days', 0)} 交易日", "資金創新高所需最長天數")
-                st.caption(
+                render_atomic_caption(
                     f"🧪 **機構級樣本內外與蒙特卡洛驗證**：樣本內 (前70%時間) 回報 **{_inst_m.get('in_sample_ret_pct', 0.0):+.2f}%** ｜ "
                     f"樣本外 (後30%時間) 回報 **{_inst_m.get('out_of_sample_ret_pct', 0.0):+.2f}%** ｜ "
                     f"四段滾動 Walk-Forward ({_inst_m.get('wfo_windows_summary', '-')}) ｜ "
