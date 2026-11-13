@@ -1072,21 +1072,25 @@ def batch_prefetch_extended_hours_quotes(tickers: List[str], force_refresh: bool
 
 def inject_extended_hours_into_daily_df(df: pd.DataFrame, ticker: str, market_type: str = "US/Global") -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
-    [v51.0 P0-1 & P0-2 核心重構：無污染 T+0 擴展時段虛擬預覽 K 線合成器 (Non-Destructive T+0 Extended-Hours Bar Appender)]
-    徹底修復 v50.0 直接覆寫 `df.loc[last_idx]` (昨日 T-1 K線) 所引發的三大嚴重量化漏洞：
-    1) 保護 T-1 正規日 K 線完整性：絕不覆寫昨日 (T-1) 的 Open/High/Low/Close/Volume，防止昨日「放量收陰出貨日 (Distribution Day)」
-       因今日盤前反彈而被誤算成「放量收陽口袋支點 (BigMoney_In)」，並完整保留昨日收市價與今日盤前價之間的真實跳空缺口 (Gap)！
-    2) 獨立追加 T+0 盤前/盤後/夜盤預覽 K 線：當處於美股盤後、夜盤或盤前且有實時報價時，在日線末尾追加一根日期為下一個交易日 (T+0) 的預覽 K 線：
-       - `Open` = 擴展時段首筆價 (或昨收價)
-       - `Close` = 擴展時段最新實時價 (`live_price`)
-       - `High` / `Low` = 經成交量過濾薄市烏龍指後的有效擴展極值 (`ext_high` / `ext_low`)
-       - `Volume` = 以過去 20 日均量 (`SMA20_Vol * 0.78`) 中性標準化填充，杜絕因盤前成交量僅佔全日 3% 而假觸發所有股票 `VolRatio < 0.85` 縮量乾涸信號！
+    [v53.0 P0-1 終極無污染架構：RTH 日線結構零失真 × 盤前/盤後/夜盤實時Overlay雙軌引擎]
+    獨立審計發現之關鍵漏洞修復：
+    - 若直接覆寫 T-1 日 K 線 (v50.0)，會抹殺隔夜跳空缺口並將昨日放量收陰出貨日誤判為收陽口袋支點；
+    - 若直接追加未完成之 T+0 夜盤/盤前小 K 線至 df 末尾 (v51.0)，會令 closes[-1] 變成波幅僅 0.05x ATR 的夜盤窄幅棒，
+      導致系統遺忘昨夜 (T-1) 已經爆拉 +2.0x ATR 的事實，誤將昨夜過熱股當成「波幅 0.1x ATR 蓄勢待發股」，並拉低 14日 ATR 與均線斜率！
+    v53.0 解決方案：
+    1) 首先對 df 進行日期索引去重 (`~df.index.duplicated(keep='last')`)，消除 Yahoo Finance 偶發返回重複尾行導致 `day1_chg_atr = 0.0` 及 `RSI2 = 0` 之問題；
+    2) 100% 保持 df 為純淨、已完成的正規交易時段 (RTH) 日線 K 線，確保所有均線 (10/20/50/150/200 MA)、ATR(14)、VCP、成交量比率與 T-1 單日爆發度 100% 精準零失真；
+    3) 將實時抓取的盤前/盤後/夜盤數據 (`live_price`, `ext_high`, `ext_low`, `ext_chg_pct`, `ext_vwap`, `ext_volume`) 掛載於 `df.attrs["extended_hours_info"]`，
+       交由 `compute_us_swing_exhaustion_and_trap_guard`、`check_recent_signal_and_stop_invalidation` 與 `analyze_stock_master` 進行實時疊加評估（同步更新最新價、檢查盤前/盤後是否已穿止損或已跳空過熱）！
     """
     ext_info = fetch_single_extended_hours_quote(ticker)
     if df is None or df.empty:
         return df, ext_info
 
     df = df.copy()
+    if df.index.duplicated().any():
+        df = df[~df.index.duplicated(keep="last")].copy()
+
     last_idx = df.index[-1]
     rth_c = float(df.loc[last_idx, "Close"])
     rth_h = float(df.loc[last_idx, "High"])
@@ -1095,33 +1099,11 @@ def inject_extended_hours_into_daily_df(df: pd.DataFrame, ticker: str, market_ty
     df.attrs["rth_last_high"] = rth_h
     df.attrs["rth_last_low"] = rth_l
 
-    if ext_info.get("rth_close", 0.0) <= 0:
+    # 對齊正規收市價：以日線最後一根 K 線收市價作為基準 rth_close，消除港股收市競價後 meta.regularMarketPrice 與日線微小 0.01 差額
+    if market_type == "HK" or ext_info.get("rth_close", 0.0) <= 0:
         ext_info["rth_close"] = round(rth_c, 3)
-        ext_info["live_price"] = round(rth_c, 3)
-
-    use_ext_sync = bool(st.session_state.get("enable_extended_hours_realtime_sync", True))
-    if use_ext_sync and ext_info.get("has_extended_data") and ext_info.get("live_price", 0.0) > 0 and market_type != "HK":
-        live_p = float(ext_info["live_price"])
-        ext_h = max(live_p, float(ext_info.get("ext_high", live_p) or live_p))
-        ext_l = min(live_p, float(ext_info.get("ext_low", live_p) or live_p))
-        # 計算中性標準化成交量 (避免盤前小成交量污染 VolRatio < 0.85 縮量判斷，同時避免假造爆量 > 1.35x)
-        neutral_vol = float(df["Volume"].tail(20).median()) * 0.92 if "Volume" in df.columns and len(df) >= 5 else float(df.loc[last_idx, "Volume"])
-        next_bday = pd.Timestamp(last_idx) + pd.Timedelta(days=1)
-        if next_bday.weekday() == 5:
-            next_bday += pd.Timedelta(days=2)
-        elif next_bday.weekday() == 6:
-            next_bday += pd.Timedelta(days=1)
-
-        # 建立 T+0 擴展時段預覽行並追加於末尾，100% 保留 T-1 (昨日) RTH K 線不被覆寫！
-        new_row = df.iloc[-1].copy()
-        new_row["Open"] = rth_c
-        new_row["High"] = ext_h
-        new_row["Low"] = ext_l
-        new_row["Close"] = live_p
-        if "Volume" in df.columns:
-            new_row["Volume"] = neutral_vol
-        df.loc[next_bday] = new_row
-        df.attrs["has_synthetic_t0_ext_bar"] = True
+        if not ext_info.get("has_extended_data"):
+            ext_info["live_price"] = round(rth_c, 3)
 
     df.attrs["extended_hours_info"] = ext_info
     return df, ext_info
@@ -1147,7 +1129,7 @@ def render_global_multi_timezone_clock_banner(context_id: str = "main") -> None:
             </div>
         </div>
         """
-        st.markdown(_clock_html, unsafe_allow_html=True)
+        st.markdown(" ".join(line.strip() for line in _clock_html.splitlines() if line.strip()), unsafe_allow_html=True)
     with tz_c2:
         if st.button("🔄 即時刷新盤前/盤後價", key=f"btn_refresh_ext_quotes_{context_id}", use_container_width=True, help="立即清空短線報價快取並重新拉取最新美股盤前/盤後/夜盤與港股實時價格"):
             _EXTENDED_QUOTE_CACHE.clear()
@@ -2245,13 +2227,21 @@ def compute_us_swing_exhaustion_and_trap_guard(df: pd.DataFrame, market_type: st
         sma50_v = float(df['SMA50'].iloc[-1]) if ('SMA50' in df.columns and pd.notna(df['SMA50'].iloc[-1])) else curr_c
         vol_ratio = float(df['VolRatio'].iloc[-1]) if ('VolRatio' in df.columns and pd.notna(df['VolRatio'].iloc[-1])) else 1.0
 
-        # 計算 Wilder 2日極短線 RSI(2)
-        s_close = pd.Series(closes[-16:])
-        delta_c = s_close.diff()
-        gain2 = delta_c.clip(lower=0.0).ewm(alpha=0.5, adjust=False).mean()
-        loss2 = (-delta_c.clip(upper=0.0)).ewm(alpha=0.5, adjust=False).mean()
-        rs2 = gain2.iloc[-1] / max(float(loss2.iloc[-1]), 1e-9)
-        rsi2_val = 100.0 - (100.0 / (1.0 + rs2))
+        # [v53.0 P0-2 修復] 採用近 60 根完整收盤序列計算 Wilder RSI(2)，並若存在盤前/盤後實時價 (live_price != rth_close)，同步納入實時價計算即時 RSI(2)
+        _ext_ov = df.attrs.get("extended_hours_info", {}) if hasattr(df, "attrs") else {}
+        _has_ext_ov = bool(_ext_ov.get("has_extended_data", False) and float(_ext_ov.get("live_price", 0) or 0) > 0 and market_type != "HK")
+        _live_ext_p = float(_ext_ov.get("live_price", curr_c) or curr_c) if _has_ext_ov else curr_c
+        _rsi_series_input = np.append(closes[-60:], [_live_ext_p]) if (_has_ext_ov and abs(_live_ext_p - curr_c) / max(curr_c, 1e-6) >= 0.002) else closes[-60:]
+        s_close = pd.Series(_rsi_series_input).drop_duplicates() if len(_rsi_series_input) >= 5 else pd.Series(_rsi_series_input)
+        delta_c = s_close.diff().dropna()
+        if len(delta_c) >= 2 and float(delta_c.abs().sum()) > 1e-9:
+            gain2 = delta_c.clip(lower=0.0).ewm(alpha=0.5, adjust=False).mean()
+            loss2 = (-delta_c.clip(upper=0.0)).ewm(alpha=0.5, adjust=False).mean()
+            g_last = float(gain2.iloc[-1])
+            l_last = float(loss2.iloc[-1])
+            rsi2_val = 50.0 if (g_last + l_last) < 1e-9 else (100.0 - (100.0 / (1.0 + (g_last / max(l_last, 1e-9)))))
+        else:
+            rsi2_val = 50.0
         out["rsi2_val"] = round(float(rsi2_val), 1)
 
         consec_up = 0
@@ -2308,6 +2298,11 @@ def compute_us_swing_exhaustion_and_trap_guard(df: pd.DataFrame, market_type: st
         max_runup_atr = 2.25 if is_us else 2.80
         max_ext10_atr = 1.45 if is_us else 1.85
 
+        _ext_gap_atr = ((_live_ext_p - curr_c) / max(atr_v, 1e-6)) if _has_ext_ov else 0.0
+        _ext_sess_name = str(_ext_ov.get("session_label", "盤前/盤後")) if _has_ext_ov else ""
+        if is_us and _has_ext_ov and (_ext_gap_atr >= 0.95 or (day1_chg_atr + _ext_gap_atr) >= 1.45):
+            out["is_exhausted_dont_chase"] = True
+            reasons.append(f"{_ext_sess_name}已大幅跳空拉升 ({_ext_ov.get('ext_chg_pct', 0):+.2f}% / +{_ext_gap_atr:.2f}x ATR)，切勿開盤市價追高")
         if is_us and day1_chg_atr >= 1.25 and (curr_c > prev10_high_now * 1.005 or ext_10ema_atr >= 1.05):
             out["is_exhausted_dont_chase"] = True
             reasons.append(f"昨夜單日已急升 +{day1_chg_atr:.2f}x ATR (短線爆發力已於昨夜宣洩，美股次日極易獲利回吐)")
@@ -2336,6 +2331,9 @@ def compute_us_swing_exhaustion_and_trap_guard(df: pd.DataFrame, market_type: st
         # --- B. 空頭昨夜急跌超賣與 T+1 死貓彈攔截 (防止追空在昨夜大跌尾棒、今晚開盤大升被夾) ---
         short_reasons = []
         max_consec_dn = 3 if is_us else 4
+        if is_us and _has_ext_ov and (_ext_gap_atr <= -0.95 or (day1_chg_atr + _ext_gap_atr) <= -1.40):
+            out["is_short_overextended_dont_chase"] = True
+            short_reasons.append(f"{_ext_sess_name}已大幅跳空急挫 ({_ext_ov.get('ext_chg_pct', 0):+.2f}% / {_ext_gap_atr:.2f}x ATR)，切勿開盤低位追空")
         if is_us and day1_chg_atr <= -1.20:
             out["is_short_overextended_dont_chase"] = True
             short_reasons.append(f"昨夜單日已急挫 {day1_chg_atr:.2f}x ATR (空頭動能短線宣洩過度，今晚極易觸發空頭回補反彈)")
@@ -2368,16 +2366,21 @@ def compute_us_swing_exhaustion_and_trap_guard(df: pd.DataFrame, market_type: st
             if (rsi2_val >= 52.0 and curr_c <= sma20_v * 1.02) or (close_pos <= 0.45 and curr_h >= ema10_v * 0.99) or (is_tight_bar and curr_c <= prev10_low_now * 1.03):
                 out["is_t1_fade_bounce_short"] = True
 
+        _day_lbl = "昨夜" if is_us else "近1日"
+        _next_lbl = "今晚" if is_us else "次日"
         if out["is_exhausted_dont_chase"]:
-            out["t1_overnight_badge"] = f"⚠️ 昨夜已急升 (RSI2={rsi2_val:.0f}｜+{day1_chg_atr:.1f}xATR・防今晚回吐勿追)"
+            if out["is_intraday_bull_trap_wick"] and day1_chg_atr < 0.85:
+                out["t1_overnight_badge"] = f"⚠️ 衝高留上影線 (RSI2={rsi2_val:.0f}｜收於波幅{close_pos*100:.0f}%・等企穩勿追)"
+            else:
+                out["t1_overnight_badge"] = f"⚠️ {_day_lbl}已急升 (RSI2={rsi2_val:.0f}｜{day1_chg_atr:+.1f}xATR・防{_next_lbl}回吐勿追)"
         elif out["is_short_overextended_dont_chase"]:
-            out["t1_overnight_badge"] = f"⚠️ 昨夜已急跌 (RSI2={rsi2_val:.0f}｜{day1_chg_atr:.1f}xATR・防今晚反彈勿追空)"
+            out["t1_overnight_badge"] = f"⚠️ {_day_lbl}已急跌 (RSI2={rsi2_val:.0f}｜{day1_chg_atr:+.1f}xATR・防{_next_lbl}反彈勿追空)"
         elif out["is_t1_coiled_spring_long"]:
-            out["t1_overnight_badge"] = f"🟢 蓄勢待發多頭 (RSI2={rsi2_val:.0f}未過熱｜波幅{day1_range_atr:.1f}xATR・利今晚向上)"
+            out["t1_overnight_badge"] = f"🟢 蓄勢待發多頭 (RSI2={rsi2_val:.0f}未過熱｜波幅{day1_range_atr:.1f}xATR・利{_next_lbl}向上)"
         elif out["is_t1_fade_bounce_short"]:
-            out["t1_overnight_badge"] = f"🔴 反抽受阻空頭 (RSI2={rsi2_val:.0f}反彈力竭｜均線壓制・利今晚回落)"
+            out["t1_overnight_badge"] = f"🔴 反抽受阻空頭 (RSI2={rsi2_val:.0f}反彈力竭｜均線壓制・利{_next_lbl}回落)"
         else:
-            out["t1_overnight_badge"] = f"⚪ 常規波段 (RSI2={rsi2_val:.0f}｜昨波幅{day1_range_atr:.1f}xATR)"
+            out["t1_overnight_badge"] = f"⚪ 常規波段 (RSI2={rsi2_val:.0f}｜波幅{day1_range_atr:.1f}xATR)"
     except Exception:
         pass
     return out
@@ -3842,15 +3845,18 @@ def compute_anchored_position_plan(
                 fixed_sl = round(max(min(actual_entry + float(stop_prof["fallback_atr_mult"]) * entry_atr, actual_entry * (1.0 + u_max_pct)), actual_entry * (1.0 + u_min_pct)), 2)
                 sl_basis_lbl = f"開倉日({anchor_date_str}) {float(stop_prof['fallback_atr_mult']):.2f}x ATR 防軋空保護位"
             user_risk = max(fixed_sl - actual_entry, 1e-4)
-            if sr_targets:
-                fixed_tp, tp_basis_lbl = round(sr_targets[0][0], 2), f"{sr_targets[0][1]} (錨定於 {anchor_date_str})"
-                if (actual_entry - fixed_tp) / user_risk < 1.6 and len(sr_targets) >= 2:
-                    fixed_tp, tp_basis_lbl = round(sr_targets[1][0], 2), f"{sr_targets[1][1]} (錨定於 {anchor_date_str})"
-                tp2_price = round(sr_targets[1][0], 2) if len(sr_targets) >= 2 else round(max(0.01, actual_entry - 3.8 * entry_atr), 2)
-            else:
-                fixed_tp = round(min(float(anchor_row.get('SupShort_Causal', actual_entry * 0.92)), max(0.01, actual_entry - 3.2 * entry_atr)), 2)
-                tp2_price = round(max(0.01, actual_entry - 4.5 * entry_atr), 2)
-                tp_basis_lbl = f"開倉日({anchor_date_str})空頭波段等距目標"
+            # [v53.0 P0-3 修復：空頭持倉錨定計劃同步接入雙軌 R:R 引擎，根治截圖 2 中 2018.HK 出現 TP 34.86 (0.86R) 目標過近之漏洞]
+            _dual_rr_anch_s = compute_dual_track_hk_us_rr_targets(
+                entry_price=actual_entry,
+                stop_loss=fixed_sl,
+                atr_val=entry_atr,
+                sr_targets=sr_targets,
+                market_type=market_type,
+                direction="SHORT"
+            )
+            fixed_tp = _dual_rr_anch_s["tp1_price"]
+            tp2_price = _dual_rr_anch_s["tp2_price"]
+            tp_basis_lbl = f"{_dual_rr_anch_s['tp1_desc']} (錨定於 {anchor_date_str})"
 
     user_risk = max(abs(actual_entry - fixed_sl), 1e-4)
     initial_stop_pct = (user_risk / actual_entry) * 100.0
@@ -8103,6 +8109,31 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
         if plan_type in ["LONG", "SHORT"] and float(trade_plan_eval.get("stop_pct", 0.0)) > _max_allowed_stop_m:
             plan_type = "WATCH"
             status = f"⚪ 觀望 (結構止損過寬達 {trade_plan_eval.get('stop_pct', 0):.1f}% > {_max_allowed_stop_m:.1f}% 動態上限，等待波幅收窄)"
+
+        # [v53.0 P0-1 實時盤前/盤後/夜盤穿止損攔截器]
+        # 若美股在盤後、夜盤或盤前最新價/極值已跌穿結構止損位 (做多) 或升穿空頭止損位 (做空)，立即將信號降級為 WATCH 觀望並標明原因！
+        _ext_chk = df.attrs.get("extended_hours_info", {})
+        if (
+            bool(st.session_state.get("enable_extended_hours_realtime_sync", True))
+            and _ext_chk.get("has_extended_data")
+            and float(_ext_chk.get("live_price", 0) or 0) > 0
+            and market_type != "HK"
+        ):
+            _lp_ext = float(_ext_chk["live_price"])
+            _lo_ext = float(_ext_chk.get("ext_low", _lp_ext) or _lp_ext)
+            _hi_ext = float(_ext_chk.get("ext_high", _lp_ext) or _lp_ext)
+            _sl_cand = float(trade_plan_eval.get("sl", 0) or 0)
+            _sess_n = str(_ext_chk.get("session_label", "盤前/盤後"))
+            if plan_type == "LONG" and _sl_cand > 0 and (_lp_ext <= _sl_cand or _lo_ext <= _sl_cand):
+                plan_type = "WATCH"
+                invalidation_info["long_stop_hit"] = True
+                invalidation_info["invalidation_reason"] = f"🚨 {_sess_n}已跌穿結構止損 (現報 {_lp_ext:.2f} / 低見 {_lo_ext:.2f} ≤ 止損 {_sl_cand:.2f})"
+                status = f"⚪ 觀望 ({invalidation_info['invalidation_reason']})"
+            elif plan_type == "SHORT" and _sl_cand > 0 and (_lp_ext >= _sl_cand or _hi_ext >= _sl_cand):
+                plan_type = "WATCH"
+                invalidation_info["short_stop_hit"] = True
+                invalidation_info["short_invalidation_reason"] = f"🚨 {_sess_n}已升穿空頭止損 (現報 {_lp_ext:.2f} / 高見 {_hi_ext:.2f} ≥ 止損 {_sl_cand:.2f})"
+                status = f"⚪ 觀望 ({invalidation_info['short_invalidation_reason']})"
         target_entry = trade_plan_eval["entry"]
         if plan_type == "LONG":
             stop_loss = trade_plan_eval["sl"]
@@ -9250,6 +9281,7 @@ def build_watchlist_instant_quote_df(tickers: List[str]) -> Tuple[pd.DataFrame, 
 
             rows.append({
                 "↕️ 次序": int(idx),
+                "跳轉診斷": f"/?mode=診斷&ticker={fmt_t}&strict={strictness}",
                 "代碼": fmt_t,
                 "股票名稱": stk_name,
                 "行業板塊": sec_name,
@@ -9262,12 +9294,12 @@ def build_watchlist_instant_quote_df(tickers: List[str]) -> Tuple[pd.DataFrame, 
                 "均線趨勢位置": ma_badge,
                 "距52W高點": f"-{dist_52w:.1f}%",
                 "實戰持倉鎖定": pos_str,
-                "所屬分組": " / ".join(in_other_groups),
-                "跳轉診斷": f"/?mode=診斷&ticker={fmt_t}&strict={strictness}"
+                "所屬分組": " / ".join(in_other_groups)
             })
         else:
             rows.append({
                 "↕️ 次序": int(idx),
+                "跳轉診斷": f"/?mode=診斷&ticker={fmt_t}&strict={strictness}",
                 "代碼": fmt_t,
                 "股票名稱": stk_name,
                 "行業板塊": sec_name,
@@ -9280,8 +9312,7 @@ def build_watchlist_instant_quote_df(tickers: List[str]) -> Tuple[pd.DataFrame, 
                 "均線趨勢位置": "⚪ 點擊診斷載入數據",
                 "距52W高點": "-",
                 "實戰持倉鎖定": "-",
-                "所屬分組": " / ".join(in_other_groups),
-                "跳轉診斷": f"/?mode=診斷&ticker={fmt_t}&strict={strictness}"
+                "所屬分組": " / ".join(in_other_groups)
             })
 
     if chg_list:
@@ -9763,15 +9794,24 @@ def render_futu_multi_chart_grid(
                 futu_color = "#00B865" if is_up_day else "#F23645"
                 disp_title = _INDEX_DISPLAY_NAMES.get(sym, f"{sym} {get_stock_name(sym)}")
 
-                # 檢查是否有實戰持倉鎖定或雷達建議買賣位
+                # [v53.0 升級：確保多股同列中每一隻股票（包括未鎖定持倉的 VOO 等自選股）在開啟『🎯 顯示買賣位與紅綠盈虧區間』時均自動繪製結構紅綠盈虧框]
                 _plan_entry, _plan_sl, _plan_tp, _plan_rr_str, _plan_badge = None, None, None, "", ""
                 if sym in locked_map and isinstance(locked_map[sym], dict):
                     _lp = locked_map[sym]
                     _plan_entry = float(_lp.get("entry", 0) or 0)
                     _plan_sl = float(_lp.get("fixed_sl", 0) or 0)
                     _plan_tp = float(_lp.get("fixed_tp", 0) or 0)
-                    _plan_rr_str = f"{float(_lp.get('initial_rr', 0)):.2f}R"
-                    _plan_badge = f"🔒 持倉 @{_plan_entry:.2f}"
+                    # 若舊鎖定記錄之盈虧比不足 1.5R，自動以雙軌 R:R 引擎修正目標價
+                    if _plan_entry > 0 and _plan_sl > 0:
+                        _rk_lp = max(abs(_plan_entry - _plan_sl), 1e-4)
+                        if abs(_plan_tp - _plan_entry) / _rk_lp < 1.5:
+                            _dir_lp = "SHORT" if _plan_sl > _plan_entry else "LONG"
+                            _mkt_lp = "HK" if sym.endswith(".HK") else "US/Global"
+                            _fix_rr = compute_dual_track_hk_us_rr_targets(_plan_entry, _plan_sl, _rk_lp / 1.5, [], _mkt_lp, _dir_lp)
+                            _plan_tp = float(_fix_rr["tp1_price"])
+                        _plan_rr_str = f"{abs(_plan_tp - _plan_entry) / _rk_lp:.2f}R"
+                    _dir_tag_lp = "空" if (_plan_sl and _plan_entry and _plan_sl > _plan_entry) else "多"
+                    _plan_badge = f"🔒 持倉({_dir_tag_lp}) @{_plan_entry:.2f}"
                 elif sym in _radar_plan_lookup:
                     _rp = _radar_plan_lookup[sym]
                     _dir_s = str(_rp.get("交易方向", ""))
@@ -9783,24 +9823,66 @@ def render_futu_multi_chart_grid(
                         _plan_badge = f"{_dir_s} {_rp.get('優先次序', '')}"
                     except Exception:
                         _plan_badge = _dir_s
+                if show_plan_zones and (not _plan_entry or not _plan_sl or not _plan_tp) and not sym.startswith("^") and len(plot_mc) >= 15:
+                    # 自動為未鎖定之自選股 (如 VOO) 即時計算結構參考買賣位與紅綠盈虧區間
+                    try:
+                        _tr_mc = np.maximum(
+                            plot_mc["High"] - plot_mc["Low"],
+                            np.maximum(abs(plot_mc["High"] - plot_mc["Close"].shift(1)), abs(plot_mc["Low"] - plot_mc["Close"].shift(1)))
+                        )
+                        _atr_mc = float(_tr_mc.tail(14).mean()) if len(_tr_mc) >= 5 else c_last * 0.025
+                        if not pd.notna(_atr_mc) or _atr_mc <= 0:
+                            _atr_mc = c_last * 0.025
+                        _s20_mc = float(plot_mc["SMA20"].iloc[-1]) if pd.notna(plot_mc["SMA20"].iloc[-1]) else c_last
+                        _s50_mc = float(plot_mc["SMA50"].iloc[-1]) if pd.notna(plot_mc["SMA50"].iloc[-1]) else c_last
+                        _is_bull_mc = (c_last >= _s50_mc) or (c_last >= _s20_mc)
+                        _plan_entry = round(c_last, 2)
+                        if _is_bull_mc:
+                            _box_l10 = float(plot_mc["Low"].tail(10).min())
+                            _cand_sl = min(_plan_entry - 1.35 * _atr_mc, max(_box_l10 - 0.25 * _atr_mc, _plan_entry * 0.945))
+                            _plan_sl = round(min(_plan_entry * 0.968, max(_cand_sl, _plan_entry * 0.915)), 2)
+                            _rk_m = max(_plan_entry - _plan_sl, 1e-4)
+                            _plan_tp = round(max(_plan_entry + 2.20 * _rk_m, _plan_entry + 2.8 * _atr_mc), 2)
+                            _plan_rr_str = f"{(_plan_tp - _plan_entry) / _rk_m:.2f}R"
+                            if not _plan_badge:
+                                _plan_badge = "🟢 多頭結構"
+                        else:
+                            _box_h10 = float(plot_mc["High"].tail(10).max())
+                            _cand_sl = max(_plan_entry + 1.35 * _atr_mc, min(_box_h10 + 0.25 * _atr_mc, _plan_entry * 1.055))
+                            _plan_sl = round(max(_plan_entry * 1.032, min(_cand_sl, _plan_entry * 1.085)), 2)
+                            _rk_m = max(_plan_sl - _plan_entry, 1e-4)
+                            _plan_tp = round(max(0.01, min(_plan_entry - 2.20 * _rk_m, _plan_entry - 2.8 * _atr_mc)), 2)
+                            _plan_rr_str = f"{(_plan_entry - _plan_tp) / _rk_m:.2f}R"
+                            if not _plan_badge:
+                                _plan_badge = "🔴 空頭結構"
+                    except Exception:
+                        pass
 
-                # 渲染富途牛牛式頂部報價 Header Bar (同時展示正規盤與盤前/盤後/夜盤實時狀態)
+                # [v52.0 根治 VOO / 瑞聲科技 等多股同列標題出現 `</div>` 代碼框之 Markdown 縮排漏洞]
+                # 原因：CommonMark 規範將縮排 >= 4 格且前面有空變數行之 HTML 標籤解析為 <pre><code> 代碼塊！
+                # 修復：採用零縮排單行緊湊 HTML 字串渲染 Header，100% 杜絕任何股票出現 `</div>` 亂碼！
                 _ext_sub_line = ""
                 if _ext_mc_info and _ext_mc_info.get("has_extended_data"):
                     _ec = "#00B865" if float(_ext_mc_info.get("ext_chg_pct", 0)) >= 0 else "#F23645"
-                    _ext_sub_line = f'<div style="font-size:10.5px; color:{_ec}; font-weight:700;">{_ext_mc_info.get("session_label", "盤前/盤後")} {_ext_mc_info.get("live_price", c_last):.2f} ({float(_ext_mc_info.get("ext_chg_pct", 0)):+.2f}% vs 昨收 {_ext_mc_info.get("rth_close", c_prev):.2f})</div>'
-                _hdr_html = f"""
-                <div translate="no" class="notranslate" style="background:#FFFFFF; border:1px solid #E2E8F0; border-bottom:none; border-radius:8px 8px 0 0; padding:8px 10px; display:flex; align-items:center; justify-content:space-between;">
-                    <div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:56%;">
-                        <span style="font-size:13.5px; font-weight:800; color:#0F172A;">{disp_title}</span>
-                        {f'<span style="margin-left:5px; font-size:11px; background:#F1F5F9; color:#334155; padding:1px 5px; border-radius:4px; font-weight:600;">{_plan_badge}</span>' if _plan_badge else ''}
-                    </div>
-                    <div style="text-align:right; font-family: monospace, sans-serif; font-weight:800; font-size:13px; color:{futu_color};">
-                        <div>{c_last:,.2f} <span style="font-size:11.5px;">{chg_val:+.2f} ({chg_pct:+.2f}%)</span></div>
-                        {_ext_sub_line}
-                    </div>
-                </div>
-                """
+                    _rth_ref_v = float(_ext_mc_info.get("rth_close", c_last) or c_last)
+                    _ext_sub_line = (
+                        f'<div style="font-size:10.5px; color:{_ec}; font-weight:700;">'
+                        f'{_ext_mc_info.get("session_label", "盤前/盤後")} {_ext_mc_info.get("live_price", c_last):.2f} '
+                        f'({float(_ext_mc_info.get("ext_chg_pct", 0)):+.2f}% vs 昨收 {_rth_ref_v:.2f})</div>'
+                    )
+                _badge_span_html = (
+                    f'<span style="margin-left:5px; font-size:11px; background:#F1F5F9; color:#334155; padding:1px 5px; border-radius:4px; font-weight:600;">{_plan_badge}</span>'
+                    if _plan_badge else ""
+                )
+                _hdr_html = (
+                    f'<div translate="no" class="notranslate" style="background:#FFFFFF; border:1px solid #E2E8F0; border-bottom:none; border-radius:8px 8px 0 0; padding:8px 10px; display:flex; align-items:center; justify-content:space-between;">'
+                    f'<div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:56%;">'
+                    f'<span style="font-size:13.5px; font-weight:800; color:#0F172A;">{disp_title}</span>{_badge_span_html}'
+                    f'</div>'
+                    f'<div style="text-align:right; font-family:monospace,sans-serif; font-weight:800; font-size:13px; color:{futu_color};">'
+                    f'<div>{c_last:,.2f} <span style="font-size:11.5px;">{chg_val:+.2f} ({chg_pct:+.2f}%)</span></div>{_ext_sub_line}'
+                    f'</div></div>'
+                )
                 st.markdown(_hdr_html, unsafe_allow_html=True)
 
                 # 繪製富途牛牛風格 K 線圖
@@ -10006,13 +10088,19 @@ def render_styled_dataframe(df, table_key: Optional[str] = None):
     wl_dict = st.session_state.watchlist_dict
     all_cats = list(wl_dict.keys())
     _placeholder_opt = "➕ 點擊選擇類別..."
-    _select_options = [_placeholder_opt] + all_cats
+    _same_tab_diag_opt = "🚀 本頁直接進入診斷 (不開新分頁)"
+    _select_options = [_placeholder_opt, _same_tab_diag_opt] + all_cats
 
     work_df = df.copy()
-    # 將「跳轉診斷 (新分頁)」移至表格最右側，避免誤觸開啟新網頁
-    _link_col_series = None
-    if "跳轉診斷" in work_df.columns:
-        _link_col_series = work_df.pop("跳轉診斷")
+    # 確保「跳轉診斷 (🔍 分析器 -> 進入診斷)」緊貼在「優先次序」與「代碼」之間，100% 還原用戶習慣的藍色「進入診斷」按鈕列！
+    if "跳轉診斷" not in work_df.columns and "代碼" in work_df.columns:
+        def _build_diag_link(r_item):
+            _tk_c = str(r_item.get("代碼", "")).strip()
+            _dir_t = str(r_item.get("交易方向", ""))
+            _d_c = "SHORT" if "做空" in _dir_t else ("LONG" if "做多" in _dir_t else "WATCH")
+            return f"/?mode=診斷&ticker={_tk_c}&dir={_d_c}&strict={strictness}"
+        _ins_pos = 1 if "優先次序" in work_df.columns else 0
+        work_df.insert(_ins_pos, "跳轉診斷", work_df.apply(_build_diag_link, axis=1))
 
     def _get_in_wl_str(tk_val: str) -> str:
         fmt_t, _, _, _, _ = format_and_detect_market(tk_val)
@@ -10023,14 +10111,10 @@ def render_styled_dataframe(df, table_key: Optional[str] = None):
         work_df.insert(0, "📂 所屬自選", work_df["代碼"].apply(_get_in_wl_str))
     if "⭐ 點擊放入自選" not in work_df.columns:
         work_df.insert(0, "⭐ 點擊放入自選", _placeholder_opt)
-    if "🔍 本頁診斷" not in work_df.columns:
-        work_df.insert(0, "🔍 本頁診斷", False)
     if "☑️ 勾選" not in work_df.columns:
         work_df.insert(0, "☑️ 勾選", False)
-    if _link_col_series is not None:
-        work_df["跳轉診斷"] = _link_col_series
 
-    editable_cols = {"☑️ 勾選", "🔍 本頁診斷", "⭐ 點擊放入自選"}
+    editable_cols = {"☑️ 勾選", "⭐ 點擊放入自選"}
     disabled_cols = [c for c in work_df.columns if c not in editable_cols]
 
     try:
@@ -10043,16 +10127,10 @@ def render_styled_dataframe(df, table_key: Optional[str] = None):
                     default=False,
                     width="small"
                 ),
-                "🔍 本頁診斷": st.column_config.CheckboxColumn(
-                    "🔍 本頁診斷",
-                    help="點擊此方格即在【同一個網頁】直接進入該股 K 線與買賣位診斷（不開新分頁）！",
-                    default=False,
-                    width="small"
-                ),
                 "⭐ 點擊放入自選": st.column_config.SelectboxColumn(
                     "⭐ 點擊放入自選",
                     options=_select_options,
-                    help="直接點擊此格選擇自選類別（如：🌟 我的最愛），系統即刻自動存入！",
+                    help="直接點擊此格選擇自選類別（如：🌟 我的最愛）即刻自動存入；或揀『🚀 本頁直接進入診斷』在同一分頁打開診斷！",
                     width="medium"
                 ),
                 "📂 所屬自選": st.column_config.TextColumn(
@@ -10060,13 +10138,13 @@ def render_styled_dataframe(df, table_key: Optional[str] = None):
                     help="此股票目前已收藏的自選類別",
                     width="small"
                 ),
-                "代碼": st.column_config.TextColumn("代碼", width="small"),
                 "跳轉診斷": st.column_config.LinkColumn(
-                    "↗️ 新分頁",
-                    display_text="↗️ 新分頁",
-                    help="僅在你希望另外開一個新瀏覽器分頁雙開對比時才點擊此處；平時請點左方『🔍 本頁診斷』固定在同一頁切換",
+                    "🔍 分析器",
+                    display_text="進入診斷",
+                    help="點擊『進入診斷』開啟此股 K 線與買賣位技術診斷",
                     width="small"
-                )
+                ),
+                "代碼": st.column_config.TextColumn("代碼", width="small")
             },
             disabled=disabled_cols,
             use_container_width=True,
@@ -10089,11 +10167,17 @@ def render_styled_dataframe(df, table_key: Optional[str] = None):
                 if _tk_go:
                     trigger_same_tab_diagnosis(_tk_go, dir_code=_dir_go)
 
-        # 1. 檢測用戶是否直接點擊了某一行的「⭐ 點擊放入自選」下拉格選擇了類別
+        # 1. 檢測用戶是否點擊了「⭐ 點擊放入自選」下拉格（支援『🚀 本頁直接進入診斷』或直接存入自選分組）
         _direct_assigned = []
         for _, r_ed in edited_df.iterrows():
             _chosen_cat = str(r_ed.get("⭐ 點擊放入自選", _placeholder_opt))
-            if _chosen_cat != _placeholder_opt and _chosen_cat in wl_dict:
+            if _chosen_cat == _same_tab_diag_opt:
+                _tk_go = str(r_ed.get("代碼", "")).strip()
+                _dir_txt = str(r_ed.get("交易方向", ""))
+                _dir_go = "SHORT" if "做空" in _dir_txt else ("LONG" if "做多" in _dir_txt else "")
+                if _tk_go:
+                    trigger_same_tab_diagnosis(_tk_go, dir_code=_dir_go)
+            elif _chosen_cat != _placeholder_opt and _chosen_cat in wl_dict:
                 _tk_ed, _, _, _, _ = format_and_detect_market(str(r_ed.get("代碼", "")))
                 _nm_ed = str(r_ed.get("股票名稱", _tk_ed))
                 if _tk_ed and _tk_ed not in wl_dict[_chosen_cat]:
@@ -10521,7 +10605,7 @@ def render_radar_results(df_results, title, market_key=None):
         # ]
         # NEW: [v25.0] 精簡視圖加入 MartinLuk設置 與 ADR波幅(%)
         simple_cols = [
-            "優先次序", "代碼", "股票名稱", "交易方向", "最新價", "正規收市價", "盤前/盤後/夜盤", "T+1隔夜動能", "入場時機", "超級績效重疊網", "VCP與3C買點", "多空四階段", "Pring動能", "機會評級", "優先總分",
+            "優先次序", "跳轉診斷", "代碼", "股票名稱", "交易方向", "最新價", "正規收市價", "盤前/盤後/夜盤", "T+1隔夜動能", "入場時機", "超級績效重疊網", "VCP與3C買點", "多空四階段", "Pring動能", "機會評級", "優先總分",
             "建議進場價", "掛單與買入位說明", "ATR防守止損", "ATR目標止盈",
             "預估盈虧比(R:R)", "DeepChart空單消化", "MartinLuk設置", "ADR波幅(%)", "META多重優勢", "J Law 強勢形態", "診斷結果"
         ]
@@ -10685,7 +10769,7 @@ def run_all_inclusive_radar(stock_list):
                 "跳轉診斷": f"/?mode=診斷&ticker={ticker}&dir={ptype}&strict={strictness}",
                 "代碼": ticker,
                 "股票名稱": name,
-                "最新價": f"{last['Close']:.2f}",
+                "最新價": f"{_live_px_val:.2f}" if _ext_q_radar.get("has_extended_data") else f"{last['Close']:.2f}",
                 "正規收市價": f"{_rth_close_val:.2f}",
                 "盤前/盤後/夜盤": _ext_sl_breach_msg if _ext_sl_breach_msg else _ext_badge_col,
                 "交易方向": tactical_dir,
@@ -11445,8 +11529,8 @@ elif mode == mode_options[2]:
                                     "⚡ 快速調位": st.column_config.SelectboxColumn("⚡ 快速調位", options=_ord_options, help="一鍵置頂、上移一位、下移一位、置底或移出", width="medium"),
                                     "📂 點擊移至類別": st.column_config.SelectboxColumn("📂 點擊移至類別", options=[_mv_placeholder] + _other_wl_cats, help="直接選擇目標類別將此股票移過去", width="medium"),
                                     "📋 點擊複製至類別": st.column_config.SelectboxColumn("📋 點擊複製至類別", options=[_cp_placeholder] + _other_wl_cats, help="直接選擇目標類別將此股票複製過去", width="medium"),
+                                    "跳轉診斷": st.column_config.LinkColumn("🔍 分析器", display_text="進入診斷", help="點擊進入個股 K 線與買賣位診斷", width="small"),
                                     "代碼": st.column_config.TextColumn("股票代碼", width="small"),
-                                    "跳轉診斷": st.column_config.LinkColumn("↗️ 新分頁", display_text="↗️ 新分頁", help="僅在想雙開新分頁對比時點擊", width="small"),
                                 },
                                 disabled=_q_disabled,
                                 use_container_width=True,
@@ -12444,11 +12528,11 @@ elif mode == mode_options[1]:
             # NEW: [v25.4 新增「開倉日期錨定」與「一鍵鎖定初始止損/目標價」功能]
             # 徹底解決「同一個進場價，過幾天來看止損、目標同盈虧比都變咗」嘅問題！
             _default_saved_entry = float(_saved_pos.get("entry", 0.0))
+            # [v53.0 P1-1 修復：防止用戶輸入買入價試算做多時，因舊雷達曾標記為做空而誤將持倉方向預設為 SHORT (導致紅綠盈虧框上下顛倒)]
             _default_pos_idx = 1 if (
-                _saved_pos.get("dir_code") == "SHORT"
-                or plan_type == "SHORT"
-                or target_dir_from_radar == "SHORT"
-                or _sig_mem.get("plan_type") == "SHORT"
+                "強制做空" in user_view_mode
+                or (_saved_pos.get("dir_code") == "SHORT" and "強制做多" not in user_view_mode)
+                or (not _saved_pos and plan_type == "SHORT" and target_dir_from_radar == "SHORT" and "強制做多" not in user_view_mode)
             ) else 0
             _default_entry_dt = pd.to_datetime(_saved_pos.get("anchor_date", df.index[-1])).date() if _saved_pos.get("anchor_date") else (
                 pd.to_datetime(_sig_mem.get("scan_date", df.index[-1])).date() if _sig_mem.get("scan_date") else df.index[-1].date()
@@ -12565,8 +12649,10 @@ elif mode == mode_options[1]:
                     # NEW: [v25.6 固定預留 _lock_banner_slot = st.empty()] 點擊鎖定計劃時在預留槽位內渲染，絕不推擠下方元件之 DOM 索引！
                     _lock_banner_slot = st.empty()
                     if _anchored_plan:
-                        _saved_pos_map[fmt_ticker] = _anchored_plan
-                        save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
+                        # 僅當用戶明確點擊「🔒 鎖定」或該標的已在鎖定名單中時才寫入持久化持倉庫，避免隨手試算污染鎖定持倉
+                        if lock_btn or (fmt_ticker in _saved_pos_map):
+                            _saved_pos_map[fmt_ticker] = _anchored_plan
+                            save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
                         # [v28.0 同步更新頂部 5 張指標卡，消除頂部顯示今日動態 R:R 而底部顯示開倉日 R:R 的矛盾]
                         p1.metric("🎯 你的實際進場位 (已錨定)", f"{actual_entry:.2f} {currency}", delta=f"開倉日 {_anchored_plan['anchor_date']}")
                         p2.metric("🛡️ 開倉日鎖定止損位", f"{_anchored_plan['fixed_sl']:.2f} {currency}", delta=f"軟止損 {_anchored_plan.get('soft_closing_sl', _anchored_plan['fixed_sl']):.2f} (-{_anchored_plan['initial_stop_pct']:.1f}%)", delta_color="inverse")
@@ -12599,8 +12685,9 @@ elif mode == mode_options[1]:
                     _init_risk_dlr = round(actual_held_shares * _anchored_plan["user_risk"] + _real_fee_pos["round_trip_fee"], 2)
                     _tp1_net_dlr = round(actual_held_shares * abs(_anchored_plan["fixed_tp"] - actual_entry) - _real_fee_pos["round_trip_fee"], 2)
                     _anchored_plan["net_pnl_dollars"] = _net_pnl_dlr
-                    _saved_pos_map[fmt_ticker] = _anchored_plan
-                    save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
+                    if lock_btn or (fmt_ticker in _saved_pos_map):
+                        _saved_pos_map[fmt_ticker] = _anchored_plan
+                        save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
 
                     # 展示「開倉錨定初始計劃」vs「今日實時浮動淨盈虧 ($) & 精準手數風控」五維儀表板
                     rt_c1, rt_c2, rt_c3, rt_c4, rt_c5 = st.columns(5)
@@ -12993,10 +13080,17 @@ elif mode == mode_options[1]:
             with col_chart_opt2:
                 # OLD: use_log_scale = st.checkbox("📐 開啟對數座標 (Log Scale) - 觀察長期斜率必備", value=True if selected_interval in ["1d", "1wk"] else False)
                 # NEW: [v24.14 預設關閉對數座標 + 新增顯示 K 線根數選擇器，徹底解決圖表被壓縮到最右邊的問題！]
-                c_sub_opt1, c_sub_opt2 = st.columns(2)
+                c_sub_opt1, c_sub_opt2, c_sub_opt3 = st.columns([1.2, 1.5, 1.5])
                 with c_sub_opt1:
                     use_log_scale = st.checkbox("📐 開啟對數座標 (Log Scale)", value=False, help="預設關閉以便清晰檢視買入位、結構止損位與止盈目標價", key=f"log_scale_{fmt_ticker}_{selected_interval}")
                 with c_sub_opt2:
+                    show_diag_rr_box = st.checkbox(
+                        "🎯 顯示紅綠盈虧比範框 (開/關)",
+                        value=True,
+                        help="在 K 線圖上像多股同列一樣畫出富途風格『綠色止盈目標框』與『紅色止損風險框』；取消勾選即可隨時關閉色塊！",
+                        key=f"show_diag_rr_box_{fmt_ticker}_{selected_interval}"
+                    )
+                with c_sub_opt3:
                     chart_window_choice = st.selectbox(
                         "🔍 圖表顯示 K 線範圍:",
                         ["最近 120 根 K 線 (約半年，最清晰)", "最近 200 根 K 線 (約10個月)", "最近 300 根 K 線 (約1年半)", "全部歷史 K 線"],
@@ -13123,32 +13217,93 @@ elif mode == mode_options[1]:
                 #     fig.add_hline(y=chart_entry, line_dash="dot", line_color="blue", annotation_text=f"Entry {chart_entry:.2f}", annotation_position="top left", row=1, col=1)
                 #     fig.add_hline(y=chart_sl, line_dash="dash", line_color="red", annotation_text=f"SL {chart_sl:.2f}", annotation_position="top left", row=1, col=1)
                 # NEW: [v24.14] 在 K 線圖上清晰標示建議買入位、結構止損位、結構止盈位與實際盈虧比 R:R！
-                if chart_plan != "WATCH":
-                    # [v26.0 修復圖表盈虧比因保本移位而暴增漂移之漏洞] 始終使用初始結構止損 (chart_initial_sl) 計算固定初始盈虧比 _c_rr
-                    _ref_init_sl = chart_initial_sl if ('chart_initial_sl' in locals() and chart_initial_sl > 0) else chart_sl
-                    _c_risk = abs(chart_entry - _ref_init_sl)
-                    _c_rr = abs(chart_tp - chart_entry) / _c_risk if _c_risk > 0 else 0.0
-                    _tp_pct = (chart_tp - chart_entry) / chart_entry * 100.0
-                    _sl_pct = (_ref_init_sl - chart_entry) / chart_entry * 100.0
-                    if abs(chart_sl - _ref_init_sl) > 1e-3:
+                # [v52.0 新增：即使處於 WATCH 觀望狀態，若開啟紅綠盈虧比範框，亦自動調用多頭/空頭結構參考計劃繪製紅綠範框]
+                _draw_plan_dir = chart_plan
+                _draw_entry, _draw_sl, _draw_init_sl, _draw_tp = chart_entry, chart_sl, (chart_initial_sl if ('chart_initial_sl' in locals() and chart_initial_sl > 0) else chart_sl), chart_tp
+                if _draw_plan_dir == "WATCH" and show_diag_rr_box:
+                    _ref_eval = df.attrs.get("long_plan_eval" if pass_count >= short_pass_count else "short_plan_eval", {})
+                    if _ref_eval and float(_ref_eval.get("entry", 0)) > 0:
+                        _draw_plan_dir = "LONG" if pass_count >= short_pass_count else "SHORT"
+                        _draw_entry = float(_ref_eval.get("entry", chart_entry))
+                        _draw_sl = float(_ref_eval.get("sl", chart_sl))
+                        _draw_init_sl = _draw_sl
+                        _draw_tp = float(_ref_eval.get("tp", chart_tp))
+
+                if _draw_plan_dir != "WATCH":
+                    _ref_init_sl = _draw_init_sl if _draw_init_sl > 0 else _draw_sl
+                    _c_risk = abs(_draw_entry - _ref_init_sl)
+                    _c_rr = abs(_draw_tp - _draw_entry) / _c_risk if _c_risk > 0 else 0.0
+                    _tp_pct = (_draw_tp - _draw_entry) / max(_draw_entry, 1e-6) * 100.0
+                    _sl_pct = (_ref_init_sl - _draw_entry) / max(_draw_entry, 1e-6) * 100.0
+
+                    # [v52.0 富途牛牛式「紅綠盈虧比範框 (Green Profit Box & Red Risk Box)」+ 一鍵開關]
+                    if show_diag_rr_box and len(x_dates) >= 5 and _draw_entry > 0 and _ref_init_sl > 0 and _draw_tp > 0:
+                        _box_x0 = x_dates[max(0, int(len(x_dates) * 0.62))]
+                        _box_x1 = x_dates[-1]
+                        _box_mid_x = x_dates[max(0, int(len(x_dates) * 0.81))]
+                        # 1. 綠色止盈目標範框 (Entry -> TP)
+                        fig.add_shape(
+                            type="rect",
+                            x0=_box_x0, x1=_box_x1,
+                            y0=min(_draw_entry, _draw_tp), y1=max(_draw_entry, _draw_tp),
+                            fillcolor="rgba(0, 184, 101, 0.16)",
+                            line=dict(color="rgba(0, 184, 101, 0.78)", width=1.5, dash="dot"),
+                            row=1, col=1
+                        )
+                        # 2. 紅色止損風險範框 (Entry -> SL)
+                        fig.add_shape(
+                            type="rect",
+                            x0=_box_x0, x1=_box_x1,
+                            y0=min(_draw_entry, _ref_init_sl), y1=max(_draw_entry, _ref_init_sl),
+                            fillcolor="rgba(242, 54, 69, 0.18)",
+                            line=dict(color="rgba(242, 54, 69, 0.80)", width=1.5, dash="dot"),
+                            row=1, col=1
+                        )
+                        # 3. 富途風格懸浮盈虧比標籤 (直接顯示於綠色與紅色範框內)
+                        fig.add_annotation(
+                            x=_box_mid_x,
+                            y=(_draw_entry + _draw_tp) / 2.0,
+                            text=f"🎯 目標價: {_draw_tp:.2f} ({_tp_pct:+.2f}%)<br><b>風險/回報比: {_c_rr:.2f} R</b>",
+                            showarrow=False,
+                            font=dict(size=11.5, color="#FFFFFF"),
+                            bgcolor="rgba(0, 150, 80, 0.86)",
+                            bordercolor="#00B865",
+                            borderwidth=1,
+                            borderpad=4,
+                            row=1, col=1
+                        )
+                        fig.add_annotation(
+                            x=_box_mid_x,
+                            y=(_draw_entry + _ref_init_sl) / 2.0,
+                            text=f"🛡️ 止損價: {_ref_init_sl:.2f} ({_sl_pct:+.2f}%)<br><b>1R 防守風險區間</b>",
+                            showarrow=False,
+                            font=dict(size=11, color="#FFFFFF"),
+                            bgcolor="rgba(215, 35, 50, 0.86)",
+                            bordercolor="#F23645",
+                            borderwidth=1,
+                            borderpad=4,
+                            row=1, col=1
+                        )
+
+                    if abs(_draw_sl - _ref_init_sl) > 1e-3:
                         fig.add_hline(
-                            y=chart_sl, line_dash="dot", line_width=2, line_color="#FF6D00",
-                            annotation_text=f"🛡️ 富途打和保本止損線: {chart_sl:.2f}",
+                            y=_draw_sl, line_dash="dot", line_width=2, line_color="#FF6D00",
+                            annotation_text=f"🛡️ 富途打和保本止損線: {_draw_sl:.2f}",
                             annotation_position="bottom right", annotation_font=dict(color="#E65100", size=11), row=1, col=1
                         )
                     fig.add_hline(
-                        y=chart_tp, line_dash="dash", line_width=2, line_color="#00C853",
-                        annotation_text=f"🎯 結構止盈 TP: {chart_tp:.2f} ({_tp_pct:+.1f}% ｜ 盈虧比 {_c_rr:.2f}R)",
+                        y=_draw_tp, line_dash="dash", line_width=2, line_color="#00C853",
+                        annotation_text=f"🎯 結構止盈 TP: {_draw_tp:.2f} ({_tp_pct:+.1f}% ｜ 盈虧比 {_c_rr:.2f}R)",
                         annotation_position="top left", annotation_font=dict(color="#007E33", size=12), row=1, col=1
                     )
                     fig.add_hline(
-                        y=chart_entry, line_dash="solid", line_width=2, line_color="#2962FF",
-                        annotation_text=f"📌 建議{'買入' if chart_plan == 'LONG' else '沽空'}位 Entry: {chart_entry:.2f}",
+                        y=_draw_entry, line_dash="solid", line_width=2, line_color="#2962FF",
+                        annotation_text=f"📌 {'建議' if chart_plan != 'WATCH' else '參考'}{'買入' if _draw_plan_dir == 'LONG' else '沽空'}位 Entry: {_draw_entry:.2f}",
                         annotation_position="top left", annotation_font=dict(color="#2962FF", size=12), row=1, col=1
                     )
                     fig.add_hline(
-                        y=chart_sl, line_dash="dash", line_width=2, line_color="#D50000",
-                        annotation_text=f"🛡️ 結構止損 SL: {chart_sl:.2f} ({_sl_pct:+.1f}%)",
+                        y=_ref_init_sl, line_dash="dash", line_width=2, line_color="#D50000",
+                        annotation_text=f"🛡️ 結構止損 SL: {_ref_init_sl:.2f} ({_sl_pct:+.1f}%)",
                         annotation_position="bottom left", annotation_font=dict(color="#D50000", size=12), row=1, col=1
                     )
 
@@ -13226,9 +13381,9 @@ elif mode == mode_options[1]:
                         if not valid_lows.empty and not valid_highs.empty:
                             min_y = float(valid_lows.min()) * 0.92
                             max_y = float(valid_highs.max()) * 1.08
-                            if chart_plan != "WATCH":
-                                min_y = min(min_y, float(chart_sl) * 0.96, float(chart_tp) * 0.96)
-                                max_y = max(max_y, float(chart_sl) * 1.04, float(chart_tp) * 1.04)
+                            if _draw_plan_dir != "WATCH":
+                                min_y = min(min_y, float(_ref_init_sl) * 0.96, float(_draw_tp) * 0.96)
+                                max_y = max(max_y, float(_ref_init_sl) * 1.04, float(_draw_tp) * 1.04)
                             if min_y > 0 and max_y > 0:
                                 log_min_y = math.log10(min_y)
                                 log_max_y = math.log10(max_y)
@@ -13243,9 +13398,9 @@ elif mode == mode_options[1]:
                     try:
                         lin_min = float(plot_df['Low'].min())
                         lin_max = float(plot_df['High'].max())
-                        if chart_plan != "WATCH":
-                            lin_min = min(lin_min, float(chart_sl), float(chart_entry), float(chart_tp))
-                            lin_max = max(lin_max, float(chart_sl), float(chart_entry), float(chart_tp))
+                        if _draw_plan_dir != "WATCH":
+                            lin_min = min(lin_min, float(_ref_init_sl), float(_draw_entry), float(_draw_tp))
+                            lin_max = max(lin_max, float(_ref_init_sl), float(_draw_entry), float(_draw_tp))
                         pad = (lin_max - lin_min) * 0.08 if lin_max > lin_min else lin_max * 0.05
                         fig.update_yaxes(type="linear", range=[max(0, lin_min - pad), lin_max + pad], row=1, col=1)
                     except Exception:
