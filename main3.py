@@ -9788,15 +9788,141 @@ def _classify_holding_instrument_and_direction(
     }
 
 
+def render_color_zone_header(title: str, subtitle: str = "", theme: str = "indigo") -> None:
+    """
+    [v56.0 全系統色彩分區視覺標題帶]
+    支援主題：indigo (持倉總覽), cyan (指數ETF), green (做多專區), red (做空專區), orange (多股同列/工具), blue (大市/港美雷達), slate (觀望)
+    """
+    palettes = {
+        "indigo": ("#3730A3", "#EEF2FF", "#6366F1", "#FFFFFF"),
+        "cyan":   ("#0E7490", "#ECFEFF", "#06B6D4", "#FFFFFF"),
+        "green":  ("#15803D", "#F0FDF4", "#22C55E", "#FFFFFF"),
+        "red":    ("#B91C1C", "#FEF2F2", "#EF4444", "#FFFFFF"),
+        "orange": ("#C2410C", "#FFF7ED", "#F97316", "#FFFFFF"),
+        "blue":   ("#1D4ED8", "#EFF6FF", "#3B82F6", "#FFFFFF"),
+        "slate":  ("#334155", "#F8FAFC", "#64748B", "#FFFFFF"),
+    }
+    bg_dark, bg_light, border_col, txt_col = palettes.get(theme, palettes["indigo"])
+    sub_html = f'<span style="font-size:12.5px; font-weight:500; opacity:0.92; margin-left:10px;">{subtitle}</span>' if subtitle else ""
+    html = (
+        f'<div translate="no" class="notranslate" style="margin-top:10px; margin-bottom:6px; border:2px solid {border_col}; border-radius:10px; overflow:hidden; box-shadow:0 2px 6px rgba(15,23,42,0.06);">'
+        f'<div style="background:{bg_dark}; color:{txt_col}; padding:8px 14px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap;">'
+        f'<div style="font-size:15px; font-weight:800; letter-spacing:0.3px;">{title}{sub_html}</div>'
+        f'</div></div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _render_color_boxed_holdings_html_table(rows_list: List[Dict[str, Any]], theme: str = "green", is_etf: bool = False) -> None:
+    """
+    [v56.0 極簡零截斷彩色邊框表格]
+    徹底取代舊版「半截 st.dataframe + 下方長篇重複文字」，在單一彩色框內 100% 全寬顯示每隻持倉的核心數字與一句話行動指令！
+    """
+    palettes = {
+        "cyan":  {"border": "#06B6D4", "hdr_bg": "#E0F2FE", "hdr_txt": "#0369A1", "row_even": "#F8FAFC"},
+        "green": {"border": "#22C55E", "hdr_bg": "#DCFCE7", "hdr_txt": "#15803D", "row_even": "#F8FAFC"},
+        "red":   {"border": "#EF4444", "hdr_bg": "#FEE2E2", "hdr_txt": "#B91C1C", "row_even": "#FFFBFB"},
+    }
+    pal = palettes.get(theme, palettes["green"])
+    if not rows_list:
+        st.markdown(
+            f'<div style="border:1.5px dashed {pal["border"]}; border-radius:8px; padding:8px 14px; margin-bottom:10px; color:#64748B; font-size:13px; background:#FFFFFF;">'
+            f'（此分類目前無持倉股票）</div>',
+            unsafe_allow_html=True
+        )
+        return
+
+    if is_etf:
+        headers = ["🔍 診斷", "📌 指數 / 行業 ETF", "🏷️ 類型", "💰 現價", "📊 均線結構 (20 / 50 / 200MA)", "🚦 今日一句話配置指令"]
+    else:
+        headers = ["🔍 診斷", "📌 持倉股票", "🧭 方向", "💰 現價", "🎯 買入成本", "📈 浮盈%", "🛡️ 止損 SL", "🎯 目標 TP", "📊 均線結構", "🚦 今日一句話行動指令"]
+
+    th_cells = "".join(
+        f'<th style="padding:7px 10px; text-align:left; font-size:12.5px; font-weight:800; color:{pal["hdr_txt"]}; border-bottom:2px solid {pal["border"]}; white-space:nowrap;">{h}</th>'
+        for h in headers
+    )
+
+    body_rows_html = []
+    for idx, r in enumerate(rows_list):
+        bg_row = "#FFFFFF" if idx % 2 == 0 else pal["row_even"]
+        link_url = r.get("link_url", "#")
+        btn_html = (
+            f'<a href="{link_url}" target="_self" style="display:inline-block; background:#1E293B; color:#FFFFFF; text-decoration:none; '
+            f'padding:3px 9px; border-radius:5px; font-size:12px; font-weight:700; white-space:nowrap;">🔍 診斷</a>'
+        )
+        action_lvl = r.get("action_level", "hold")
+        if action_lvl == "clear":
+            act_bg, act_fg, act_bd = "#FEE2E2", "#B91C1C", "#EF4444"
+        elif action_lvl == "trim":
+            act_bg, act_fg, act_bd = "#FEF3C7", "#B45309", "#F59E0B"
+        else:
+            act_bg, act_fg, act_bd = "#DCFCE7", "#15803D", "#22C55E"
+
+        act_pill = (
+            f'<span style="display:inline-block; background:{act_bg}; color:{act_fg}; border:1px solid {act_bd}; '
+            f'padding:2px 8px; border-radius:6px; font-weight:800; font-size:12.5px; margin-right:6px;">{r.get("short_verdict", "")}</span>'
+            f'<span style="font-size:12.5px; color:#334155; font-weight:600;">{r.get("short_reason", "")}</span>'
+        )
+
+        if is_etf:
+            cells = [
+                f'<td style="padding:7px 10px; white-space:nowrap;">{btn_html}</td>',
+                f'<td style="padding:7px 10px; font-weight:800; color:#0F172A; font-size:13.5px; white-space:nowrap;">{r.get("stock_label", "")}</td>',
+                f'<td style="padding:7px 10px; font-size:12.5px; color:#0369A1; font-weight:700; white-space:nowrap;">{r.get("etf_type", "")}</td>',
+                f'<td style="padding:7px 10px; font-family:monospace; font-weight:800; font-size:13.5px; color:#0F172A; white-space:nowrap;">{r.get("price_str", "")}</td>',
+                f'<td style="padding:7px 10px; font-size:12.5px; font-weight:600; color:#334155; white-space:nowrap;">{r.get("ma_short_str", "")}</td>',
+                f'<td style="padding:7px 10px;">{act_pill}</td>',
+            ]
+        else:
+            pnl_val = float(r.get("pnl_val", 0.0))
+            has_cost = bool(r.get("has_cost", False))
+            if not has_cost:
+                pnl_badge = '<span style="color:#64748B; font-size:12px;">未鎖定</span>'
+            elif pnl_val >= 0:
+                pnl_badge = f'<span style="background:#DCFCE7; color:#15803D; padding:2px 7px; border-radius:5px; font-weight:800; font-family:monospace; font-size:12.5px;">+{pnl_val:.2f}%</span>'
+            else:
+                pnl_badge = f'<span style="background:#FEE2E2; color:#B91C1C; padding:2px 7px; border-radius:5px; font-weight:800; font-family:monospace; font-size:12.5px;">{pnl_val:.2f}%</span>'
+
+            dir_badge = (
+                '<span style="background:#DCFCE7; color:#15803D; padding:2px 7px; border-radius:5px; font-weight:800; font-size:12px;">🟢 做多</span>'
+                if r.get("dir_code") == "LONG"
+                else '<span style="background:#FEE2E2; color:#B91C1C; padding:2px 7px; border-radius:5px; font-weight:800; font-size:12px;">🔴 做空</span>'
+            )
+
+            cells = [
+                f'<td style="padding:7px 10px; white-space:nowrap;">{btn_html}</td>',
+                f'<td style="padding:7px 10px; font-weight:800; color:#0F172A; font-size:13.5px; white-space:nowrap;">{r.get("stock_label", "")}</td>',
+                f'<td style="padding:7px 10px; white-space:nowrap;">{dir_badge}</td>',
+                f'<td style="padding:7px 10px; font-family:monospace; font-weight:800; font-size:13.5px; color:#0F172A; white-space:nowrap;">{r.get("price_str", "")}</td>',
+                f'<td style="padding:7px 10px; font-family:monospace; font-size:13px; color:#334155; white-space:nowrap;">{r.get("cost_str", "-")}</td>',
+                f'<td style="padding:7px 10px; white-space:nowrap;">{pnl_badge}</td>',
+                f'<td style="padding:7px 10px; font-family:monospace; font-weight:800; font-size:13px; color:#DC2626; white-space:nowrap;">{r.get("sl_str", "-")}</td>',
+                f'<td style="padding:7px 10px; font-family:monospace; font-weight:800; font-size:13px; color:#16A34A; white-space:nowrap;">{r.get("tp_str", "-")}</td>',
+                f'<td style="padding:7px 10px; font-size:12.5px; font-weight:700; color:#1E293B; white-space:nowrap;">{r.get("ma_short_str", "")}</td>',
+                f'<td style="padding:7px 10px;">{act_pill}</td>',
+            ]
+
+        body_rows_html.append(f'<tr style="background:{bg_row}; border-bottom:1px solid #E2E8F0;">{"".join(cells)}</tr>')
+
+    table_html = (
+        f'<div translate="no" class="notranslate" style="border:2px solid {pal["border"]}; border-radius:10px; overflow-x:auto; margin-bottom:12px; background:#FFFFFF; box-shadow:0 1px 4px rgba(0,0,0,0.04);">'
+        f'<table style="width:100%; border-collapse:collapse; font-family:-apple-system,BlinkMacSystemFont,sans-serif;">'
+        f'<thead style="background:{pal["hdr_bg"]};"><tr>{th_cells}</tr></thead>'
+        f'<tbody>{"".join(body_rows_html)}</tbody>'
+        f'</table></div>'
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
 def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> None:
     """
-    [v55.0 系統化六維分類升級版]
-    自動偵測用戶之「持倉」分組（如名稱含『持倉』、『Holdings』、『Portfolio』或已鎖定持倉），
-    並嚴格按照：
-      1. 📊 【追蹤指數及行業 ETF 專區】（分開 🇭🇰 港股 ETF 與 🇺🇸 美股 ETF）
-      2. 🇭🇰 【港股個股專區】（分開 🟢 港股做多持倉 vs 🔴 港股做空持倉）
-      3. 🇺🇸 【美股個股專區】（分開 🟢 美股做多持倉 vs 🔴 美股做空持倉）
-    結合恒生指數 (^HSI) 與美股標普500 (^GSPC) 實時大市狀態，逐類給予針對性清倉、減倉、對沖與重新分配指引！
+    [v56.0 色彩分區 + 極簡零截斷重構版]
+    - 整個「持倉分析」以醒目【🟪 皇家靛紫框】獨立包圍
+    - 內部嚴格按顏色分框、上下全寬排列：
+        1. 💠 青藍框：【📊 追蹤指數 / 行業 ETF 專區】(港股 ETF / 美股 ETF)
+        2. 🟩 翡翠綠框：【🟢 做多持倉專區】(🇭🇰 港股做多 / 🇺🇸 美股做多)
+        3. 🟥 玫瑰紅框：【🔴 做空持倉專區】(🇭🇰 港股做空 / 🇺🇸 美股做空)
+    - 徹底刪除重複長文字，每隻股票一行睇晒「現價、成本、浮盈%、止損、目標、均線、今日一句話指令」！
     """
     wl_dict = st.session_state.watchlist_dict
     locked_map = persistent_data.get("user_locked_positions", {})
@@ -9808,8 +9934,6 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
     hold_tickers: List[str] = []
     stale_locked_tickers: List[str] = []
     if active_hold_cat:
-        # [v55.1 關鍵修復] 當用戶已建立「持倉」分組時，100% 嚴格只追蹤「持倉」分組內的股票！
-        # 絕不將過往在個股診斷頁測試/鎖定過、但不在「持倉」分組內的股票 (如 AAPL、FOXA) 混入持倉分析名單！
         for t in wl_dict.get(active_hold_cat, []):
             ft, _, _, _, _ = format_and_detect_market(t)
             if ft not in hold_tickers:
@@ -9824,47 +9948,49 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
             if ft not in hold_tickers:
                 hold_tickers.append(ft)
 
-    with st.expander(
-        f"🛡️ 【持倉分組 × 大市見頂/轉勢每日智能風控與調倉導航中心】"
-        f"（系統化劃分：📊 指數ETF ｜ 🇭🇰 港股做多/做空 ｜ 🇺🇸 美股做多/做空 — 共追蹤 {len(hold_tickers)} 隻標的）",
-        expanded=True
-    ):
+    # 渲染紫色頂部橫幅，清楚標示呢個區塊係「🛡️ 持倉分析專區」
+    render_color_zone_header(
+        f"🛡️ 【持倉分析專區】分組「{active_hold_cat or '持倉'}」每日大市聯動體檢（共 {len(hold_tickers)} 隻）",
+        subtitle="🟪 紫色專區：自動區分 指數ETF(青藍) ｜ 做多持倉(綠色) ｜ 做空持倉(紅色)",
+        theme="indigo"
+    )
+
+    with st.expander(f"📂 點擊展開 / 收合：持倉分析詳情與調倉指令（目前追蹤 {len(hold_tickers)} 隻）", expanded=True):
         if not active_hold_cat:
             hc1, hc2 = st.columns([3.5, 1.5])
             with hc1:
-                st.caption("💡 系統支援自動追蹤名為 **「持倉」** 的自選分組。你可以點擊右方按鈕一鍵建立「💼 持倉」分組並同步現有鎖定持倉！")
+                st.caption("💡 你可以點擊右方按鈕一鍵建立「💼 持倉」分組。")
             with hc2:
                 if st.button("➕ 一鍵建立「💼 持倉」分組", key=f"btn_init_hold_cat_{context_key}", use_container_width=True):
-                    wl_dict["💼 持倉"] = list(hold_tickers) if hold_tickers else ["2800.HK", "1929.HK", "2018.HK", "VOO", "NVDA"]
+                    wl_dict["💼 持倉"] = list(hold_tickers) if hold_tickers else ["2800.HK", "1929.HK", "2018.HK", "VOO"]
                     save_persisted_state_to_disk(persistent_data, wl_dict)
-                    st.toast("✅ 已建立「💼 持倉」分組！")
                     st.rerun()
 
         if not hold_tickers:
-            st.info("目前你的「持倉」分組尚無股票。請將你手頭持有的港股、美股或指數 ETF 加入名為「持倉」的分組，系統即會自動按【港股/美股 × 做多/做空 × 指數ETF】分門別類為你進行大市聯動診斷！")
+            st.info("目前「持倉」分組尚無股票。請將手頭持有的港股、美股或 ETF 加入「持倉」分組。")
             return
 
-        # 1. 診斷港股 (^HSI) 與美股 (^GSPC) 兩大市場當前所處階段
-        hk_reg = _diagnose_single_market_index_regime("^HSI", "🇭🇰 港股恒生指數 (^HSI)")
-        us_reg = _diagnose_single_market_index_regime("^GSPC", "🇺🇸 美股標普500 (^GSPC)")
+        # 1. 極簡大市狀態雙欄橫幅 (只講結論，刪減長篇文字)
+        hk_reg = _diagnose_single_market_index_regime("^HSI", "🇭🇰 恒指")
+        us_reg = _diagnose_single_market_index_regime("^GSPC", "🇺🇸 標普500")
 
-        reg_c1, reg_c2 = st.columns(2)
-        with reg_c1:
-            render_atomic_alert(
-                f"**{hk_reg['regime_title']}**｜最新 **{hk_reg['close']:,.0f}** ({hk_reg['ret_1d_pct']:+.2f}%)｜20MA: {hk_reg['sma20']:,.0f}｜50MA: {hk_reg['sma50']:,.0f}\n\n"
-                f"- 🟢 **港股多頭持倉指引**：{hk_reg['long_alloc_advice']}\n"
-                f"- 🔴 **港股空頭持倉指引**：{hk_reg['short_alloc_advice']}",
-                hk_reg["alert_kind"]
-            )
-        with reg_c2:
-            render_atomic_alert(
-                f"**{us_reg['regime_title']}**｜最新 **{us_reg['close']:,.0f}** ({us_reg['ret_1d_pct']:+.2f}%)｜20MA: {us_reg['sma20']:,.0f}｜50MA: {us_reg['sma50']:,.0f}\n\n"
-                f"- 🟢 **美股多頭持倉指引**：{us_reg['long_alloc_advice']}\n"
-                f"- 🔴 **美股空頭持倉指引**：{us_reg['short_alloc_advice']}",
-                us_reg["alert_kind"]
-            )
+        _hk_bg = "#FEE2E2" if hk_reg["alert_kind"] == "error" else ("#FEF3C7" if hk_reg["alert_kind"] == "warning" else "#DCFCE7")
+        _hk_bd = "#EF4444" if hk_reg["alert_kind"] == "error" else ("#F59E0B" if hk_reg["alert_kind"] == "warning" else "#22C55E")
+        _us_bg = "#FEE2E2" if us_reg["alert_kind"] == "error" else ("#FEF3C7" if us_reg["alert_kind"] == "warning" else "#DCFCE7")
+        _us_bd = "#EF4444" if us_reg["alert_kind"] == "error" else ("#F59E0B" if us_reg["alert_kind"] == "warning" else "#22C55E")
 
-        # 2. 批量預載並逐隻分類診斷
+        st.markdown(
+            f'<div translate="no" class="notranslate" style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;">'
+            f'<div style="background:{_hk_bg}; border-left:5px solid {_hk_bd}; padding:8px 12px; border-radius:6px; font-size:13px; color:#0F172A;">'
+            f'<b>{hk_reg["regime_title"]}</b>｜現價 <b>{hk_reg["close"]:,.0f}</b> ({hk_reg["ret_1d_pct"]:+.2f}%)｜20MA: {hk_reg["sma20"]:,.0f}｜50MA: {hk_reg["sma50"]:,.0f}'
+            f'</div>'
+            f'<div style="background:{_us_bg}; border-left:5px solid {_us_bd}; padding:8px 12px; border-radius:6px; font-size:13px; color:#0F172A;">'
+            f'<b>{us_reg["regime_title"]}</b>｜現價 <b>{us_reg["close"]:,.0f}</b> ({us_reg["ret_1d_pct"]:+.2f}%)｜20MA: {us_reg["sma20"]:,.0f}｜50MA: {us_reg["sma50"]:,.0f}'
+            f'</div></div>',
+            unsafe_allow_html=True
+        )
+
+        # 2. 批量預載並逐隻分類
         batch_preload_ohlcv_cache(hold_tickers)
         batch_prefetch_extended_hours_quotes(hold_tickers)
 
@@ -9875,7 +10001,6 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
         us_long_rows: List[Dict[str, Any]] = []
         us_short_rows: List[Dict[str, Any]] = []
 
-        urgent_alerts: List[str] = []
         action_clear_cnt, action_trim_cnt, action_hold_cnt = 0, 0, 0
 
         for sym in hold_tickers:
@@ -9914,7 +10039,6 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
             vol_ma50 = float(df_h["Volume"].tail(50).mean()) if "Volume" in df_h.columns else 1.0
             vol_ratio_h = float(df_h["Volume"].iloc[-1]) / max(vol_ma50, 1.0) if "Volume" in df_h.columns else 1.0
 
-            # 呼叫 v55.0 智能三層品種與持倉方向識別器
             cls_info = _classify_holding_instrument_and_direction(
                 fmt_s, stk_nm, mkt_s, c_rth, s50, wl_dict, locked_map, manual_dir_map
             )
@@ -9922,107 +10046,80 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
             etf_sub_type = cls_info["etf_sub_type"]
             etf_label = cls_info["etf_label"]
             pos_dir_code = cls_info["pos_dir_code"]
-            dir_source = cls_info["dir_source"]
 
-            # 計算今日客觀技術結構狀態 (用於對比用戶持倉方向是否出現「持倉與技術面背馳」)
+            # 極簡均線位置標籤 (控制在 10 字內)
             if c_live >= s20 and c_live >= s50 * 0.99:
-                tech_signal_str = "🟢 多頭強勢 (站穩20/50MA)"
-                tech_is_bull = True
-                tech_is_bear = False
+                ma_short_str = f"🟢 站穩 20/50MA"
+                tech_is_bull, tech_is_bear = True, False
             elif c_live >= s50 * 0.975 and s50 >= s200 * 0.985:
-                tech_signal_str = "🛡️ Stage 2 回踩 50MA 支撐"
-                tech_is_bull = True
-                tech_is_bear = False
+                ma_short_str = f"🛡️ 回踩 50MA ({s50:.1f})"
+                tech_is_bull, tech_is_bear = True, False
             elif c_live < s20 and c_live < s50 * 0.985:
-                tech_signal_str = "🔴 空頭弱勢 (失守20/50MA)"
-                tech_is_bull = False
-                tech_is_bear = True
+                ma_short_str = f"🔴 失守 20/50MA"
+                tech_is_bull, tech_is_bear = False, True
             else:
-                tech_signal_str = "🟡 均線交纏整理"
-                tech_is_bull = False
-                tech_is_bear = False
+                ma_short_str = f"🟡 均線交纏 ({s20:.1f})"
+                tech_is_bull, tech_is_bear = False, False
 
-            if l_rec and l_rec.get("dir_code") in ["LONG", "SHORT"]:
+            has_cost = bool(l_rec and l_rec.get("dir_code") in ["LONG", "SHORT"])
+            if has_cost:
                 entry_p = float(l_rec.get("entry", c_rth))
                 sl_p = float(l_rec.get("fixed_sl", s20 - 0.5 * atr_h if pos_dir_code == "LONG" else s20 + 0.5 * atr_h))
                 tp_p = float(l_rec.get("fixed_tp", entry_p + 2.5 * atr_h if pos_dir_code == "LONG" else entry_p - 2.5 * atr_h))
                 bars_held = int(l_rec.get("bars_held_since_entry", 3))
             else:
                 entry_p = c_rth
-                if is_etf and etf_sub_type == "LONG_ETF":
-                    sl_p = round(min(s50 - 0.5 * atr_h, c_rth - 2.0 * atr_h), 2)
-                    tp_p = round(c_rth + 3.5 * atr_h, 2)
-                elif pos_dir_code == "LONG":
-                    sl_p = round(min(s20 - 0.5 * atr_h, c_rth - 1.5 * atr_h), 2)
-                    tp_p = round(c_rth + 3.0 * atr_h, 2)
-                else:
-                    sl_p = round(max(s20 + 0.5 * atr_h, c_rth + 1.5 * atr_h), 2)
-                    tp_p = round(max(0.01, c_rth - 3.0 * atr_h), 2)
+                sl_p = round(min(s20 - 0.5 * atr_h, c_rth - 1.5 * atr_h), 2) if pos_dir_code == "LONG" else round(max(s20 + 0.5 * atr_h, c_rth + 1.5 * atr_h), 2)
+                tp_p = round(c_rth + 3.0 * atr_h, 2) if pos_dir_code == "LONG" else round(max(0.01, c_rth - 3.0 * atr_h), 2)
                 bars_held = 0
 
-            # --- 分支 A：📊 追蹤指數 / 行業 / 槓桿反向 ETF 專屬診斷邏輯 ---
+            # --- A. 指數 / 行業 ETF ---
             if is_etf:
-                pnl_pct = ((c_live - entry_p) / max(entry_p, 1e-6)) * 100.0
                 if etf_sub_type == "INVERSE_SHORT_ETF":
-                    # 反向買跌 ETF (如 7500.HK, SQQQ)：在牛市或見底反彈時應立即平倉避險
                     if reg_code in ["BULL_CONFIRMED", "BOTTOM_REVERSAL"] or c_live < s20:
                         action_clear_cnt += 1
-                        verdict = "🚨 大市轉強/反向ETF破位・建議立即平倉撤退 (防耗損)"
-                        advice_detail = f"此為反向對沖 ETF ({etf_label})，目前大市處於【{m_reg['regime_title']}】或價格跌穿 20MA ({s20:.2f})，繼續持有反向 ETF 會承受嚴重波動率耗損，建議立即平倉！"
-                        urgent_alerts.append(f"🚨 **[指數ETF] {fmt_s} {stk_nm} ({etf_label})**：{verdict}")
+                        act_lvl, s_verd, s_reas = "clear", "🚨 立即平倉", "大市轉強/破20MA防耗損"
                     else:
                         action_hold_cnt += 1
-                        verdict = "🛡️ 大市偏弱・反向對沖ETF發揮保護作用 (見好即收)"
-                        advice_detail = f"目前大市受壓，反向 ETF 正發揮對沖組合回撤作用；惟反向 ETF 不宜長揸，觸及目標 {tp_p:.2f} 或大市站回 9EMA 即鎖潤。"
+                        act_lvl, s_verd, s_reas = "hold", "🛡️ 續抱對沖", f"大市偏弱，見 {tp_p:.1f} 鎖潤"
                 elif etf_sub_type == "LEV_LONG_ETF":
-                    # 槓桿做多 ETF (如 7200.HK, TQQQ, SOXL)
                     if c_live < s20 or reg_code == "BEAR_BREAKDOWN":
                         action_clear_cnt += 1
-                        verdict = "🚨 槓桿ETF跌穿20MA / 大市破位・立即清倉防倍數回撤"
-                        advice_detail = f"槓桿 ETF ({etf_label}) 在震盪或下跌市有嚴重耗損！現價 {c_live:.2f} 已失守 20MA ({s20:.2f})，請立即清倉或換回無槓桿寬基 ETF。"
-                        urgent_alerts.append(f"🚨 **[槓桿ETF] {fmt_s} {stk_nm}**：{verdict}")
+                        act_lvl, s_verd, s_reas = "clear", "🚨 立即清倉", f"失守 20MA ({s20:.1f}) 防倍數回撤"
                     elif reg_code == "TOPPING_WARNING":
                         action_trim_cnt += 1
-                        verdict = "💰 大市高位派發預警・槓桿ETF建議先減半鎖潤"
-                        advice_detail = f"大市出現高位派發信號，槓桿 ETF 宜主動減倉 1/2 鎖定複利，餘倉防守位上移至 9EMA ({e9:.2f})。"
+                        act_lvl, s_verd, s_reas = "trim", "💰 減半鎖潤", f"大市見頂預警，推守 9EMA ({e9:.1f})"
                     else:
                         action_hold_cnt += 1
-                        verdict = "✅ 大市順風・槓桿ETF沿 9EMA/20MA 順勢持有"
-                        advice_detail = f"站穩 20MA ({s20:.2f}) 之上，防守位守 {sl_p:.2f}。"
+                        act_lvl, s_verd, s_reas = "hold", "✅ 順勢持有", f"站穩 20MA，防守位 {sl_p:.1f}"
                 else:
-                    # 標準寬基 / 行業核心指數 ETF (如 VOO, QQQ, SPY, 2800.HK, 3033.HK)
                     if c_live < s200 * 0.99:
                         action_clear_cnt += 1
-                        verdict = "⚠️ 指數ETF跌穿 200MA 牛熊線・建議減倉防守或加配對沖"
-                        advice_detail = f"核心指數 ETF ({fmt_s}) 現價 {c_live:.2f} 已失守 200MA ({s200:.2f}) 長線牛熊分界線，建議縮減核心倉位比重或逢反抽減倉。"
-                    elif reg_code == "TOPPING_WARNING" and ((c_live - s20) / max(atr_h, 1e-6) >= 2.2):
-                        action_trim_cnt += 1
-                        verdict = "💰 大市短線過熱偏離 20MA・指數ETF勿追高 (可小幅鎖潤)"
-                        advice_detail = f"指數 ETF 短線偏離 20MA ({s20:.2f}) 較遠，且大市近 20 日出貨日偏多，暫停追高加倉，等回踩 20MA/50MA 再吸納。"
+                        act_lvl, s_verd, s_reas = "clear", "⚠️ 減倉防守", f"跌穿 200MA ({s200:.1f}) 牛熊線"
                     elif c_live < s20 and c_live >= s50 * 0.985:
                         action_hold_cnt += 1
-                        verdict = "🎯 指數ETF回踩 50MA 中線支撐區・核心倉位安心持有/分批吸納"
-                        advice_detail = f"寬基/行業 ETF 無個股暴雷風險！目前正回調測試 50MA ({s50:.2f}) 中期支撐且仍處 200MA ({s200:.2f}) 之上，屬健康中線洗盤，安心持有。"
+                        act_lvl, s_verd, s_reas = "hold", "🎯 安心持有/吸納", f"回踩 50MA ({s50:.1f}) 健康洗盤，守 200MA ({s200:.1f})"
                     else:
                         action_hold_cnt += 1
-                        verdict = "✅ 核心指數ETF趨勢穩健・沿 50MA/200MA 長中線安心持有"
-                        advice_detail = f"站穩 20MA ({s20:.2f}) 及 50MA ({s50:.2f}) 之上，作為組合壓艙石安心持有，中線防守參考 50MA ({s50:.2f})。"
+                        act_lvl, s_verd, s_reas = "hold", "✅ 安心長揸", f"趨勢穩健，中線守 50MA ({s50:.1f})"
 
-                etf_row = {
-                    "跳轉診斷": f"/?mode=診斷&ticker={fmt_s}&dir={'SHORT' if etf_sub_type == 'INVERSE_SHORT_ETF' else 'LONG'}&strict={strictness}",
-                    "📌 指數/行業ETF": f"{fmt_s} {stk_nm}",
-                    "🏷️ 屬性 & 現價": f"{etf_label} ｜ {c_live:.2f} {cur_s} ({pnl_pct:+.1f}%)" if l_rec else f"{etf_label} ｜ {c_live:.2f} {cur_s}",
-                    "📊 技術面 & 均線 (20/50/200MA)": f"{tech_signal_str} ({s20:.1f} / {s50:.1f} / {s200:.1f})",
-                    "🚦 今日指數ETF操作建議": verdict,
-                    "📋 完整執行與對沖指引": advice_detail,
+                etf_item = {
+                    "link_url": f"/?mode=診斷&ticker={fmt_s}&dir={'SHORT' if etf_sub_type == 'INVERSE_SHORT_ETF' else 'LONG'}&strict={strictness}",
+                    "stock_label": f"{fmt_s} {stk_nm}",
+                    "etf_type": etf_label,
+                    "price_str": f"{c_live:.2f} {cur_s}",
+                    "ma_short_str": f"{ma_short_str} ({s20:.1f} / {s50:.1f} / {s200:.1f})",
+                    "action_level": act_lvl,
+                    "short_verdict": s_verd,
+                    "short_reason": s_reas,
                 }
                 if mkt_s == "HK":
-                    etf_hk_rows.append(etf_row)
+                    etf_hk_rows.append(etf_item)
                 else:
-                    etf_us_rows.append(etf_row)
+                    etf_us_rows.append(etf_item)
                 continue
 
-            # --- 分支 B：🏢 個股 — 🟢 做多持倉 (Long Equities) ---
+            # --- B. 個股做多 (LONG) ---
             if pos_dir_code == "LONG":
                 pnl_pct = ((c_live - entry_p) / max(entry_p, 1e-6)) * 100.0
                 ext_from_20ma_atr = (c_live - s20) / max(atr_h, 1e-6)
@@ -10031,49 +10128,51 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
 
                 if broke_sl or broke_50ma_vol or tech_is_bear:
                     action_clear_cnt += 1
+                    act_lvl = "clear"
                     if broke_50ma_vol:
-                        verdict = f"🚨 立即清倉多單 + 🔄 符合反手做空三鐵律 (放量{vol_ratio_h:.1f}x跌穿50MA)"
-                        advice_detail = f"【多單破位警報】已跌穿止損 {sl_p:.2f} 且放量擊穿 50MA ({s50:.2f})！請立即清倉多單；若反抽 {s50:.2f} 受阻可順勢反手做空。"
+                        s_verd, s_reas = "🚨 清倉 + 🔄可反手空", f"放量 {vol_ratio_h:.1f}x 跌穿 50MA ({s50:.2f})"
                     elif tech_is_bear and not broke_sl:
-                        verdict = f"⚡ 持倉背馳警告：你持多單但個股已失守20/50MA轉空・建議即減倉/嚴守 {sl_p:.2f}"
-                        advice_detail = f"你在【{dir_source}】標記為做多，惟個股現價 {c_live:.2f} 已同時跌穿 20MA ({s20:.2f}) 與 50MA ({s50:.2f})，技術面已轉弱，建議逢反抽優先離場！"
+                        s_verd, s_reas = "⚡ 背馳減倉/離場", f"你持多單但已失守 20/50MA，嚴守 {sl_p:.2f}"
                     else:
-                        verdict = f"🚨 觸及多頭止損 ({sl_p:.2f})・立即清倉離場 (勿盲目反手)"
-                        advice_detail = f"現價 {c_live:.2f} 已跌穿止損位 {sl_p:.2f}，請嚴守紀律清倉保護本金；因仍在 50MA ({s50:.2f}) 附近或未放量，只平倉勿盲目反手。"
-                    urgent_alerts.append(f"🚨 **[{'港股' if mkt_s == 'HK' else '美股'}做多] {fmt_s} {stk_nm}**：{verdict}")
+                        s_verd, s_reas = "🚨 觸及止損・即清倉", f"已穿止損 {sl_p:.2f} (勿盲目反手)"
                 elif reg_code in ["TOPPING_WARNING", "BEAR_BREAKDOWN"] and (c_live < s20 or ext_from_20ma_atr >= 2.4 or pnl_pct >= 8.0):
                     action_trim_cnt += 1
+                    act_lvl = "trim"
                     if c_live < s20:
-                        verdict = "⚠️ 大市轉弱且個股跌穿 20MA・建議清倉或減倉 70%"
-                        advice_detail = f"大市處於【{m_reg['regime_title']}】，且個股已跌破 20MA ({s20:.2f})，建議主動清倉或減至輕倉避險。"
+                        s_verd, s_reas = "⚠️ 減倉 70% 避險", f"大市偏弱 + 跌破 20MA ({s20:.2f})"
                     else:
-                        verdict = "💰 大市高位預警・趁強主動減半鎖潤 + 推保本"
-                        advice_detail = f"大市出現見頂派發信號，此股偏離 20MA 達 +{ext_from_20ma_atr:.1f}x ATR，建議先賣出 1/2 袋走利潤，餘倉止損上移至 9EMA ({e9:.2f})！"
+                        s_verd, s_reas = "💰 減半鎖潤推保本", f"偏離 20MA 達 +{ext_from_20ma_atr:.1f}ATR，餘倉守 {e9:.2f}"
                 elif bars_held > 8 and pnl_pct < 1.5 and c_live < s10:
                     action_trim_cnt += 1
-                    verdict = f"✂️ 持倉滿 {bars_held} 日動能停滯・建議換馬重新分配"
-                    advice_detail = f"已超過影片 1 建議之『8日黃金發酵觀察期』仍跌穿 10MA ({s10:.2f})，資金效率偏低，建議清出並重新分配至今日雷達 #1 姊妹共振領頭股。"
+                    act_lvl = "trim"
+                    s_verd, s_reas = f"✂️ 滿{bars_held}日換馬", f"跌穿 10MA ({s10:.2f}) 動能停滯"
                 else:
                     action_hold_cnt += 1
-                    _obs_note = f" (🌱處於首8日發酵保護期 Day {max(1, bars_held)}/8)" if 0 < bars_held <= 8 else ""
-                    verdict = f"✅ 多頭結構穩健・安心持有{_obs_note}"
-                    advice_detail = f"站穩 20MA ({s20:.2f}) / 50MA ({s50:.2f}) 支撐區，防守止損設於 {sl_p:.2f}，波段目標 {tp_p:.2f}。"
+                    act_lvl = "hold"
+                    _day_tag = f" (Day {max(1, bars_held)}/8 保護期)" if 0 < bars_held <= 8 else ""
+                    s_verd, s_reas = "✅ 安心持有", f"守穩支撐，止損 {sl_p:.2f} / 目標 {tp_p:.2f}{_day_tag}"
 
-                row_item = {
-                    "跳轉診斷": f"/?mode=診斷&ticker={fmt_s}&dir=LONG&strict={strictness}",
-                    "📌 持倉股票": f"{fmt_s} {stk_nm}",
-                    "💰 現價 & 成本浮盈": f"{c_live:.2f} ({'成本 ' + f'{entry_p:.2f}｜' + f'{pnl_pct:+.2f}%' if l_rec else '未鎖成本'})",
-                    "🛡️ 止損 SL / 目標 TP": f"SL:{sl_p:.2f} / TP:{tp_p:.2f}",
-                    "📊 今日技術面 (20/50MA)": f"{tech_signal_str} ({s20:.2f}/{s50:.2f})",
-                    "🚦 今日大市聯動操作建議": verdict,
-                    "📋 詳細執行與調倉指引": advice_detail,
+                item_d = {
+                    "link_url": f"/?mode=診斷&ticker={fmt_s}&dir=LONG&strict={strictness}",
+                    "stock_label": f"{fmt_s} {stk_nm}",
+                    "dir_code": "LONG",
+                    "price_str": f"{c_live:.2f}",
+                    "cost_str": f"{entry_p:.2f}" if has_cost else "-",
+                    "has_cost": has_cost,
+                    "pnl_val": pnl_pct,
+                    "sl_str": f"{sl_p:.2f}",
+                    "tp_str": f"{tp_p:.2f}",
+                    "ma_short_str": ma_short_str,
+                    "action_level": act_lvl,
+                    "short_verdict": s_verd,
+                    "short_reason": s_reas,
                 }
                 if mkt_s == "HK":
-                    hk_long_rows.append(row_item)
+                    hk_long_rows.append(item_d)
                 else:
-                    us_long_rows.append(row_item)
+                    us_long_rows.append(item_d)
 
-            # --- 分支 C：🏢 個股 — 🔴 做空持倉 (Short Equities) ---
+            # --- C. 個股做空 (SHORT) ---
             else:
                 pnl_pct = ((entry_p - c_live) / max(entry_p, 1e-6)) * 100.0
                 broke_sl_s = (c_live >= sl_p) or (ext_q.get("has_extended_data") and float(ext_q.get("ext_high", c_live) or c_live) >= sl_p)
@@ -10081,53 +10180,82 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
 
                 if broke_sl_s or reclaimed_20_50 or tech_is_bull:
                     action_clear_cnt += 1
+                    act_lvl = "clear"
                     if reclaimed_20_50 and vol_ratio_h >= 1.30:
-                        verdict = f"🚨 立即回補空單 + 🔄 符合軋空反手做多 (放量{vol_ratio_h:.1f}x收復20/50MA)"
-                        advice_detail = f"【空單被夾警報】股價已強勢收復 20MA ({s20:.2f}) 及 50MA ({s50:.2f})，空頭結構徹底破壞！請立即平倉回補，並可順勢反手做多。"
+                        s_verd, s_reas = "🚨 回補 + 🔄可反手多", f"放量收復 20/50MA ({s50:.2f})"
                     elif tech_is_bull and not broke_sl_s:
-                        verdict = f"⚡ 持倉背馳警告：你持空單但個股處於 Stage 2 多頭支撐・極易被夾升請即回補"
-                        advice_detail = f"你在【{dir_source}】標記為做空，惟個股現價 {c_live:.2f} 仍守穩 50MA ({s50:.2f}) / 200MA ({s200:.2f}) 多頭結構（如影片 2 之 NVDA 教訓），建議立即逢低回補平倉！"
+                        s_verd, s_reas = "⚡ 背馳立即回補", f"處於 50MA ({s50:.2f}) 之上多頭支撐防被夾"
                     else:
-                        verdict = f"🚨 升穿空頭止損 ({sl_p:.2f})・立即回補平倉"
-                        advice_detail = f"現價 {c_live:.2f} 已突破空頭防守位 {sl_p:.2f}，嚴禁死扛空單（防無限軋空）！"
-                    urgent_alerts.append(f"🚨 **[{'港股' if mkt_s == 'HK' else '美股'}做空] {fmt_s} {stk_nm}**：{verdict}")
+                        s_verd, s_reas = "🚨 觸及止損・即回補", f"已升穿空頭止損 {sl_p:.2f}"
                 elif reg_code in ["BULL_CONFIRMED", "BOTTOM_REVERSAL"]:
                     action_trim_cnt += 1
-                    verdict = "⚠️ 大市轉強見底・建議空單立即止盈回補 / 縮減倉位"
-                    advice_detail = f"當前大市處於【{m_reg['regime_title']}】，逆大市持有空單極易被夾升嘔凸利潤，建議逢低回補鎖潤並將資金重新分配至多頭領頭羊！"
+                    act_lvl = "trim"
+                    s_verd, s_reas = "⚠️ 逢低止盈回補", "大市轉強防空單被夾升"
                 else:
                     action_hold_cnt += 1
-                    verdict = "✅ 空頭趨勢延續・順勢持有空單"
-                    advice_detail = f"受制於 20MA ({s20:.2f}) / 50MA ({s50:.2f}) 下方，空頭止損守 {sl_p:.2f}，下看目標 {tp_p:.2f}。"
+                    act_lvl = "hold"
+                    s_verd, s_reas = "✅ 順勢持有空單", f"受制均線下方，守 {sl_p:.2f} 下看 {tp_p:.2f}"
 
-                row_item = {
-                    "跳轉診斷": f"/?mode=診斷&ticker={fmt_s}&dir=SHORT&strict={strictness}",
-                    "📌 持倉股票": f"{fmt_s} {stk_nm}",
-                    "💰 現價 & 成本浮盈": f"{c_live:.2f} ({'成本 ' + f'{entry_p:.2f}｜' + f'{pnl_pct:+.2f}%' if l_rec else '未鎖成本'})",
-                    "🛡️ 止損 SL / 目標 TP": f"SL:{sl_p:.2f} / TP:{tp_p:.2f}",
-                    "📊 今日技術面 (20/50MA)": f"{tech_signal_str} ({s20:.2f}/{s50:.2f})",
-                    "🚦 今日大市聯動操作建議": verdict,
-                    "📋 詳細執行與調倉指引": advice_detail,
+                item_d = {
+                    "link_url": f"/?mode=診斷&ticker={fmt_s}&dir=SHORT&strict={strictness}",
+                    "stock_label": f"{fmt_s} {stk_nm}",
+                    "dir_code": "SHORT",
+                    "price_str": f"{c_live:.2f}",
+                    "cost_str": f"{entry_p:.2f}" if has_cost else "-",
+                    "has_cost": has_cost,
+                    "pnl_val": pnl_pct,
+                    "sl_str": f"{sl_p:.2f}",
+                    "tp_str": f"{tp_p:.2f}",
+                    "ma_short_str": ma_short_str,
+                    "action_level": act_lvl,
+                    "short_verdict": s_verd,
+                    "short_reason": s_reas,
                 }
                 if mkt_s == "HK":
-                    hk_short_rows.append(row_item)
+                    hk_short_rows.append(item_d)
                 else:
-                    us_short_rows.append(row_item)
+                    us_short_rows.append(item_d)
 
-        # 3. 頂部六維度持倉結構總覽指標卡
-        total_etf_cnt = len(etf_hk_rows) + len(etf_us_rows)
-        hm1, hm2, hm3, hm4, hm5 = st.columns(5)
-        hm1.metric("🇭🇰 港股個股持倉", f"{len(hk_long_rows) + len(hk_short_rows)} 隻", f"🟢 做多 {len(hk_long_rows)} ｜ 🔴 做空 {len(hk_short_rows)}")
-        hm2.metric("🇺🇸 美股個股持倉", f"{len(us_long_rows) + len(us_short_rows)} 隻", f"🟢 做多 {len(us_long_rows)} ｜ 🔴 做空 {len(us_short_rows)}")
-        hm3.metric("📊 指數/行業 ETF", f"{total_etf_cnt} 隻", f"🇭🇰 港股 {len(etf_hk_rows)} ｜ 🇺🇸 美股 {len(etf_us_rows)}")
-        hm4.metric("🚨 需立即清倉/回補", f"{action_clear_cnt} 隻", "觸及止損或持倉背馳", delta_color="inverse" if action_clear_cnt > 0 else "normal")
-        hm5.metric("💰 建議減倉 / ✅ 續抱", f"減 {action_trim_cnt} / 抱 {action_hold_cnt}", "按大市階段動態調配")
+        # 3. 渲染三大色彩分區框（青藍 ETF 框 ｜ 綠色做多框 ｜ 紅色做空框）—— 100% 全螢幕上下排列、字少精煉！
+        # (一) 💠 青藍框：追蹤指數 / 行業 ETF 專區
+        if etf_hk_rows or etf_us_rows:
+            render_color_zone_header(
+                f"📊 第一區：【追蹤指數 / 行業 ETF 專區】（港股 {len(etf_hk_rows)} 隻 ｜ 美股 {len(etf_us_rows)} 隻）",
+                subtitle="💠 青藍專區：核心 Beta 與對沖配置（同個股分開評估）",
+                theme="cyan"
+            )
+            _render_color_boxed_holdings_html_table(etf_hk_rows + etf_us_rows, theme="cyan", is_etf=True)
 
-        if urgent_alerts:
-            render_atomic_alert_group([("error", msg) for msg in urgent_alerts])
+        # (二) 🟩 翡翠綠框：做多持倉專區（上下分開：港股做多 -> 美股做多）
+        if hk_long_rows or us_long_rows:
+            render_color_zone_header(
+                f"🟢 第二區：【做多持倉 (Long) 專區】（🇭🇰 港股做多 {len(hk_long_rows)} 隻 ｜ 🇺🇸 美股做多 {len(us_long_rows)} 隻）",
+                subtitle="🟩 綠色專區：多頭部位監控（跌穿止損或破 50MA 即亮紅牌）",
+                theme="green"
+            )
+            if hk_long_rows:
+                st.markdown(f"**🇭🇰 港股 — 做多持倉 ({len(hk_long_rows)} 隻)**")
+                _render_color_boxed_holdings_html_table(hk_long_rows, theme="green", is_etf=False)
+            if us_long_rows:
+                st.markdown(f"**🇺🇸 美股 — 做多持倉 ({len(us_long_rows)} 隻)**")
+                _render_color_boxed_holdings_html_table(us_long_rows, theme="green", is_etf=False)
 
-        # 4. 提供一鍵手動修正「持倉方向 / 指數ETF分類」工具列 (自動記憶於本地 JSON)
-        with st.expander("⚙️ 【快速設定/修正持倉方向】指定某隻持倉係「🟢 做多」、「🔴 做空」定係「📊 指數ETF」（亦支援自動從 hk long / hk short 分組讀取）", expanded=False):
+        # (三) 🟥 玫瑰紅框：做空持倉專區（上下分開：港股做空 -> 美股做空）
+        if hk_short_rows or us_short_rows:
+            render_color_zone_header(
+                f"🔴 第三區：【做空持倉 (Short) 專區】（🇭🇰 港股做空 {len(hk_short_rows)} 隻 ｜ 🇺🇸 美股做空 {len(us_short_rows)} 隻）",
+                subtitle="🟥 紅色專區：空頭部位監控（收復 20/50MA 或穿止損即回補防軋空）",
+                theme="red"
+            )
+            if hk_short_rows:
+                st.markdown(f"**🇭🇰 港股 — 做空持倉 ({len(hk_short_rows)} 隻)**")
+                _render_color_boxed_holdings_html_table(hk_short_rows, theme="red", is_etf=False)
+            if us_short_rows:
+                st.markdown(f"**🇺🇸 美股 — 做空持倉 ({len(us_short_rows)} 隻)**")
+                _render_color_boxed_holdings_html_table(us_short_rows, theme="red", is_etf=False)
+
+        # (四) 底部極簡工具列：手動改方向 + 清理非持倉舊鎖定紀錄
+        with st.expander("⚙️ 點擊展開：手動修改某隻持倉嘅【做多 / 做空 / ETF】分類 或 清理舊鎖定紀錄", expanded=False):
             dc1, dc2, dc3 = st.columns([2.2, 2.0, 1.3])
             with dc1:
                 sel_hold_sym = st.selectbox(
@@ -10138,20 +10266,20 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
                 )
             with dc2:
                 sel_hold_role = st.selectbox(
-                    "設定你在『持倉』中的實際部位方向 / 類別",
+                    "設定實際持倉方向 / 類別",
                     options=[
                         ("AUTO", "🤖 自動識別 (從 hk long / hk short 分組或鎖定倉位讀取)"),
                         ("LONG", "🟢 個股 — 我係持倉做多 (Long)"),
                         ("SHORT", "🔴 個股 — 我係持倉做空 (Short)"),
-                        ("ETF_LONG", "📊 指數/行業 ETF — 做多配置 (Long ETF)"),
-                        ("ETF_SHORT", "🛡️ 反向對沖 ETF — 買跌對沖 (Inverse ETF)"),
+                        ("ETF_LONG", "📊 指數/行業 ETF — 做多配置"),
+                        ("ETF_SHORT", "🛡️ 反向對沖 ETF — 買跌對沖"),
                     ],
                     format_func=lambda x: x[1],
                     key=f"sel_hold_dir_role_{context_key}"
                 )
             with dc3:
                 st.write("")
-                if st.button("💾 儲存此持倉分類", key=f"btn_save_hold_role_{context_key}", use_container_width=True, type="primary"):
+                if st.button("💾 儲存設定", key=f"btn_save_hold_role_{context_key}", use_container_width=True, type="primary"):
                     u_k = sel_hold_sym.upper().strip()
                     if sel_hold_role[0] == "AUTO":
                         manual_dir_map.pop(u_k, None)
@@ -10159,132 +10287,13 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
                         manual_dir_map[u_k] = sel_hold_role[0]
                     persistent_data["user_holding_directions"] = manual_dir_map
                     save_persisted_state_to_disk(persistent_data, wl_dict)
-                    st.toast(f"✅ 已更新 {sel_hold_sym} 的持倉分類設定！")
                     st.rerun()
-
-        # 若發現舊鎖定記錄中有不在「持倉」分組內的殘留股票 (如 AAPL, FOXA)，自動過濾並提供一鍵清理按鈕
-        if stale_locked_tickers:
-            st_c1, st_c2 = st.columns([3.8, 1.4])
-            with st_c1:
-                st.caption(f"🧹 系統已自動排除 {len(stale_locked_tickers)} 隻不在「{active_hold_cat}」分組內的舊測試/鎖定紀錄（`{', '.join(stale_locked_tickers)}`），確保持倉分析 100% 只顯示你當前真實持倉！可點擊右方按鈕永久清除舊鎖定紀錄。")
-            with st_c2:
-                if st.button("🧹 一鍵清除非持倉舊鎖定紀錄", key=f"btn_clean_stale_locks_{context_key}", use_container_width=True):
+            if stale_locked_tickers:
+                if st.button(f"🧹 順手清除不在持倉組內的舊測試鎖定紀錄 ({', '.join(stale_locked_tickers)})", key=f"btn_clean_stale_locks_{context_key}"):
                     for _st_tk in stale_locked_tickers:
                         locked_map.pop(_st_tk, None)
                     save_persisted_state_to_disk(persistent_data, wl_dict)
-                    st.toast(f"✅ 已清除 {', '.join(stale_locked_tickers)} 的舊鎖定紀錄！")
                     st.rerun()
-
-        # 5. [v55.1 全螢幕上下排列 + 一眼睇晒所有資訊渲染引擎]
-        def _render_sub_holding_table(rows_list: List[Dict[str, Any]], tbl_key: str, is_etf_tbl: bool = False) -> None:
-            if not rows_list:
-                st.caption("（此分類目前無持倉標的）")
-                return
-            if is_etf_tbl:
-                col_cfg = {
-                    "跳轉診斷": st.column_config.LinkColumn("🔍 診斷", display_text="進入診斷", width="small"),
-                    "📌 指數/行業ETF": st.column_config.TextColumn("📌 指數/行業ETF", width="small"),
-                    "🏷️ 屬性 & 現價": st.column_config.TextColumn("🏷️ 屬性 & 現價", width="medium"),
-                    "📊 技術面 & 均線 (20/50/200MA)": st.column_config.TextColumn("📊 技術面 & 均線", width="medium"),
-                    "🚦 今日指數ETF操作建議": st.column_config.TextColumn("🚦 今日指數ETF操作建議", width="medium"),
-                    "📋 完整執行與對沖指引": st.column_config.TextColumn("📋 完整執行與對沖指引", width="large"),
-                }
-            else:
-                col_cfg = {
-                    "跳轉診斷": st.column_config.LinkColumn("🔍 診斷", display_text="進入診斷", width="small"),
-                    "📌 持倉股票": st.column_config.TextColumn("📌 持倉股票", width="small"),
-                    "💰 現價 & 成本浮盈": st.column_config.TextColumn("💰 現價 & 成本浮盈", width="medium"),
-                    "🛡️ 止損 SL / 目標 TP": st.column_config.TextColumn("🛡️ 止損 SL / 目標 TP", width="small"),
-                    "📊 今日技術面 (20/50MA)": st.column_config.TextColumn("📊 今日技術面 (20/50MA)", width="medium"),
-                    "🚦 今日大市聯動操作建議": st.column_config.TextColumn("🚦 今日大市聯動操作建議", width="medium"),
-                    "📋 詳細執行與調倉指引": st.column_config.TextColumn("📋 詳細執行與調倉指引", width="large"),
-                }
-            st.dataframe(
-                pd.DataFrame(rows_list),
-                column_config=col_cfg,
-                use_container_width=True,
-                hide_index=True,
-                key=f"hold_sub_df_{tbl_key}_{context_key}"
-            )
-            # 同步輸出自動換行、零截斷的單行全覽摘要條，確保較長之「詳細執行與調倉指引」無需橫向滾動亦能一眼睇晒！
-            lines_md = []
-            for r in rows_list:
-                if is_etf_tbl:
-                    lines_md.append(
-                        f"- **{r['📌 指數/行業ETF']}** ｜ `{r['🏷️ 屬性 & 現價']}` ｜ `{r['📊 技術面 & 均線 (20/50/200MA)']}` ➡️ **{r['🚦 今日指數ETF操作建議']}** — {r['📋 完整執行與對沖指引']}"
-                    )
-                else:
-                    lines_md.append(
-                        f"- **{r['📌 持倉股票']}** ｜ 現價 `{r['💰 現價 & 成本浮盈']}` ｜ `{r['🛡️ 止損 SL / 目標 TP']}` ｜ `{r['📊 今日技術面 (20/50MA)']}` ➡️ **{r['🚦 今日大市聯動操作建議']}** — {r['📋 詳細執行與調倉指引']}"
-                    )
-            st.markdown("\n".join(lines_md))
-
-        # 支援「🗂️ 全部持倉上下全寬總覽」與「📑 分類獨立檢視」
-        view_tabs = st.tabs([
-            f"🗂️ 全部持倉上下全覽 ({len(hold_tickers)} 隻)",
-            f"📊 指數及行業 ETF 專區 (港 {len(etf_hk_rows)} / 美 {len(etf_us_rows)})",
-            f"🇭🇰 港股個股持倉 (🟢多 {len(hk_long_rows)} / 🔴空 {len(hk_short_rows)})",
-            f"🇺🇸 美股個股持倉 (🟢多 {len(us_long_rows)} / 🔴空 {len(us_short_rows)})"
-        ])
-
-        with view_tabs[0]:
-            # A. 指數與行業 ETF 獨立專區 (100% 全螢幕寬度上下排列)
-            st.markdown("#### 📊 第一區：【追蹤指數 / 行業 ETF 獨立監控專區】（與個股分開評估大市 Beta 及對沖配置）")
-            if etf_hk_rows or etf_us_rows:
-                if etf_hk_rows:
-                    st.markdown(f"**🇭🇰 港股指數 / 槓桿反向 ETF（共 {len(etf_hk_rows)} 隻）**")
-                    _render_sub_holding_table(etf_hk_rows, "all_etf_hk", is_etf_tbl=True)
-                if etf_us_rows:
-                    st.markdown(f"**🇺🇸 美股指數 / 行業 / 槓桿反向 ETF（共 {len(etf_us_rows)} 隻 — 如 VOO, QQQ, SPY, TQQQ, SQQQ）**")
-                    _render_sub_holding_table(etf_us_rows, "all_etf_us", is_etf_tbl=True)
-            else:
-                st.caption("💡 目前「持倉」分組內尚無指數或行業 ETF（如 `VOO`、`QQQ`、`SPY`、`2800.HK`、`3033.HK`、`7500.HK`）。")
-
-            # B. 港股個股專區 (100% 全螢幕寬度上下排列，徹底解決左右分欄遮擋問題！)
-            st.markdown("#### 🇭🇰 第二區：【港股個股持倉專區】（上下全寬排列・結合恒生指數 `^HSI` 大市階段診斷）")
-            if hk_long_rows:
-                st.markdown(f"**🟢 港股 — 做多持倉 (HK Long｜共 {len(hk_long_rows)} 隻)**")
-                _render_sub_holding_table(hk_long_rows, "all_hk_long", is_etf_tbl=False)
-            else:
-                st.caption("🟢 港股 — 做多持倉：目前無標的")
-
-            if hk_short_rows:
-                st.markdown(f"**🔴 港股 — 做空持倉 (HK Short｜共 {len(hk_short_rows)} 隻)**")
-                _render_sub_holding_table(hk_short_rows, "all_hk_short", is_etf_tbl=False)
-            else:
-                st.caption("🔴 港股 — 做空持倉：目前無標的")
-
-            # C. 美股個股專區 (100% 全螢幕寬度上下排列，徹底解決左右分欄遮擋問題！)
-            st.markdown("#### 🇺🇸 第三區：【美股個股持倉專區】（上下全寬排列・結合標普500 `^GSPC` + 盤前/盤後/夜盤 24h 穿止損監控）")
-            if us_long_rows:
-                st.markdown(f"**🟢 美股 — 做多持倉 (US Long｜共 {len(us_long_rows)} 隻)**")
-                _render_sub_holding_table(us_long_rows, "all_us_long", is_etf_tbl=False)
-            else:
-                st.caption("🟢 美股 — 做多持倉：目前無標的")
-
-            if us_short_rows:
-                st.markdown(f"**🔴 美股 — 做空持倉 (US Short｜共 {len(us_short_rows)} 隻)**")
-                _render_sub_holding_table(us_short_rows, "all_us_short", is_etf_tbl=False)
-            else:
-                st.caption("🔴 美股 — 做空持倉：目前無標的")
-
-        with view_tabs[1]:
-            st.markdown(f"##### 🇭🇰 港股指數 / 槓桿反向 ETF（共 {len(etf_hk_rows)} 隻）")
-            _render_sub_holding_table(etf_hk_rows, "tab_etf_hk", is_etf_tbl=True)
-            st.markdown(f"##### 🇺🇸 美股指數 / 行業 / 槓桿反向 ETF（共 {len(etf_us_rows)} 隻）")
-            _render_sub_holding_table(etf_us_rows, "tab_etf_us", is_etf_tbl=True)
-
-        with view_tabs[2]:
-            st.markdown(f"##### 🟢 港股個股 — 做多持倉 (HK Long｜共 {len(hk_long_rows)} 隻)")
-            _render_sub_holding_table(hk_long_rows, "tab_hk_long", is_etf_tbl=False)
-            st.markdown(f"##### 🔴 港股個股 — 做空持倉 (HK Short｜共 {len(hk_short_rows)} 隻)")
-            _render_sub_holding_table(hk_short_rows, "tab_hk_short", is_etf_tbl=False)
-
-        with view_tabs[3]:
-            st.markdown(f"##### 🟢 美股個股 — 做多持倉 (US Long｜共 {len(us_long_rows)} 隻)")
-            _render_sub_holding_table(us_long_rows, "tab_us_long", is_etf_tbl=False)
-            st.markdown(f"##### 🔴 美股個股 — 做空持倉 (US Short｜共 {len(us_short_rows)} 隻)")
-            _render_sub_holding_table(us_short_rows, "tab_us_short", is_etf_tbl=False)
 
 
 def build_watchlist_instant_quote_df(tickers: List[str]) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -11332,7 +11341,13 @@ def render_radar_results(df_results, title, market_key=None):
     if df_results is None or df_results.empty:
         return
 
-    st.markdown(title)
+    _clean_title = str(title).replace("###", "").replace("##", "").strip()
+    _theme_rad = "indigo" if (market_key and "持倉" in str(market_key)) else ("green" if (market_key and "long" in str(market_key).lower()) else ("red" if (market_key and "short" in str(market_key).lower()) else "blue"))
+    render_color_zone_header(
+        f"📡 {_clean_title}（共掃描 {len(df_results)} 隻股票）",
+        subtitle="🟦 雷達掃描結果專區：下方已按【🟩 綠色做多專區】、【🟥 紅色做空專區】與【⬜ 灰色觀望專區】分色框列",
+        theme=_theme_rad
+    )
 
     if market_key is not None:
         warning_list = st.session_state.radar_correlation_warnings.get(market_key, [])
@@ -11462,117 +11477,117 @@ def render_radar_results(df_results, title, market_key=None):
             render_futu_multi_chart_grid(_mc_tks, context_key=f"rad_m_{market_key}", title_prefix=f"🌐 {market_key} — 多空精選「多股同列」走勢", radar_df=df_results)
             st.markdown("---")
 
-        st.markdown("### 🏆 今日優先行動精選榜 (已按綜合優勢由 #1 排序，只列 R:R ≥ 1.8R 頂級機會)")
-        col_top_l, col_top_s = st.columns(2)
-        with col_top_l:
-            st.markdown("#### 🟢 優先買入 (Priority Buy) Top 名單 (同板塊自動去重：僅列各板塊 RS 第 1 領頭羊)")
-            if not df_long.empty and "_raw_rr" in df_long.columns and "信號狀態" in df_long.columns:
-                _cand_long = df_long[(df_long["_raw_rr"] >= 1.8) & (~df_long["信號狀態"].astype(str).str.contains("⛔"))].copy()
-            else:
-                _cand_long = df_long.copy()
-            if not _cand_long.empty and "代碼" in _cand_long.columns:
-                _cand_long["_sector_grp"] = _cand_long["代碼"].apply(get_ticker_sector)
-                top_long = _cand_long.drop_duplicates(subset=["_sector_grp"], keep="first").head(6)
-            else:
-                top_long = _cand_long.head(6)
-            if not top_long.empty:
-                for idx_r, (_, r_row) in enumerate(top_long.iterrows(), 1):
-                    _sec_name = get_ticker_sector(r_row['代碼'])
-                    try:
-                        _is_hk_r = str(r_row['代碼']).upper().endswith(".HK")
-                        _mkt_r = "HK" if _is_hk_r else "US/Global"
-                        _lot_r = POPULAR_HK_LOTS.get(r_row['代碼'], 100) if _is_hk_r else 1
-                        # OLD: _sz_g = compute_equal_risk_position_cap(float(r_row['最新價']), float(r_row['ATR防守止損']), lot_size=_lot_r, market_type=_mkt_r)
-                        # NEW: [v45.0 P0-2 修復] 以「建議進場價」計算計畫止損幅度與滿倉股數，避免回調低吸單因現價較高而被誤判為止損過寬
-                        _plan_e_val = float(r_row['建議進場價']) if str(r_row.get('建議進場價', '-')) not in ['-', ''] else float(r_row['最新價'])
-                        _sz_g = compute_equal_risk_position_cap(_plan_e_val, float(r_row['ATR防守止損']), lot_size=_lot_r, market_type=_mkt_r)
-                        _cur_lbl = _sz_g.get("currency_symbol", "HK$" if _is_hk_r else "US$")
-                        _rk_b_lbl = f"{_cur_lbl}{_sz_g.get('risk_budget_used', 1000 if _is_hk_r else 128):,.0f}"
-                        _full_b_lbl = f"{_cur_lbl}{_sz_g.get('target_full_notional', 21500 if _is_hk_r else 2756):,.0f}"
-                        if _sz_g.get("can_full_pos_at_market"):
-                            _sz_line = (
-                                f"🟢 **支援直接滿倉 ({_full_b_lbl} / {_sz_g['full_pos_shares']}股)**："
-                                f"觸及結構止損僅蝕 **{_cur_lbl}{_sz_g['full_pos_loss_at_struct_sl']:,.0f}** (≤ 1R 上限 {_rk_b_lbl} ｜ 止損幅度 **-{_sz_g['stop_pct']:.2f}%**)"
-                            )
-                        elif _sz_g.get("min_1lot_over_budget"):
-                            _sz_line = (
-                                f"⚠️ **港股1手超 {_rk_b_lbl} 預算**：最低 1 手 ({_lot_r}股 = {_cur_lbl}{_sz_g['recommended_notional']:,.0f}) "
-                                f"止損將蝕 **{_cur_lbl}{_sz_g['min_1lot_loss']:,.0f}**！若要滿倉只蝕 {_rk_b_lbl}，請掛低吸單於 **{_sz_g['safe_full_pos_entry']:.2f}** 或改買碎股 **{_sz_g['unrounded_shares']} 股**"
-                            )
-                        else:
-                            _sz_line = (
-                                f"🟡 **結構止損 -{_sz_g['stop_pct']:.2f}% 偏寬 (勿改窄止損送死)**："
-                                f"① 現價等風險買 **{_sz_g['recommended_shares']}股 ({_cur_lbl}{_sz_g['recommended_notional']:,.0f})** 鎖死蝕 {_rk_b_lbl}；"
-                                f"② 若堅持滿倉 ({_sz_g['full_pos_shares']}股) 請掛低吸單於 **{_sz_g['safe_full_pos_entry']:.2f}**！"
-                            )
-                    except Exception:
-                        _sz_line = ""
-                    st.success(
-                        f"**第 {idx_r} 優先 [{_sec_name} 領頭羊]：{r_row['代碼']} {r_row['股票名稱']}** ｜ 現價 **{r_row['最新價']}** ｜ 時機：**{r_row.get('入場時機', '-')}**\n\n"
-                        f"- 🏆 **《超級績效》重疊篩網**：**{r_row.get('超級績效重疊網', '-')}** ｜ 形態：**{r_row.get('VCP與3C買點', '-')}**\n"
-                        f"- 🎯 **建議進場位**：**{r_row['建議進場價']}** — *{r_row.get('掛單與買入位說明', '-')}*\n"
-                        f"- 🛡️ **結構止損位**：**{r_row['ATR防守止損']}** — *{r_row.get('止損依據', '-')}*\n"
-                        f"- 💰 **波段止盈位 (港美雙軌)**：**{r_row['ATR目標止盈']}** — *{r_row.get('止盈阻力依據', '-')}*\n"
-                        f"- ⚖️ **真實結構盈虧比**：**{r_row.get('預估盈虧比(R:R)', '-')}** ｜ {_sz_line}"
-                    )
-                    _pb_tk_code = str(r_row['代碼'])
-                    _pb_in_cats = [c for c, gl in st.session_state.watchlist_dict.items() if _pb_tk_code in gl]
-                    _pb_c1, _pb_c2 = st.columns([2.4, 1.2])
-                    with _pb_c1:
-                        _pb_sel_cat = st.selectbox(
-                            f"⭐ 放入自選 ({_pb_tk_code}):",
-                            options=[f"⭐ 放入自選類別... (已在: {'/'.join(_pb_in_cats)})" if _pb_in_cats else "⭐ 點擊放入自選類別..."] + list(st.session_state.watchlist_dict.keys()),
-                            key=f"pb_card_wl_{market_key}_{idx_r}_{_pb_tk_code}",
-                            label_visibility="collapsed"
+        with st.expander("🏆 點擊展開：【今日 Top 優先買入 / 優先沽空 詳細文字交易計劃卡】（R:R ≥ 1.8R 領頭羊）", expanded=False):
+            col_top_l, col_top_s = st.columns(2)
+            with col_top_l:
+                st.markdown("#### 🟢 優先買入 (Priority Buy) Top 名單 (同板塊自動去重：僅列各板塊 RS 第 1 領頭羊)")
+                if not df_long.empty and "_raw_rr" in df_long.columns and "信號狀態" in df_long.columns:
+                    _cand_long = df_long[(df_long["_raw_rr"] >= 1.8) & (~df_long["信號狀態"].astype(str).str.contains("⛔"))].copy()
+                else:
+                    _cand_long = df_long.copy()
+                if not _cand_long.empty and "代碼" in _cand_long.columns:
+                    _cand_long["_sector_grp"] = _cand_long["代碼"].apply(get_ticker_sector)
+                    top_long = _cand_long.drop_duplicates(subset=["_sector_grp"], keep="first").head(6)
+                else:
+                    top_long = _cand_long.head(6)
+                if not top_long.empty:
+                    for idx_r, (_, r_row) in enumerate(top_long.iterrows(), 1):
+                        _sec_name = get_ticker_sector(r_row['代碼'])
+                        try:
+                            _is_hk_r = str(r_row['代碼']).upper().endswith(".HK")
+                            _mkt_r = "HK" if _is_hk_r else "US/Global"
+                            _lot_r = POPULAR_HK_LOTS.get(r_row['代碼'], 100) if _is_hk_r else 1
+                            # OLD: _sz_g = compute_equal_risk_position_cap(float(r_row['最新價']), float(r_row['ATR防守止損']), lot_size=_lot_r, market_type=_mkt_r)
+                            # NEW: [v45.0 P0-2 修復] 以「建議進場價」計算計畫止損幅度與滿倉股數，避免回調低吸單因現價較高而被誤判為止損過寬
+                            _plan_e_val = float(r_row['建議進場價']) if str(r_row.get('建議進場價', '-')) not in ['-', ''] else float(r_row['最新價'])
+                            _sz_g = compute_equal_risk_position_cap(_plan_e_val, float(r_row['ATR防守止損']), lot_size=_lot_r, market_type=_mkt_r)
+                            _cur_lbl = _sz_g.get("currency_symbol", "HK$" if _is_hk_r else "US$")
+                            _rk_b_lbl = f"{_cur_lbl}{_sz_g.get('risk_budget_used', 1000 if _is_hk_r else 128):,.0f}"
+                            _full_b_lbl = f"{_cur_lbl}{_sz_g.get('target_full_notional', 21500 if _is_hk_r else 2756):,.0f}"
+                            if _sz_g.get("can_full_pos_at_market"):
+                                _sz_line = (
+                                    f"🟢 **支援直接滿倉 ({_full_b_lbl} / {_sz_g['full_pos_shares']}股)**："
+                                    f"觸及結構止損僅蝕 **{_cur_lbl}{_sz_g['full_pos_loss_at_struct_sl']:,.0f}** (≤ 1R 上限 {_rk_b_lbl} ｜ 止損幅度 **-{_sz_g['stop_pct']:.2f}%**)"
+                                )
+                            elif _sz_g.get("min_1lot_over_budget"):
+                                _sz_line = (
+                                    f"⚠️ **港股1手超 {_rk_b_lbl} 預算**：最低 1 手 ({_lot_r}股 = {_cur_lbl}{_sz_g['recommended_notional']:,.0f}) "
+                                    f"止損將蝕 **{_cur_lbl}{_sz_g['min_1lot_loss']:,.0f}**！若要滿倉只蝕 {_rk_b_lbl}，請掛低吸單於 **{_sz_g['safe_full_pos_entry']:.2f}** 或改買碎股 **{_sz_g['unrounded_shares']} 股**"
+                                )
+                            else:
+                                _sz_line = (
+                                    f"🟡 **結構止損 -{_sz_g['stop_pct']:.2f}% 偏寬 (勿改窄止損送死)**："
+                                    f"① 現價等風險買 **{_sz_g['recommended_shares']}股 ({_cur_lbl}{_sz_g['recommended_notional']:,.0f})** 鎖死蝕 {_rk_b_lbl}；"
+                                    f"② 若堅持滿倉 ({_sz_g['full_pos_shares']}股) 請掛低吸單於 **{_sz_g['safe_full_pos_entry']:.2f}**！"
+                                )
+                        except Exception:
+                            _sz_line = ""
+                        st.success(
+                            f"**第 {idx_r} 優先 [{_sec_name} 領頭羊]：{r_row['代碼']} {r_row['股票名稱']}** ｜ 現價 **{r_row['最新價']}** ｜ 時機：**{r_row.get('入場時機', '-')}**\n\n"
+                            f"- 🏆 **《超級績效》重疊篩網**：**{r_row.get('超級績效重疊網', '-')}** ｜ 形態：**{r_row.get('VCP與3C買點', '-')}**\n"
+                            f"- 🎯 **建議進場位**：**{r_row['建議進場價']}** — *{r_row.get('掛單與買入位說明', '-')}*\n"
+                            f"- 🛡️ **結構止損位**：**{r_row['ATR防守止損']}** — *{r_row.get('止損依據', '-')}*\n"
+                            f"- 💰 **波段止盈位 (港美雙軌)**：**{r_row['ATR目標止盈']}** — *{r_row.get('止盈阻力依據', '-')}*\n"
+                            f"- ⚖️ **真實結構盈虧比**：**{r_row.get('預估盈虧比(R:R)', '-')}** ｜ {_sz_line}"
                         )
-                        if _pb_sel_cat in st.session_state.watchlist_dict:
-                            if _pb_tk_code not in st.session_state.watchlist_dict[_pb_sel_cat]:
-                                st.session_state.watchlist_dict[_pb_sel_cat].append(_pb_tk_code)
-                                save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
-                                st.toast(f"⭐ 已將 {_pb_tk_code} ({r_row['股票名稱']}) 放入【{_pb_sel_cat}】！")
-                                st.rerun()
-                    with _pb_c2:
-                        if st.button(f"🔍 本頁診斷 {_pb_tk_code}", key=f"pb_card_go_{market_key}_{idx_r}_{_pb_tk_code}", use_container_width=True):
-                            trigger_same_tab_diagnosis(_pb_tk_code, dir_code="LONG", source_mode_label=mode_options[0])
-            else:
-                st.info("目前無同時滿足「多頭觸發 + 結構盈虧比 ≥ 1.8R」的優先買入股票，建議耐心等待。")
+                        _pb_tk_code = str(r_row['代碼'])
+                        _pb_in_cats = [c for c, gl in st.session_state.watchlist_dict.items() if _pb_tk_code in gl]
+                        _pb_c1, _pb_c2 = st.columns([2.4, 1.2])
+                        with _pb_c1:
+                            _pb_sel_cat = st.selectbox(
+                                f"⭐ 放入自選 ({_pb_tk_code}):",
+                                options=[f"⭐ 放入自選類別... (已在: {'/'.join(_pb_in_cats)})" if _pb_in_cats else "⭐ 點擊放入自選類別..."] + list(st.session_state.watchlist_dict.keys()),
+                                key=f"pb_card_wl_{market_key}_{idx_r}_{_pb_tk_code}",
+                                label_visibility="collapsed"
+                            )
+                            if _pb_sel_cat in st.session_state.watchlist_dict:
+                                if _pb_tk_code not in st.session_state.watchlist_dict[_pb_sel_cat]:
+                                    st.session_state.watchlist_dict[_pb_sel_cat].append(_pb_tk_code)
+                                    save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                                    st.toast(f"⭐ 已將 {_pb_tk_code} ({r_row['股票名稱']}) 放入【{_pb_sel_cat}】！")
+                                    st.rerun()
+                        with _pb_c2:
+                            if st.button(f"🔍 本頁診斷 {_pb_tk_code}", key=f"pb_card_go_{market_key}_{idx_r}_{_pb_tk_code}", use_container_width=True):
+                                trigger_same_tab_diagnosis(_pb_tk_code, dir_code="LONG", source_mode_label=mode_options[0])
+                else:
+                    st.info("目前無同時滿足「多頭觸發 + 結構盈虧比 ≥ 1.8R」的優先買入股票，建議耐心等待。")
 
-        with col_top_s:
-            st.markdown("#### 🔴 優先沽空 (Priority Short) Top 名單")
-            if not df_short.empty and "_raw_rr" in df_short.columns and "信號狀態" in df_short.columns:
-                top_short = df_short[(df_short["_raw_rr"] >= 1.8) & (~df_short["信號狀態"].astype(str).str.contains("⛔"))].head(8)
-            else:
-                top_short = df_short.head(8)
-            if not top_short.empty:
-                for idx_r, (_, r_row) in enumerate(top_short.iterrows(), 1):
-                    st.error(
-                        f"**第 {idx_r} 優先：{r_row['代碼']} {r_row['股票名稱']}** ｜ 現價 **{r_row['最新價']}** ｜ 綜合分 **{r_row.get('優先總分', '-')}**\n\n"
-                        f"- 🎯 **在哪裡沽空**：**{r_row['建議進場價']}** — *{r_row.get('掛單與買入位說明', '-')}*\n"
-                        f"- 🛡️ **結構止損位**：**{r_row['ATR防守止損']}** — *{r_row.get('止損依據', '-')}*\n"
-                        f"- 💰 **結構回補位**：**{r_row['ATR目標止盈']}** — *{r_row.get('止盈阻力依據', '-')}*\n"
-                        f"- ⚖️ **真實結構盈虧比**：**{r_row.get('預估盈虧比(R:R)', '-')}** ｜ 優勢：{r_row.get('META多重優勢', '-')} / {r_row.get('LEI頂底/2B', '-')}"
-                    )
-                    _ps_tk_code = str(r_row['代碼'])
-                    _ps_in_cats = [c for c, gl in st.session_state.watchlist_dict.items() if _ps_tk_code in gl]
-                    _ps_c1, _ps_c2 = st.columns([2.4, 1.2])
-                    with _ps_c1:
-                        _ps_sel_cat = st.selectbox(
-                            f"⭐ 放入自選 ({_ps_tk_code}):",
-                            options=[f"⭐ 放入自選類別... (已在: {'/'.join(_ps_in_cats)})" if _ps_in_cats else "⭐ 點擊放入自選類別..."] + list(st.session_state.watchlist_dict.keys()),
-                            key=f"ps_card_wl_{market_key}_{idx_r}_{_ps_tk_code}",
-                            label_visibility="collapsed"
+            with col_top_s:
+                st.markdown("#### 🔴 優先沽空 (Priority Short) Top 名單")
+                if not df_short.empty and "_raw_rr" in df_short.columns and "信號狀態" in df_short.columns:
+                    top_short = df_short[(df_short["_raw_rr"] >= 1.8) & (~df_short["信號狀態"].astype(str).str.contains("⛔"))].head(8)
+                else:
+                    top_short = df_short.head(8)
+                if not top_short.empty:
+                    for idx_r, (_, r_row) in enumerate(top_short.iterrows(), 1):
+                        st.error(
+                            f"**第 {idx_r} 優先：{r_row['代碼']} {r_row['股票名稱']}** ｜ 現價 **{r_row['最新價']}** ｜ 綜合分 **{r_row.get('優先總分', '-')}**\n\n"
+                            f"- 🎯 **在哪裡沽空**：**{r_row['建議進場價']}** — *{r_row.get('掛單與買入位說明', '-')}*\n"
+                            f"- 🛡️ **結構止損位**：**{r_row['ATR防守止損']}** — *{r_row.get('止損依據', '-')}*\n"
+                            f"- 💰 **結構回補位**：**{r_row['ATR目標止盈']}** — *{r_row.get('止盈阻力依據', '-')}*\n"
+                            f"- ⚖️ **真實結構盈虧比**：**{r_row.get('預估盈虧比(R:R)', '-')}** ｜ 優勢：{r_row.get('META多重優勢', '-')} / {r_row.get('LEI頂底/2B', '-')}"
                         )
-                        if _ps_sel_cat in st.session_state.watchlist_dict:
-                            if _ps_tk_code not in st.session_state.watchlist_dict[_ps_sel_cat]:
-                                st.session_state.watchlist_dict[_ps_sel_cat].append(_ps_tk_code)
-                                save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
-                                st.toast(f"⭐ 已將 {_ps_tk_code} ({r_row['股票名稱']}) 放入【{_ps_sel_cat}】！")
-                                st.rerun()
-                    with _ps_c2:
-                        if st.button(f"🔍 本頁診斷 {_ps_tk_code}", key=f"ps_card_go_{market_key}_{idx_r}_{_ps_tk_code}", use_container_width=True):
-                            trigger_same_tab_diagnosis(_ps_tk_code, dir_code="SHORT", source_mode_label=mode_options[0])
-            else:
-                st.info("目前無同時滿足「空頭觸發 + 結構盈虧比 ≥ 1.8R」的優先沽空股票。")
+                        _ps_tk_code = str(r_row['代碼'])
+                        _ps_in_cats = [c for c, gl in st.session_state.watchlist_dict.items() if _ps_tk_code in gl]
+                        _ps_c1, _ps_c2 = st.columns([2.4, 1.2])
+                        with _ps_c1:
+                            _ps_sel_cat = st.selectbox(
+                                f"⭐ 放入自選 ({_ps_tk_code}):",
+                                options=[f"⭐ 放入自選類別... (已在: {'/'.join(_ps_in_cats)})" if _ps_in_cats else "⭐ 點擊放入自選類別..."] + list(st.session_state.watchlist_dict.keys()),
+                                key=f"ps_card_wl_{market_key}_{idx_r}_{_ps_tk_code}",
+                                label_visibility="collapsed"
+                            )
+                            if _ps_sel_cat in st.session_state.watchlist_dict:
+                                if _ps_tk_code not in st.session_state.watchlist_dict[_ps_sel_cat]:
+                                    st.session_state.watchlist_dict[_ps_sel_cat].append(_ps_tk_code)
+                                    save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                                    st.toast(f"⭐ 已將 {_ps_tk_code} ({r_row['股票名稱']}) 放入【{_ps_sel_cat}】！")
+                                    st.rerun()
+                        with _ps_c2:
+                            if st.button(f"🔍 本頁診斷 {_ps_tk_code}", key=f"ps_card_go_{market_key}_{idx_r}_{_ps_tk_code}", use_container_width=True):
+                                trigger_same_tab_diagnosis(_ps_tk_code, dir_code="SHORT", source_mode_label=mode_options[0])
+                else:
+                    st.info("目前無同時滿足「空頭觸發 + 結構盈虧比 ≥ 1.8R」的優先沽空股票。")
 
         st.markdown("---")
         st.markdown("#### ⚡ 快速跳轉個股診斷 & ⭐ 富途式快捷存入自選股票名單")
@@ -11694,7 +11709,12 @@ def render_radar_results(df_results, title, market_key=None):
                 return clean_df[avail_cols]
             return clean_df
 
-        st.markdown("#### 🟢 做多 (Long) 完整排名列表 (已按 #1, #2, #3 優先次序排列)")
+        # [v56.0 鮮明色彩分區：🟩 綠色做多專區 vs 🟥 紅色做空專區 vs ⬜ 灰色觀望專區]
+        render_color_zone_header(
+            f"🟢 【做多 (Long) 候選池專區】完整排名列表（共 {len(df_long)} 隻｜已按 #1, #2, #3 優先次序排列）",
+            subtitle="🟩 綠色專區：多頭突破 / 回踩支撐買點",
+            theme="green"
+        )
         if not df_long.empty:
             render_styled_dataframe(_prepare_display_df(df_long), table_key=f"radar_long_tbl_{market_key}")
         else:
@@ -11702,14 +11722,23 @@ def render_radar_results(df_results, title, market_key=None):
 
         st.write("")
 
-        st.markdown("#### 🔴 做空 (Short) 完整排名列表 (已按 #1, #2, #3 優先次序排列)")
+        render_color_zone_header(
+            f"🔴 【做空 (Short) 候選池專區】完整排名列表（共 {len(df_short)} 隻｜已按 #1, #2, #3 優先次序排列）",
+            subtitle="🟥 紅色專區：跌穿 50MA/200MA 空頭破位 / 反抽受阻沽空點",
+            theme="red"
+        )
         if not df_short.empty:
             render_styled_dataframe(_prepare_display_df(df_short), table_key=f"radar_short_tbl_{market_key}")
         else:
             st.info("目前沒有符合做空條件的標的。")
 
         if not df_watch.empty:
-            with st.expander("⚪ 觀望名單 (未觸發或已觸及止損失效)", expanded=False):
+            render_color_zone_header(
+                f"⚪ 【觀望 / 未觸發名單】（共 {len(df_watch)} 隻）",
+                subtitle="⬜ 灰色專區：未齊指標或已觸及止損",
+                theme="slate"
+            )
+            with st.expander(f"⚪ 點擊展開觀望名單 ({len(df_watch)} 隻)", expanded=False):
                 render_styled_dataframe(_prepare_display_df(df_watch), table_key=f"radar_watch_tbl_{market_key}")
 
 # ==========================================
@@ -12668,7 +12697,12 @@ elif mode == mode_options[2]:
                     qm3.metric("🛡️ 站穩 50MA 比例", f"{q_stats['above_50ma_pct']:.1f}%", "中線多頭健康度")
                     qm4.metric("🔒 組內已鎖定持倉", f"{q_stats['locked_cnt']} 筆", "點擊『🔍 本頁診斷』即看")
 
-                    st.markdown(f"#### 📊 「{cat}」實時報價與自由調位總覽表 (直接改【↕️ 次序】數字或揀【⚡ 快速調位】即可自由移動次序！)")
+                    _cat_theme = "indigo" if "持倉" in cat else ("green" if "long" in cat.lower() or "做多" in cat else ("red" if "short" in cat.lower() or "做空" in cat else "blue"))
+                    render_color_zone_header(
+                        f"📊 分組【{cat}】實時報價與自由調位總覽表（共 {len(current_list)} 隻）",
+                        subtitle="直接改【↕️ 次序】數字或上方拖移卡片即可調位",
+                        theme=_cat_theme
+                    )
                     if not quote_df.empty:
                         _other_wl_cats = [c for c in cat_names if c != cat]
                         _mv_placeholder = "📂 移至類別..."
