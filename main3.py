@@ -2385,489 +2385,6 @@ def compute_us_swing_exhaustion_and_trap_guard(df: pd.DataFrame, market_type: st
         pass
     return out
 
-# ==============================================================================
-# [v57.0 核心新增 1：賣出後走勢追蹤與交易利弊 AI 復盤引擎 (Post-Exit MFE/MAE & Trade Autopsy)]
-# 專門實踐用戶需求 2：
-# 「加入交易記錄的系統，同時加入記錄賣出的輸入按鈕。並且根據賣出之後的發展，分析嗰一筆交易有什麼利弊，有冇什麼改善嘅地方？」
-# ==============================================================================
-def record_closed_trade_to_journal(
-    ticker: str,
-    dir_code: str,
-    entry_price: float,
-    exit_price: float,
-    shares: int,
-    entry_date_str: str,
-    exit_date_str: str,
-    initial_sl: float = 0.0,
-    initial_tp: float = 0.0,
-    exit_reason: str = "手動平倉/賣出",
-    notes: str = ""
-) -> Dict[str, Any]:
-    fmt_t, mkt_t, _, _, cur_t = format_and_detect_market(ticker)
-    stk_name = get_stock_name(fmt_t)
-    sh_safe = max(1, int(shares))
-    e_px = round(float(entry_price), 3)
-    x_px = round(float(exit_price), 3)
-    d_code = "SHORT" if "SHORT" in str(dir_code).upper() or "空" in str(dir_code) else "LONG"
-
-    fee_entry = compute_futu_real_fees(market_type=mkt_t, price=e_px, shares=sh_safe, is_sell=(d_code == "SHORT"))
-    gross_pnl = (x_px - e_px) * sh_safe if d_code == "LONG" else (e_px - x_px) * sh_safe
-    net_pnl = round(gross_pnl - float(fee_entry.get("round_trip_fee", 0.0)), 2)
-    pnl_pct = round(((x_px - e_px) / max(e_px, 1e-6)) * 100.0 * (1.0 if d_code == "LONG" else -1.0), 2)
-
-    if initial_sl > 0 and abs(e_px - initial_sl) > 1e-5:
-        unit_risk = abs(e_px - float(initial_sl))
-    else:
-        unit_risk = e_px * 0.045
-    realized_r = round(((x_px - e_px) if d_code == "LONG" else (e_px - x_px)) / max(unit_risk, 1e-5), 2)
-
-    rec = {
-        "trade_id": f"TRD_{fmt_t}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-        "ticker": fmt_t,
-        "stock_name": stk_name,
-        "market_type": mkt_t,
-        "currency": cur_t,
-        "dir_code": d_code,
-        "entry_price": e_px,
-        "exit_price": x_px,
-        "shares": sh_safe,
-        "entry_date": str(entry_date_str),
-        "exit_date": str(exit_date_str),
-        "initial_sl": round(float(initial_sl), 3) if initial_sl > 0 else round(e_px * (0.955 if d_code == "LONG" else 1.045), 3),
-        "initial_tp": round(float(initial_tp), 3) if initial_tp > 0 else round(e_px * (1.10 if d_code == "LONG" else 0.90), 3),
-        "round_trip_fee": round(float(fee_entry.get("round_trip_fee", 0.0)), 2),
-        "net_pnl": net_pnl,
-        "pnl_pct": pnl_pct,
-        "realized_r": realized_r,
-        "exit_reason": str(exit_reason),
-        "notes": str(notes),
-        "recorded_at": datetime.now().strftime("%Y-%m-%d %H:%M")
-    }
-    journal_list = persistent_data.setdefault("closed_trades_journal", [])
-    journal_list.insert(0, rec)
-    return rec
-
-
-def evaluate_closed_trade_post_exit_autopsy(trade_rec: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    根據賣出日期 (`exit_date`) 之後的真實 K 線發展，自動追蹤：
-    - 賣出後 5 日 / 10 日 / 20 日 及迄今之最高價、最低價與最新價
-    - यदि做多：賣出後有冇繼續大升（賣飛 Premature Exit / 抱不住贏家）定係賣出後成功避開暴跌（完美逃頂 / 精準止損救命）？
-    - यदि做空：回補後有冇繼續暴跌（太早回補）定係回補後即刻強彈（完美鎖潤 / 避開軋空）？
-    - 給出具體、可落地的交易利弊診斷與改善方案！
-    """
-    fmt_t = str(trade_rec.get("ticker", ""))
-    d_code = str(trade_rec.get("dir_code", "LONG"))
-    e_px = float(trade_rec.get("entry_price", 0.0))
-    x_px = float(trade_rec.get("exit_price", 0.0))
-    sl_px = float(trade_rec.get("initial_sl", 0.0))
-    tp_px = float(trade_rec.get("initial_tp", 0.0))
-    sh_cnt = int(trade_rec.get("shares", 1))
-    cur_t = str(trade_rec.get("currency", "HKD"))
-    pnl_pct = float(trade_rec.get("pnl_pct", 0.0))
-    realized_r = float(trade_rec.get("realized_r", 0.0))
-    exit_dt_str = str(trade_rec.get("exit_date", ""))
-
-    out = {
-        "bars_after_exit": 0,
-        "current_price": x_px,
-        "post_exit_move_pct": 0.0,
-        "post_exit_favorable_max_pct": 0.0,
-        "post_exit_adverse_max_pct": 0.0,
-        "missed_upside_dollars": 0.0,
-        "saved_loss_dollars": 0.0,
-        "t5_chg_pct": None,
-        "t10_chg_pct": None,
-        "t20_chg_pct": None,
-        "execution_grade": "⏳ 剛平倉觀察中",
-        "pros_summary": "剛記錄賣出，待累積更多交易日 K 線後將自動生成賣出後走勢追蹤。",
-        "cons_summary": "-",
-        "improvement_advice": "建議在賣出後第 5 及第 10 個交易日回來檢視此筆交易的後續演變。",
-        "theme_level": "info"
-    }
-
-    try:
-        df_sub = _PRELOADED_DAILY_CACHE.get(fmt_t)
-        if df_sub is None or df_sub.empty:
-            df_sub = yf.Ticker(fmt_t).history(period="1y", interval="1d", auto_adjust=True)
-            if df_sub is not None and not df_sub.empty:
-                df_sub.index = pd.to_datetime(df_sub.index)
-                if df_sub.index.tz is not None:
-                    df_sub.index = df_sub.index.tz_localize(None)
-                _PRELOADED_DAILY_CACHE[fmt_t] = df_sub
-
-        if df_sub is None or df_sub.empty:
-            return out
-
-        exit_dt = pd.to_datetime(exit_dt_str)
-        after_df = df_sub[df_sub.index > exit_dt]
-        curr_c = float(df_sub["Close"].iloc[-1])
-        out["current_price"] = round(curr_c, 2)
-        out["bars_after_exit"] = int(len(after_df))
-
-        # 同時檢查持倉期間 (entry_date ~ exit_date) 的表現
-        entry_dt = pd.to_datetime(str(trade_rec.get("entry_date", exit_dt_str)))
-        during_df = df_sub[(df_sub.index >= entry_dt) & (df_sub.index <= exit_dt)]
-        bars_held = max(1, len(during_df))
-        s20_now = float(df_sub["Close"].tail(20).mean())
-        s50_now = float(df_sub["Close"].tail(50).mean()) if len(df_sub) >= 40 else s20_now
-
-        if len(after_df) == 0:
-            # 賣出當日即時復盤
-            if realized_r >= 1.8:
-                out["execution_grade"] = "🏆 A+ 標準止盈執行"
-                out["pros_summary"] = f"✅ 成功捕捉 +{realized_r:.2f}R ({pnl_pct:+.2f}%) 波段利潤，達到 ≥1.8R 系統期望值目標。"
-                out["cons_summary"] = "剛於今日平倉，尚未有賣出後 K 線。"
-                out["improvement_advice"] = "若此次為 100% 全清，下次面對強勢領頭羊可考慮在 TP1 賣出 1/2、留 1/2 沿 20MA 奔跑。"
-                out["theme_level"] = "success"
-            elif realized_r <= -1.15:
-                out["execution_grade"] = "⚠️ 止損略遲 (>1R)"
-                out["pros_summary"] = "已執行離場，解除敞口風險。"
-                out["cons_summary"] = f"實際虧損達 {realized_r:.2f}R ({pnl_pct:+.2f}%)，超出初始止損位 ({sl_px:.2f})。"
-                out["improvement_advice"] = "請善用富途『到價觸發條件止損單』，避免手動猶豫導致虧損超過 1R (HK$1,000)。"
-                out["theme_level"] = "warning"
-            elif -1.15 < realized_r < 0:
-                out["execution_grade"] = "🛡️ 標準紀律止損 (≤1R)"
-                out["pros_summary"] = f"✅ 嚴守 Minervini 1R 風控鐵律，將虧損嚴格控制在 {realized_r:.2f}R ({pnl_pct:+.2f}%) 內，完美保護本金。"
-                out["cons_summary"] = "入場後未立即脫離成本區。"
-                out["improvement_advice"] = "將繼續觀察未來 5~10 日此股是『真破位大跌』還是『洗盤後再穿前高 (2B 彈簧)』。"
-                out["theme_level"] = "info"
-            else:
-                out["execution_grade"] = "🟡 微利/保本離場"
-                out["pros_summary"] = f"保住本金並錄得 {pnl_pct:+.2f}% ({realized_r:+.2f}R) 小幅正回報。"
-                out["cons_summary"] = f"僅持倉 {bars_held} 日即平倉，未讓利潤奔跑至目標位 ({tp_px:.2f})。"
-                out["improvement_advice"] = "根據影片 1 (HSKA 案例)，突破後若未跌穿止損，應給予 7~8 個交易日發酵空間，忌賺少少即走。"
-            return out
-
-        # 有賣出後 K 線數據 (after_df)
-        max_h_after = float(after_df["High"].max())
-        min_l_after = float(after_df["Low"].min())
-
-        if d_code == "LONG":
-            move_now_pct = ((curr_c - x_px) / max(x_px, 1e-6)) * 100.0
-            fav_after_pct = ((max_h_after - x_px) / max(x_px, 1e-6)) * 100.0   # 賣出後最高又升咗幾多% (賣飛幅度)
-            adv_after_pct = ((min_l_after - x_px) / max(x_px, 1e-6)) * 100.0   # 賣出後最低跌咗幾多% (避險幅度)
-            missed_dlr = max(0.0, (max_h_after - x_px) * sh_cnt)
-            saved_dlr = max(0.0, (x_px - min_l_after) * sh_cnt)
-            if len(after_df) >= 5:
-                out["t5_chg_pct"] = round(((float(after_df["Close"].iloc[4]) - x_px) / max(x_px, 1e-6)) * 100.0, 2)
-            if len(after_df) >= 10:
-                out["t10_chg_pct"] = round(((float(after_df["Close"].iloc[9]) - x_px) / max(x_px, 1e-6)) * 100.0, 2)
-            if len(after_df) >= 20:
-                out["t20_chg_pct"] = round(((float(after_df["Close"].iloc[19]) - x_px) / max(x_px, 1e-6)) * 100.0, 2)
-
-            out.update({
-                "post_exit_move_pct": round(move_now_pct, 2),
-                "post_exit_favorable_max_pct": round(fav_after_pct, 2),
-                "post_exit_adverse_max_pct": round(adv_after_pct, 2),
-                "missed_upside_dollars": round(missed_dlr, 1),
-                "saved_loss_dollars": round(saved_dlr, 1),
-            })
-
-            # 情境 1：止損離場後，股價無跌穿 50MA 反而在 10 日內大升穿前高 -> 「被日內洗盤針掃出 (Shakeout Victim)」
-            if pnl_pct < 0 and fav_after_pct >= 6.0 and min_l_after >= x_px * 0.965:
-                out["execution_grade"] = "🚨 被洗盤震出後大升 (Shakeout)"
-                out["pros_summary"] = f"有執行止損紀律 ({pnl_pct:+.2f}%)，但止損位設得過緊或入場位追高。"
-                out["cons_summary"] = f"賣出後僅再微跌 {adv_after_pct:.1f}% 即反轉大升 +{fav_after_pct:.1f}% (最高見 {max_h_after:.2f})，少賺約 {missed_dlr:,.0f} {cur_t}！"
-                out["improvement_advice"] = (
-                    f"💡 **核心改善方案**：此乃典型主力『Undercut 掃止損洗盤』！(1) 下次止損必須設於結構低點或 20MA 下方至少 0.45x ATR 緩衝；"
-                    f"(2) 當洗盤後次日帶量收陽重新站回止損位及 9EMA 之上（LEI 2B 破底翻），應果斷執行『二次買回 (Re-entry)』！"
-                )
-                out["theme_level"] = "error"
-
-            # 情境 2：止損離場後，股價繼續暴跌 -> 「神級止損救命 (Great Stop Save)」
-            elif pnl_pct < 0 and adv_after_pct <= -5.5:
-                out["execution_grade"] = "🛡️ 神級止損救命 (避開瀑布殺)"
-                out["pros_summary"] = f"🏆 果斷於 {x_px:.2f} 止損，賣出後股價繼續暴瀉 {adv_after_pct:.1f}% (最低見 {min_l_after:.2f})，成功幫你避開額外 -{saved_dlr:,.0f} {cur_t} 巨額虧損！"
-                out["cons_summary"] = f"入場時機或大市順風度欠佳，小蝕 {pnl_pct:+.2f}% ({realized_r:+.2f}R)。"
-                out["improvement_advice"] = (
-                    f"💡 **核心改善方案**：這筆止損 100% 正確！若當時賣出時同時符合『放量跌穿 50MA 反手三鐵律』，甚至可順勢反手做空將虧損變大賺。"
-                )
-                out["theme_level"] = "success"
-
-            # 情境 3：微利 (<1.5R) 太早賣出，結果賣出後繼續狂升 >8% -> 「太早賣飛大牛股 (Premature Exit)」
-            elif 0 <= realized_r < 1.6 and fav_after_pct >= 7.5:
-                out["execution_grade"] = "💸 太早賣飛大牛股 (抱不住贏家)"
-                out["pros_summary"] = f"選股眼光極準！進場價 {e_px:.2f} 成功捉中強勢起動股並獲利 {pnl_pct:+.2f}%。"
-                out["cons_summary"] = f"僅賺 {realized_r:+.2f}R 就太早全清！賣出後股價再狂飆 +{fav_after_pct:.1f}% (見 {max_h_after:.2f})，錯失後續 +{missed_dlr:,.0f} {cur_t} 暴利！"
-                out["improvement_advice"] = (
-                    f"💡 **核心改善方案**：這是影響複利最大的痛點！下次到達 +{realized_r:.1f}R 時，**絕不可 100% 全賣**——"
-                    f"請嚴格執行『TP1 只賣一半鎖潤、剩餘 50% 推保本並沿 20MA ({s20_now:.2f}) 跟蹤直到收盤跌穿 20MA 才全清』！"
-                )
-                out["theme_level"] = "warning"
-
-            # 情境 4：獲利賣出後，股價隨即見頂回落 -> 「完美高拋鎖潤 (Top-Tick Exit)」
-            elif realized_r >= 1.2 and adv_after_pct <= -4.0 and move_now_pct <= 1.5:
-                out["execution_grade"] = "🏆 完美高拋鎖潤 (精準逃頂)"
-                out["pros_summary"] = f"🔥 教科書級別離場！不僅實袋 {pnl_pct:+.2f}% (+{realized_r:.2f}R)，賣出後股價更回落 {adv_after_pct:.1f}%，完美避開利潤回吐 (-{saved_dlr:,.0f} {cur_t})！"
-                out["cons_summary"] = "幾乎無缺點，買賣節奏極佳。"
-                out["improvement_advice"] = "請繼續保持在『偏離 20MA 超過 +2.5x ATR 或觸及歷史籌碼峰阻力 TP1』時主動分批止盈的習慣！"
-                out["theme_level"] = "success"
-
-            else:
-                out["execution_grade"] = "✅ 正常波段結算"
-                out["pros_summary"] = f"已結算 {pnl_pct:+.2f}% ({realized_r:+.2f}R)；賣出後 {len(after_df)} 日內區間為 {min_l_after:.2f} ~ {max_h_after:.2f} (距賣出價 {move_now_pct:+.2f}%)。"
-                out["cons_summary"] = f"賣出後最大續升 +{fav_after_pct:.1f}%，最大回撤 {adv_after_pct:.1f}%。"
-                out["improvement_advice"] = "表現穩健，持續保持『截斷虧損於 ≤1R、讓贏家跑至 ≥2R』的正期望值紀律。"
-                out["theme_level"] = "info"
-
-        else:
-            # SHORT (做空交易復盤)
-            move_now_pct = ((x_px - curr_c) / max(x_px, 1e-6)) * 100.0
-            fav_after_pct = ((x_px - min_l_after) / max(x_px, 1e-6)) * 100.0   # 回補後又再跌咗幾多% (太早回補)
-            adv_after_pct = ((max_h_after - x_px) / max(x_px, 1e-6)) * 100.0   # 回補後反彈升咗幾多% (避開軋空)
-            missed_dlr = max(0.0, (x_px - min_l_after) * sh_cnt)
-            saved_dlr = max(0.0, (max_h_after - x_px) * sh_cnt)
-            if len(after_df) >= 5:
-                out["t5_chg_pct"] = round(((float(after_df["Close"].iloc[4]) - x_px) / max(x_px, 1e-6)) * 100.0, 2)
-            if len(after_df) >= 10:
-                out["t10_chg_pct"] = round(((float(after_df["Close"].iloc[9]) - x_px) / max(x_px, 1e-6)) * 100.0, 2)
-            if len(after_df) >= 20:
-                out["t20_chg_pct"] = round(((float(after_df["Close"].iloc[19]) - x_px) / max(x_px, 1e-6)) * 100.0, 2)
-
-            out.update({
-                "post_exit_move_pct": round(-move_now_pct, 2),
-                "post_exit_favorable_max_pct": round(fav_after_pct, 2),
-                "post_exit_adverse_max_pct": round(adv_after_pct, 2),
-                "missed_upside_dollars": round(missed_dlr, 1),
-                "saved_loss_dollars": round(saved_dlr, 1),
-            })
-
-            if pnl_pct < 0 and adv_after_pct >= 6.0:
-                out["execution_grade"] = "🛡️ 及時空頭止損 (避開無限軋空)"
-                out["pros_summary"] = f"🏆 果斷於 {x_px:.2f} 止損回補空單！回補後股價繼續挾升 +{adv_after_pct:.1f}% (最高見 {max_h_after:.2f})，幫你避開 -{saved_dlr:,.0f} {cur_t} 軋空重傷！"
-                out["cons_summary"] = f"做空位置偏早或未跌穿 50MA 就做空（如影片 2 之 NVDA 教訓）。"
-                out["improvement_advice"] = "切記：股價在 50MA 之上絕不做空！下次若放量升穿空頭止損且站上 20/50MA，回補後可順勢反手做多。"
-                out["theme_level"] = "success"
-            elif 0 <= realized_r < 1.5 and fav_after_pct >= 7.0:
-                out["execution_grade"] = "💸 空單太早回補 (錯過主跌浪)"
-                out["pros_summary"] = f"精準捕捉空頭破位並獲利 {pnl_pct:+.2f}%。"
-                out["cons_summary"] = f"回補後股價繼續崩跌 -{fav_after_pct:.1f}% (最低見 {min_l_after:.2f})，少賺 +{missed_dlr:,.0f} {cur_t} 空頭暴利！"
-                out["improvement_advice"] = "空頭瀑布殺往往快而急，下次觸及 TP1 只回補 50%，餘下 50% 空單將止損下移至保本價並沿下彎 10/20EMA 抱到底！"
-                out["theme_level"] = "warning"
-            else:
-                out["execution_grade"] = "✅ 空單正常回補結算"
-                out["pros_summary"] = f"空單結算 {pnl_pct:+.2f}% ({realized_r:+.2f}R)；回補後股價最高反彈 +{adv_after_pct:.1f}%、最低續跌 -{fav_after_pct:.1f}%。"
-                out["cons_summary"] = "風險控制合乎規範。"
-                out["improvement_advice"] = "做空切記『快進快出、見底反抽即鎖潤』。"
-                out["theme_level"] = "info"
-    except Exception:
-        pass
-    return out
-
-
-# ==============================================================================
-# [v57.0 核心新增 2：美股開盤流動性獵殺 (掃昨收 PDC / 盤前高低 PMH/PML) 與最佳入場時間窗引擎]
-# 專門實踐用戶需求 5：
-# 「美股開盤嘅時候流動性係咪好鍾意掃到琴日嘅收盤價或者唔同市區的高點或者低點，可以思考呢一個方向找出最佳嘅入場時間（個人觀察，不要盲目認同）」
-# ==============================================================================
-def evaluate_us_market_open_liquidity_sweep_and_orb(
-    ticker: str,
-    daily_df: pd.DataFrame,
-    plan_type: str = "LONG"
-) -> Dict[str, Any]:
-    """
-    獨立、不盲從的微結構量化驗證：
-    統計該股票過去 20 個交易日的真實日線與日內行為，並結合今日盤前 (Pre-Market) / 昨收 (PDC) / 昨日高低 (PDH/PDL) 水平：
-    1. 計算該股過去 20 日「開盤後回補昨收缺口 / 測試 PDC 比率 (PDC Touch Rate %)」與「測試前日低點/高點後反轉比率 (Liquidity Sweep & Reclaim Rate %)」。
-    2. 嚴格區分兩種截然不同的美股開盤機制（反駁「所有股票都等掃昨收才買」的單一誤區）：
-       - 【類型 A：機構掃止損吸針型 (Judas Swing / Stop-Hunt Reclaim，佔回踩單與普通突破約 68%)】
-         * 特徵：開盤首 15~30 分鐘 (HKT 21:30–22:00 / 冬令 22:30–23:00)，做市商故意將價格推向 **昨收價 (PDC)**、**盤前低點 (PML)** 或 **昨日低點 (PDL)** 掃走散戶 Stop-Loss 獲取流動性，隨後在 **22:00–22:45 (冬令 23:00–23:45)** 放量收復 **日內 VWAP**。
-         * 最佳入場時間窗：**開盤後 30~75 分鐘（待掃完流動性並站回 VWAP 右側才扣扳機，絕不在 21:30/22:30 第一分鐘市價亂衝）**！
-       - 【類型 B：真缺口鎖籌不回補型 (Breakaway Power Gap / ORB，佔頂級催化劑領頭羊約 32%)】
-         * 特徵：盤前成交量異常放大且跳空突破多月 VCP 樞紐，開盤後連 PDC 都不回踩就直接沿 VWAP 狂飆（若死等回踩昨收價 PDC 會 100% 踏空大牛股！）。
-         * 最佳入場時間窗：**開盤第 5m / 15m Opening Range Breakout (ORB 高點突破) 且守穩日內 VWAP 之上**！
-    """
-    fmt_t, mkt_t, _, _, cur_t = format_and_detect_market(ticker)
-    out = {
-        "market_type": mkt_t,
-        "pdc_price": 0.0,
-        "pdh_price": 0.0,
-        "pdl_price": 0.0,
-        "pm_high": None,
-        "pm_low": None,
-        "live_price": 0.0,
-        "pdc_touch_rate_20d": 0.0,
-        "undercut_reclaim_rate_20d": 0.0,
-        "avg_lower_wick_atr": 0.0,
-        "dominant_open_play": "📊 標準等待開盤後 30 分鐘確認",
-        "best_entry_time_window_hkt": "HKT 22:00–23:00 (夏令) / 23:00–24:00 (冬令)",
-        "key_liquidity_magnets": "-",
-        "tactical_instruction": "-",
-        "critical_warning": "-"
-    }
-    if daily_df is None or len(daily_df) < 22:
-        return out
-
-    try:
-        closes = daily_df["Close"].values.astype(float)
-        opens = daily_df["Open"].values.astype(float)
-        highs = daily_df["High"].values.astype(float)
-        lows = daily_df["Low"].values.astype(float)
-
-        # 昨收 (PDC)、昨高 (PDH)、昨低 (PDL)
-        pdc = float(closes[-1])
-        pdh = float(highs[-1])
-        pdl = float(lows[-1])
-        prev_pdc = float(closes[-2])
-
-        # 統計過去 20 個交易日：開盤後盤中觸及前一交易日收盤價 (PDC) 的比例
-        pdc_touches = 0
-        undercut_reclaims = 0
-        wick_ratios = []
-        for i in range(len(closes) - 20, len(closes)):
-            c_prev_i = float(closes[i - 1])
-            l_prev_i = float(lows[i - 1])
-            h_i, l_i, o_i, c_i = float(highs[i]), float(lows[i]), float(opens[i]), float(closes[i])
-            rng_i = max(h_i - l_i, 1e-4)
-            # 是否在盤中觸及或穿過昨收價 c_prev_i
-            if l_i <= c_prev_i <= h_i:
-                pdc_touches += 1
-            # 是否刺穿前日低點或開盤價下方後收陽拉回上半部 (開盤流動性吸針)
-            if (l_i < c_prev_i * 0.996 or l_i < l_prev_i * 1.002) and c_i >= o_i and ((c_i - l_i) / rng_i >= 0.55):
-                undercut_reclaims += 1
-            wick_ratios.append((min(o_i, c_i) - l_i) / rng_i)
-
-        pdc_touch_pct = round((pdc_touches / 20.0) * 100.0, 1)
-        reclaim_pct = round((undercut_reclaims / 20.0) * 100.0, 1)
-        avg_wick_pct = round(float(np.mean(wick_ratios)) * 100.0, 1)
-
-        ext_q = fetch_single_extended_hours_quote(fmt_t)
-        live_p = float(ext_q.get("live_price") or pdc)
-        pm_h = float(ext_q.get("ext_high") or max(live_p, pdc)) if ext_q.get("has_extended_data") else None
-        pm_l = float(ext_q.get("ext_low") or min(live_p, pdc)) if ext_q.get("has_extended_data") else None
-
-        out.update({
-            "pdc_price": round(pdc, 2),
-            "pdh_price": round(pdh, 2),
-            "pdl_price": round(pdl, 2),
-            "pm_high": round(pm_h, 2) if pm_h else None,
-            "pm_low": round(pm_l, 2) if pm_l else None,
-            "live_price": round(live_p, 2),
-            "pdc_touch_rate_20d": pdc_touch_pct,
-            "undercut_reclaim_rate_20d": reclaim_pct,
-            "avg_lower_wick_atr": avg_wick_pct,
-        })
-
-        pm_str = f"｜盤前高 PMH `{pm_h:.2f}` / 盤前低 PML `{pm_l:.2f}`" if (pm_h and pm_l) else ""
-        out["key_liquidity_magnets"] = f"昨收 PDC `{pdc:.2f}`｜昨高 PDH `{pdh:.2f}`｜昨低 PDL `{pdl:.2f}`{pm_str}"
-
-        if mkt_t == "HK":
-            out["best_entry_time_window_hkt"] = "🇭🇰 港股黃金時段：① 早盤 09:45–10:15 (避開 09:30 競價散戶亂掃) ｜ ② 尾盤 15:30–15:58 (確認日線收盤結構)"
-            out["dominant_open_play"] = f"🇭🇰 港股近20日回踩昨收率 {pdc_touch_pct:.0f}% (開盤首15分鐘常掃昨收/前低流動性)"
-            out["tactical_instruction"] = (
-                f"港股 09:30–09:45 常有做市商掃穿昨收 (`{pdc:.2f}`) 或盤前競價高低點測試流動性。"
-                f"建議等 **09:45 後站穩分時均價線 (VWAP)** 才執行首筆買入，或等 **15:40 後確認日線不留長上影線** 才進場！"
-            )
-            out["critical_warning"] = "切勿在 09:20–09:33 競價剛開盤跳空過高時市價追入。"
-            return out
-
-        # 美股三大流動性時段與兩大劇本判定
-        if plan_type == "SHORT":
-            out["best_entry_time_window_hkt"] = "🇺🇸 美股做空最佳時段：開盤後 15~45 分鐘（夏令 21:45–22:15 / 冬令 22:45–23:15）"
-            out["dominant_open_play"] = f"🔴 空頭誘多掃止損 (近20日回摸昨收率 {pdc_touch_pct:.0f}%)"
-            out["tactical_instruction"] = (
-                f"美股開盤首 15 分鐘極常出現 **『向上掃昨收價 (`{pdc:.2f}`) 或盤前高點 (`{pm_h or pdh:.2f}`) 觸發空頭止損』** 的假拉升 (Upthrust)！"
-                f"請等開盤衝高測試 `{pdc:.2f}` ~ `{pm_h or pdh:.2f}` 失敗並 **放量跌穿日內 VWAP** 時才精準沽空，切勿在開盤第一秒低開超過 2% 時直接追空！"
-            )
-            out["critical_warning"] = "若開盤 30 分鐘後股價持續站穩在昨高 (PDH) 及 VWAP 之上，代表屬真軋空，嚴禁逆勢做空！"
-        else:
-            gap_pct = ((live_p - pdc) / max(pdc, 1e-6)) * 100.0
-            if gap_pct >= 2.2:
-                out["dominant_open_play"] = f"🚀 盤前跳空強勢股 ({gap_pct:+.2f}%)：雙軌應對『回踩 PML/PDC vs 15m ORB 突破』"
-                out["best_entry_time_window_hkt"] = "🇺🇸 雙窗口：① 21:45/22:45 (15m ORB 不回補突破) ｜ ② 22:00–22:45 / 23:00–23:45 (回踩 PDC/PML 吸針收回)"
-                out["tactical_instruction"] = (
-                    f"此股盤前已跳空 **{gap_pct:+.2f}%**，歷史近20日回摸昨收率為 **{pdc_touch_pct:.0f}%**：\n"
-                    f"1. **【防賣方掃流動性洗盤（約7成情況）】**：開盤首 15~30 分鐘若回落測試 **盤前低點 (`{pm_l or pdc:.2f}`)** 或 **昨收 (`{pdc:.2f}`)** 出現長下影線並收復日內 VWAP，即為全天最低成本黃金買點！\n"
-                    f"2. **【防真強勢股不回頭踏空（約3成情況，不要死等昨收！）】**：頂級催化劑領頭羊開盤往往**不回補缺口**！若開盤首 15 分鐘最低價始終守在 VWAP 之上，請於升穿 **首 15 分鐘高點 (15m ORB High)** 時先入 50% 底倉！"
-                )
-            else:
-                out["dominant_open_play"] = f"🧲 典型開盤掃流動性吸針股 (近20日回摸昨收率 {pdc_touch_pct:.0f}%｜下影線收回率 {reclaim_pct:.0f}%)"
-                out["best_entry_time_window_hkt"] = "🇺🇸 最佳狙擊時段：開盤後 30~75 分鐘（夏令 22:00–22:45 / 冬令 23:00–23:45）或 尾盤最後 30 分鐘"
-                out["tactical_instruction"] = (
-                    f"數據顯示此股過去 20 日有 **{pdc_touch_pct:.0f}%** 機率在盤中觸及昨收價 (`{pdc:.2f}`)，平均下影線佔全天波幅 **{avg_wick_pct:.0f}%**：\n"
-                    f"- **🎯 最佳入場做法**：開盤首 15~30 分鐘（華爾街俗稱 Amateur Hour）機構算法極愛先向下掃穿 **昨收 (`{pdc:.2f}`)** 或 **盤前低點 (`{pm_l or pdl:.2f}`)** 獵殺散戶止損單；"
-                    f"請耐心等到 **開盤 30 分鐘後**，見股價在 `{min(pdc, pm_l or pdc):.2f}` 附近止跌並 **右側放量站回日內 VWAP** 時才入場，平均可比開盤盲衝省下 1.2%~2.5% 成本並避開假突破！"
-                )
-            out["critical_warning"] = "⚠️ 獨立驗證提醒：並非 100% 美股都會回踩昨收價（約 25%~35% 強勢突破股開盤即走單邊）！若開盤 15 分鐘完全不跌且守穩 VWAP 突破首 15 分鐘高點 (ORB)，應順勢跟進而非死等昨收。"
-    except Exception:
-        pass
-    return out
-
-
-# ==============================================================================
-# [v57.0 核心新增 3：吸收 @RohOnChain 貼文精華 — 無前視偏差 3×3 馬可夫市場狀態轉移矩陣 (Markov Regime Engine)]
-# 專門實踐用戶需求 4：
-# 「參考一下呢個貼文，關於AI做投資app，有沒有可取之處，不一定跟隨 https://x.com/rohonchain/status/2109650293365305427」
-# ==============================================================================
-def compute_markov_regime_transition_info(df: pd.DataFrame, window: int = 20, threshold: float = 0.045) -> Dict[str, Any]:
-    """
-    實作 @RohOnChain (Roan) 之 Markov Regime 狀態轉移概率概念（並針對 Swing Trading 修正其單純靠 20 日回報滯後的缺點）：
-    - 將歷史每根 K 線按 20 日滾動回報劃分為 3 個狀態：0 = Bear (<-4.5%), 1 = Sideways (-4.5%~+4.5%), 2 = Bull (>+4.5%)
-    - 嚴格只用歷史已發生數據統計 3×3 狀態轉移矩陣 P(S_{t+1} | S_t) 及穩態分佈 (Stationary Distribution)
-    - 輸出當前狀態持續率 (Persistence) 與下一階段轉強/轉弱概率，作為倉位縮放濾網！
-    """
-    res = {
-        "current_regime": "Sideways",
-        "persistence_prob": 0.50,
-        "bull_prob_next": 0.33,
-        "sideways_prob_next": 0.34,
-        "bear_prob_next": 0.33,
-        "stationary_bear_share": 0.30,
-        "conviction_signal": 0.0,
-        "regime_badge": "🟡 震盪過渡態",
-        "sizing_multiplier": 1.0
-    }
-    try:
-        if df is None or len(df) < 60:
-            return res
-        rets = df["Close"].pct_change(window).dropna().values
-        if len(rets) < 30:
-            return res
-        states = np.where(rets < -threshold, 0, np.where(rets > threshold, 2, 1))
-        trans = np.ones((3, 3), dtype=float) * 0.5  # Laplace smoothing
-        for a, b in zip(states[:-1], states[1:]):
-            trans[int(a), int(b)] += 1.0
-        row_sums = trans.sum(axis=1, keepdims=True)
-        prob_mat = trans / np.maximum(row_sums, 1e-9)
-
-        cur_st = int(states[-1])
-        st_names = ["Bear", "Sideways", "Bull"]
-        next_probs = prob_mat[cur_st]
-        bull_p = float(next_probs[2])
-        side_p = float(next_probs[1])
-        bear_p = float(next_probs[0])
-        persist_p = float(prob_mat[cur_st, cur_st])
-
-        # 計算長期各狀態佔比
-        vals, cnts = np.unique(states, return_counts=True)
-        stat_map = {0: 0.0, 1: 0.0, 2: 0.0}
-        for v, c in zip(vals, cnts):
-            stat_map[int(v)] = float(c) / float(len(states))
-
-        sig = round(bull_p - bear_p, 2)
-        size_mult = round(max(0.35, min(1.0, 1.0 - max(0.0, stat_map[0] - 0.25))), 2)
-        lbl_map = {
-            2: f"🐂 馬可夫多頭態 (持續率 {persist_p*100:.0f}%｜信號 {sig:+.2f})",
-            1: f"🟡 馬可夫整理態 (轉牛率 {bull_p*100:.0f}%｜轉熊率 {bear_p*100:.0f}%)",
-            0: f"🐻 馬可夫空頭態 (持續率 {persist_p*100:.0f}%｜信號 {sig:+.2f})"
-        }
-        res.update({
-            "current_regime": st_names[cur_st],
-            "persistence_prob": round(persist_p, 3),
-            "bull_prob_next": round(bull_p, 3),
-            "sideways_prob_next": round(side_p, 3),
-            "bear_prob_next": round(bear_p, 3),
-            "stationary_bear_share": round(stat_map[0], 3),
-            "conviction_signal": sig,
-            "regime_badge": lbl_map.get(cur_st, "🟡 震盪態"),
-            "sizing_multiplier": size_mult
-        })
-    except Exception:
-        pass
-    return res
-
-
 def render_locked_portfolio_summary_and_export(persistent_dict: dict) -> None:
     """[v31.0 新增：已鎖定持倉組合實時監控看板與 CSV 交易日誌匯出]"""
     locked_map = persistent_dict.get("user_locked_positions", {})
@@ -3650,35 +3167,15 @@ def get_ticker_sector(ticker: str) -> str:
     # [v45.0 P1-2 修復] 未收錄之自訂股票返回獨立標識，避免 drop_duplicates(subset=["_sector_grp"]) 將多隻自選股合併刪除
     return f"港股獨立標的 ({fmt_t})" if fmt_t.endswith(".HK") else f"美股獨立標的 ({fmt_t})"
 
-def is_running_on_public_cloud() -> bool:
-    """
-    [v57.0 雲端部署私隱安全防護鎖]
-    自動偵測程式是否運行於 Streamlit Community Cloud / HuggingFace Spaces / Render / Railway 等公網雲端伺服器。
-    若在公網雲端運行（且未開啟個人專屬管理鎖），自動禁止讀取/寫入共享本地磁碟之持倉與交易日誌，100% 杜絕他人打開網址看到你的持倉與交易記錄！
-    """
-    for env_k in ["STREAMLIT_SHARING_MODE", "IS_STREAMLIT_CLOUD", "SPACE_ID", "RENDER_SERVICE_ID", "RAILWAY_ENVIRONMENT"]:
-        if _os_lib.environ.get(env_k):
-            return True
-    if _os_lib.path.exists("/mount/src") or str(_os_lib.getcwd()).startswith("/mount/src"):
-        return True
-    return False
-
-
 def load_persisted_state_from_disk(persistent_dict: dict) -> None:
-    """從本地磁碟讀取已保存的自選股、鎖定持倉、已實現賣出交易日誌、信號生命週期與開倉日 R:R 快照"""
+    """從本地磁碟讀取已保存的自選股、鎖定持倉、信號生命週期與開倉日 R:R 雜湊快照，防止重啟 Streamlit 時記憶清空"""
     try:
-        if is_running_on_public_cloud():
-            return
         if _os_lib.path.exists(STATE_BACKUP_FILE):
             with open(STATE_BACKUP_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 if "user_locked_positions" in data and isinstance(data["user_locked_positions"], dict):
                     persistent_dict.setdefault("user_locked_positions", {}).update(data["user_locked_positions"])
-                if "user_holding_directions" in data and isinstance(data["user_holding_directions"], dict):
-                    persistent_dict.setdefault("user_holding_directions", {}).update(data["user_holding_directions"])
-                if "closed_trades_journal" in data and isinstance(data["closed_trades_journal"], list):
-                    persistent_dict["closed_trades_journal"] = list(data["closed_trades_journal"])
                 if "auto_entry_date_hash_store" in data and isinstance(data["auto_entry_date_hash_store"], dict):
                     persistent_dict.setdefault("auto_entry_date_hash_store", {}).update(data["auto_entry_date_hash_store"])
                 if "signal_lifecycle_store" in data and isinstance(data["signal_lifecycle_store"], dict):
@@ -3689,17 +3186,13 @@ def load_persisted_state_from_disk(persistent_dict: dict) -> None:
         swing_logger.debug(f"讀取本地狀態備份略過: {e}")
 
 def save_persisted_state_to_disk(persistent_dict: dict, watchlist_dict: Optional[ dict ] = None) -> None:
-    """以原子寫入方式將用戶鎖定持倉、已實現賣出交易日誌、信號生命週期、開倉日快照與自選股名單備份至本地磁碟"""
+    """以原子寫入方式將用戶鎖定持倉、信號生命週期、開倉日快照與自選股名單備份至本地磁碟並同步至全域快取"""
     try:
-        if is_running_on_public_cloud():
-            return
         if watchlist_dict is not None:
             persistent_dict["_disk_watchlist_dict"] = watchlist_dict
         payload = {
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "user_locked_positions": persistent_dict.get("user_locked_positions", {}),
-            "user_holding_directions": persistent_dict.get("user_holding_directions", {}),
-            "closed_trades_journal": persistent_dict.get("closed_trades_journal", []),
             "auto_entry_date_hash_store": persistent_dict.get("auto_entry_date_hash_store", {}),
             "signal_lifecycle_store": persistent_dict.get("signal_lifecycle_store", {}),
             "watchlist_dict": watchlist_dict if watchlist_dict is not None else persistent_dict.get("_disk_watchlist_dict", {})
@@ -7143,8 +6636,6 @@ if "_session_isolated_store" not in st.session_state:
             "signal_lifecycle_store": dict(_global_persistent_data.get("signal_lifecycle_store", {})),
             "radar_breadth_stats": dict(_global_persistent_data.get("radar_breadth_stats", {})),
             "user_locked_positions": dict(_global_persistent_data.get("user_locked_positions", {})),
-            "user_holding_directions": dict(_global_persistent_data.get("user_holding_directions", {})),
-            "closed_trades_journal": list(_global_persistent_data.get("closed_trades_journal", [])),
             "auto_entry_date_hash_store": dict(_global_persistent_data.get("auto_entry_date_hash_store", {})),
             "_schema_ver": CURRENT_SCHEMA_VERSION
         }
@@ -9781,6 +9272,126 @@ def _convert_futu_code_to_sys_ticker(futu_code: str) -> str:
     return fc
 
 
+def render_futu_opend_sidebar_bridge() -> None:
+    with st.sidebar.expander("🐂 富途牛牛 OpenD 免寫 Code 連動中心", expanded=False):
+        st.caption("無需自己寫任何 Python 代碼！只要喺 Mac 開住 **FutuOpenD** 軟件，即可喺度一鍵讀取富途真實持倉及雙向同步自選分組。")
+        enable_futu = st.checkbox("⚡ 啟用富途 OpenD 本地連線", value=False, key="chk_enable_futu_opend_bridge")
+        if not enable_futu:
+            st.info("💡 尚未開啟連線。請先參考對話框嘅 3 步保姆級教學開啟 Mac 版 FutuOpenD，再打勾即可使用！")
+            return
+
+        f_col1, f_col2 = st.columns([1.8, 1.2])
+        with f_col1:
+            futu_host = st.text_input("OpenD 主機位址", value="127.0.0.1", key="inp_futu_host")
+        with f_col2:
+            futu_port = st.number_input("API 端口 (Port)", value=11111, step=1, key="inp_futu_port")
+
+        trd_env_choice = st.radio(
+            "選擇讀取之富途帳戶環境",
+            options=["SIMULATE (模擬倉 — 零風險測試推薦)", "REAL (真實證券持倉 — 只讀模式)"],
+            index=0,
+            key="rad_futu_trd_env"
+        )
+        is_real_env = trd_env_choice.startswith("REAL")
+
+        # 檢查是否已安裝 futu-api
+        try:
+            import futu as _ft_mod  # type: ignore
+            _has_futu_pkg = True
+        except Exception:
+            _has_futu_pkg = False
+
+        if not _has_futu_pkg:
+            st.warning("⚠️ 系統偵測到你部 Mac 尚未安裝官方 `futu-api` 套件。請複製以下一行指令貼入 Mac 終端機 (Terminal) 執行：")
+            st.code("pip3 install futu-api", language="bash")
+            return
+
+        if st.button("🔌 1. 測試連線並檢查富途狀態", use_container_width=True, key="btn_futu_test_ping"):
+            try:
+                from futu import OpenQuoteContext, RET_OK  # type: ignore
+                q_ctx = OpenQuoteContext(host=futu_host, port=int(futu_port))
+                ret, data = q_ctx.get_global_state()
+                q_ctx.close()
+                if ret == RET_OK:
+                    st.success(f"✅ 成功連上富途 OpenD ({futu_host}:{int(futu_port)})！伺服器狀態正常。")
+                else:
+                    st.error(f"❌ 無法取得狀態：{data}")
+            except Exception as e:
+                st.error(f"❌ 連線失敗（請確認 Mac 背景已打開並登入 FutuOpenD 軟件）：{e}")
+
+        if st.button("💼 2. 一鍵從富途匯入「持倉」與成本價", use_container_width=True, type="primary", key="btn_futu_sync_positions"):
+            try:
+                from futu import OpenSecTradeContext, TrdEnv, TrdMarket, SecurityFirm, RET_OK  # type: ignore
+                target_env = TrdEnv.REAL if is_real_env else TrdEnv.SIMULATE
+                wl_dict = st.session_state.watchlist_dict
+                locked_map = persistent_data.setdefault("user_locked_positions", {})
+                manual_dir_map = persistent_data.setdefault("user_holding_directions", {})
+                if "💼 持倉" not in wl_dict and "持倉" not in wl_dict:
+                    wl_dict["持倉"] = []
+                hold_cat_name = "持倉" if "持倉" in wl_dict else ("💼 持倉" if "💼 持倉" in wl_dict else list(wl_dict.keys())[0])
+
+                imported_cnt = 0
+                for t_mkt in [TrdMarket.HK, TrdMarket.US]:
+                    try:
+                        trd_ctx = OpenSecTradeContext(filter_trdmarket=t_mkt, host=futu_host, port=int(futu_port), security_firm=SecurityFirm.FUTUSECURITIES)
+                        ret, pos_df = trd_ctx.position_list_query(trd_env=target_env)
+                        trd_ctx.close()
+                        if ret == RET_OK and pos_df is not None and not pos_df.empty:
+                            for _, prow in pos_df.iterrows():
+                                qty_val = float(prow.get("qty", 0.0) or 0.0)
+                                if abs(qty_val) <= 0:
+                                    continue
+                                sys_tk = _convert_futu_code_to_sys_ticker(str(prow.get("code", "")))
+                                cost_p = float(prow.get("cost_price", 0.0) or prow.get("nominal_price", 0.0) or 0.0)
+                                dir_c = "SHORT" if qty_val < 0 else "LONG"
+                                if sys_tk not in wl_dict[hold_cat_name]:
+                                    wl_dict[hold_cat_name].append(sys_tk)
+                                manual_dir_map[sys_tk] = dir_c
+                                if cost_p > 0:
+                                    locked_map[sys_tk] = {
+                                        "dir_code": dir_c,
+                                        "entry": round(cost_p, 3),
+                                        "fixed_sl": round(cost_p * (0.95 if dir_c == "LONG" else 1.05), 3),
+                                        "fixed_tp": round(cost_p * (1.12 if dir_c == "LONG" else 0.88), 3),
+                                        "bars_held_since_entry": 1,
+                                        "source": "FutuOpenD"
+                                    }
+                                imported_cnt += 1
+                    except Exception:
+                        continue
+                save_persisted_state_to_disk(persistent_data, wl_dict)
+                if imported_cnt > 0:
+                    st.success(f"🎉 成功從富途牛牛匯入 {imported_cnt} 隻真實/模擬持倉（已自動區分港美股、做多/做空及成本價）！")
+                    st.rerun()
+                else:
+                    st.info("連線成功，但所選富途帳戶環境目前無持倉紀錄。")
+            except Exception as e:
+                st.error(f"❌ 讀取富途持倉失敗：{e}")
+
+        sync_group_sel = st.selectbox(
+            "選擇要推送至手機富途牛牛 App 的分組",
+            options=list(st.session_state.watchlist_dict.keys()),
+            key="sel_futu_push_group"
+        )
+        if st.button("📤 3. 一鍵將所選分組推送至富途牛牛 App", use_container_width=True, key="btn_futu_push_watchlist"):
+            try:
+                from futu import OpenQuoteContext, ModifyUserSecurityOp, RET_OK  # type: ignore
+                t_list = st.session_state.watchlist_dict.get(sync_group_sel, [])
+                if not t_list:
+                    st.warning("此分組目前無股票可推送。")
+                else:
+                    futu_codes = [_convert_sys_ticker_to_futu_code(x) for x in t_list]
+                    q_ctx = OpenQuoteContext(host=futu_host, port=int(futu_port))
+                    ret, msg = q_ctx.modify_user_security(sync_group_sel, ModifyUserSecurityOp.ADD, futu_codes)
+                    q_ctx.close()
+                    if ret == RET_OK:
+                        st.success(f"✅ 已將【{sync_group_sel}】共 {len(futu_codes)} 隻股票即時同步至你手機/電腦嘅富途牛牛 App！")
+                    else:
+                        st.error(f"⚠️ 推送返回提示：{msg}（請先喺富途牛牛建立同名分組『{sync_group_sel}』）")
+            except Exception as e:
+                st.error(f"❌ 推送至富途失敗：{e}")
+
+render_futu_opend_sidebar_bridge()
 st.sidebar.markdown('---')
 st.sidebar.markdown("### 🌐 擴充掃描池 (打破百隻限制)")
 custom_tickers_raw = st.sidebar.text_area("自訂股票代碼 (逗號或空白分隔)", placeholder="例如: AAPL, PLTR, MSTR\n在此輸入你今天感興趣的代號，加入雷達進行全景體檢。")
@@ -10681,226 +10292,6 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
                 if st.button(f"🧹 順手清除不在持倉組內的舊測試鎖定紀錄 ({', '.join(stale_locked_tickers)})", key=f"btn_clean_stale_locks_{context_key}"):
                     for _st_tk in stale_locked_tickers:
                         locked_map.pop(_st_tk, None)
-                    save_persisted_state_to_disk(persistent_data, wl_dict)
-                    st.rerun()
-
-
-def render_trade_journal_and_post_exit_review_hub(context_key: str = "main_journal") -> None:
-    """
-    [v57.0 核心新增：「📒 實戰交易記錄 & 一鍵記錄賣出 + 賣出後走勢利弊 AI 復盤中心」]
-    支援：
-    1. 直接從當前「持倉」一鍵選擇股票、輸入賣出價與賣出原因，自動從持倉移出並轉入已結算交易記錄；
-    2. 亦支援手動補錄任何過往買賣交易；
-    3. 自動追蹤每一筆已賣出股票在賣出後的真實走勢 (T+5 / T+10 / T+20 / 迄今最高最低)，
-       診斷該筆交易是「🏆 完美逃頂」、「🛡️ 神級止損救命」、「💸 太早賣飛大牛股」定係「🚨 被洗盤針掃出後大升」，並給出具體改善建議！
-    """
-    wl_dict = st.session_state.watchlist_dict
-    locked_map = persistent_data.setdefault("user_locked_positions", {})
-    manual_dir_map = persistent_data.setdefault("user_holding_directions", {})
-    journal_list = persistent_data.setdefault("closed_trades_journal", [])
-
-    holding_cats = [c for c in wl_dict.keys() if ("持倉" in c or "holding" in c.lower() or "portfolio" in c.lower())]
-    active_hold_cat = holding_cats[0] if holding_cats else None
-    hold_tickers = [format_and_detect_market(t)[0] for t in wl_dict.get(active_hold_cat, [])] if active_hold_cat else list(locked_map.keys())
-
-    render_color_zone_header(
-        f"📒 【交易記錄與賣出後復盤專區】已結算交易共 {len(journal_list)} 筆",
-        subtitle="🟧 琥珀金專區：一鍵記錄賣出平倉 ｜ 自動追蹤賣出後 T+5/T+10/T+20 走勢並分析利弊與改善方案",
-        theme="orange"
-    )
-
-    with st.expander(f"📝 點擊展開：【💰 記錄賣出平倉按鈕】&【🔍 賣出後走勢利弊 AI 復盤報告】（共 {len(journal_list)} 筆記錄）", expanded=True):
-        # --- 第一部分：一鍵記錄賣出 / 新增交易記錄原子表單 ---
-        st.markdown("##### 💰 1. 記錄賣出平倉（可揀選現有持倉一鍵平倉，或手動輸入股票代碼補錄交易）")
-        with st.form(f"form_record_sell_trade_{context_key}", clear_on_submit=False):
-            fc1, fc2, fc3, fc4 = st.columns([1.8, 1.3, 1.1, 1.2])
-            with fc1:
-                _quick_opts = ["✏️ 手動輸入任何股票代碼..."] + [f"{t} {get_stock_name(t)} (現有持倉)" for t in hold_tickers]
-                sel_pos_opt = st.selectbox("揀選現有持倉或手動輸入:", options=_quick_opts, index=1 if len(hold_tickers) > 0 else 0, key=f"j_sel_pos_{context_key}")
-            with fc2:
-                manual_tk_inp = st.text_input("若手動輸入請填代碼:", placeholder="例: 2269.HK, NVDA", key=f"j_man_tk_{context_key}").strip()
-            with fc3:
-                dir_inp = st.selectbox("交易方向:", ["🟢 做多平倉 (賣出)", "🔴 做空平倉 (買回回補)"], key=f"j_dir_{context_key}")
-            with fc4:
-                remove_from_hold_chk = st.checkbox("✅ 同時從「持倉」名單移出", value=True, key=f"j_rm_hold_{context_key}")
-
-            # 根據所選持倉自動帶出預設買入價與股數
-            _chosen_tk = manual_tk_inp if (sel_pos_opt.startswith("✏️") or manual_tk_inp) else sel_pos_opt.split()[0].strip()
-            _fmt_chosen = format_and_detect_market(_chosen_tk)[0] if _chosen_tk else "0700.HK"
-            _l_preset = locked_map.get(_fmt_chosen, {})
-            _def_entry = float(_l_preset.get("entry", 100.0)) if _l_preset else 100.0
-            _def_sh = int(_l_preset.get("held_shares", 100)) if _l_preset else 100
-            _def_sl = float(_l_preset.get("fixed_sl", 0.0)) if _l_preset else 0.0
-            _def_tp = float(_l_preset.get("fixed_tp", 0.0)) if _l_preset else 0.0
-
-            sc1, sc2, sc3, sc4, sc5, sc6 = st.columns([1.15, 1.15, 1.0, 1.15, 1.15, 1.4])
-            with sc1:
-                inp_entry_px = st.number_input("🎯 買入/開倉價:", min_value=0.001, value=max(0.01, _def_entry), step=0.1, key=f"j_epx_{context_key}")
-            with sc2:
-                inp_exit_px = st.number_input("💰 賣出/平倉價:", min_value=0.001, value=max(0.01, _def_entry * 1.03), step=0.1, key=f"j_xpx_{context_key}")
-            with sc3:
-                inp_shares = st.number_input("📦 股數 (Shares):", min_value=1, value=max(1, _def_sh), step=100, key=f"j_sh_{context_key}")
-            with sc4:
-                inp_entry_dt = st.date_input("📅 買入日期:", value=pd.to_datetime(_l_preset.get("anchor_date", datetime.now().strftime("%Y-%m-%d"))).date() if _l_preset.get("anchor_date") else datetime.now().date(), key=f"j_edt_{context_key}")
-            with sc5:
-                inp_exit_dt = st.date_input("📅 賣出日期:", value=datetime.now().date(), key=f"j_xdt_{context_key}")
-            with sc6:
-                inp_reason = st.selectbox(
-                    "🏷️ 賣出原因分類:",
-                    [
-                        "🎯 觸及目標位止盈 (TP1/TP2)",
-                        "📈 跌穿 9EMA/20MA 移動鎖潤",
-                        "🛡️ 觸及結構止損位 (1R 紀律離場)",
-                        "🌩️ 大市轉勢/見頂主動減倉避險",
-                        "😰 盤中洗盤恐慌手震提早賣出",
-                        "✂️ 持倉滿8日動能停滯換馬"
-                    ],
-                    key=f"j_reas_{context_key}"
-                )
-
-            nc1, nc2 = st.columns([3.8, 1.4])
-            with nc1:
-                inp_notes = st.text_input("✍️ 交易心得備註 (選填):", placeholder="例如：開盤衝高賣出一半，或被早盤洗盤針嚇走...", key=f"j_note_{context_key}")
-            with nc2:
-                st.write("")
-                sub_sell_btn = st.form_submit_button("💰 確認記錄賣出並生成 AI 復盤", use_container_width=True, type="primary")
-
-            if sub_sell_btn:
-                target_raw_tk = manual_tk_inp if (sel_pos_opt.startswith("✏️") or manual_tk_inp) else sel_pos_opt.split()[0].strip()
-                if not target_raw_tk:
-                    st.warning("請選擇持倉股票或輸入股票代碼！")
-                else:
-                    fmt_s_tk, _, _, _, _ = format_and_detect_market(target_raw_tk)
-                    l_ref = locked_map.get(fmt_s_tk, {})
-                    d_code_s = "SHORT" if "做空" in dir_inp else "LONG"
-                    rec_new = record_closed_trade_to_journal(
-                        ticker=fmt_s_tk,
-                        dir_code=d_code_s,
-                        entry_price=float(inp_entry_px),
-                        exit_price=float(inp_exit_px),
-                        shares=int(inp_shares),
-                        entry_date_str=str(inp_entry_dt),
-                        exit_date_str=str(inp_exit_dt),
-                        initial_sl=float(l_ref.get("fixed_sl", _def_sl)),
-                        initial_tp=float(l_ref.get("fixed_tp", _def_tp)),
-                        exit_reason=inp_reason,
-                        notes=inp_notes
-                    )
-                    if remove_from_hold_chk:
-                        if active_hold_cat and active_hold_cat in wl_dict:
-                            wl_dict[active_hold_cat] = [x for x in wl_dict[active_hold_cat] if format_and_detect_market(x)[0] != fmt_s_tk]
-                        locked_map.pop(fmt_s_tk, None)
-                        manual_dir_map.pop(fmt_s_tk, None)
-                    save_persisted_state_to_disk(persistent_data, wl_dict)
-                    st.success(f"✅ 已成功記錄 {fmt_s_tk} ({rec_new['stock_name']}) 賣出交易（淨盈虧 {rec_new['net_pnl']:+,.1f} {rec_new['currency']} / {rec_new['realized_r']:+.2f}R），並完成賣出後發展診斷！")
-                    st.rerun()
-
-        # --- 第二部分：已結算交易統計與賣出後走勢利弊 AI 復盤表 ---
-        if not journal_list:
-            st.caption("（目前尚無已記錄的賣出交易。當你賣出股票或在富途平倉同步後，系統會自動在此追蹤賣出後的股價發展並分析利弊！）")
-            return
-
-        win_trades = [t for t in journal_list if float(t.get("net_pnl", 0.0)) > 0]
-        loss_trades = [t for t in journal_list if float(t.get("net_pnl", 0.0)) <= 0]
-        win_rate_j = (len(win_trades) / max(1, len(journal_list))) * 100.0
-        avg_r_j = float(np.mean([float(t.get("realized_r", 0.0)) for t in journal_list]))
-
-        jm1, jm2, jm3, jm4 = st.columns(4)
-        jm1.metric("📊 已結算總交易筆數", f"{len(journal_list)} 筆", f"勝 {len(win_trades)} 筆 ／ 負 {len(loss_trades)} 筆")
-        jm2.metric("🎯 實戰勝率 (Win Rate)", f"{win_rate_j:.1f}%", "目標 ≥ 45% 即可靠盈虧比複利")
-        jm3.metric("⚖️ 平均實現 R 倍數", f"{avg_r_j:+.2f} R", "正期望值核心指標")
-        with jm4:
-            csv_j = pd.DataFrame(journal_list).to_csv(index=False).encode("utf-8-sig")
-            st.download_button(
-                "📥 匯出完整交易復盤日誌 (CSV)",
-                data=csv_j,
-                file_name=f"swing_closed_trades_review_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key=f"dl_closed_journal_csv_{context_key}"
-            )
-
-        # 批量預載已賣出股票的 K 線以追蹤賣出後走勢
-        closed_syms = list(dict.fromkeys([str(t.get("ticker", "")) for t in journal_list if t.get("ticker")]))
-        if closed_syms:
-            batch_preload_ohlcv_cache(closed_syms)
-
-        review_table_rows = []
-        for idx_j, tr in enumerate(journal_list):
-            autopsy = evaluate_closed_trade_post_exit_autopsy(tr)
-            tk_j = str(tr.get("ticker", ""))
-            nm_j = str(tr.get("stock_name", ""))
-            d_j = "🟢做多" if tr.get("dir_code") == "LONG" else "🔴做空"
-            pnl_v = float(tr.get("pnl_pct", 0.0))
-            net_dlr = float(tr.get("net_pnl", 0.0))
-            cur_j = str(tr.get("currency", "HKD"))
-            r_val = float(tr.get("realized_r", 0.0))
-
-            t_follow_parts = []
-            if autopsy["t5_chg_pct"] is not None:
-                t_follow_parts.append(f"T+5:{autopsy['t5_chg_pct']:+.1f}%")
-            if autopsy["t10_chg_pct"] is not None:
-                t_follow_parts.append(f"T+10:{autopsy['t10_chg_pct']:+.1f}%")
-            t_follow_str = "｜".join(t_follow_parts) if t_follow_parts else f"賣後{autopsy['bars_after_exit']}日:{autopsy['post_exit_move_pct']:+.1f}%"
-
-            review_table_rows.append({
-                "link_url": f"/?mode=診斷&ticker={tk_j}&dir={tr.get('dir_code','LONG')}&strict={strictness}",
-                "stock_label": f"{tk_j} {nm_j}",
-                "dir_str": d_j,
-                "dates_str": f"{tr.get('entry_date','-')} ➡️ {tr.get('exit_date','-')}",
-                "prices_str": f"{float(tr.get('entry_price',0)):.2f} ➡️ {float(tr.get('exit_price',0)):.2f}",
-                "pnl_str": f"{pnl_v:+.2f}% ({r_val:+.2f}R｜{net_dlr:+,.0f} {cur_j})",
-                "pnl_positive": (net_dlr >= 0),
-                "post_exit_str": f"現價 {autopsy.get('current_price', 0.0):.2f} ({t_follow_str}｜最高+{autopsy.get('post_exit_favorable_max_pct', 0.0):.1f}% / 最低{autopsy.get('post_exit_adverse_max_pct', 0.0):.1f}%)",
-                "grade_str": autopsy["execution_grade"],
-                "pros_cons_advice": f"【利】{autopsy.get('pros_summary', '-')} 【弊/改善】{autopsy['cons_summary']} 👉 {autopsy['improvement_advice']}",
-                "theme_level": autopsy["theme_level"]
-            })
-
-        # 以琥珀金彩色邊框 HTML 表格 100% 全寬展示所有賣出交易與賣出後復盤診斷
-        th_cols = ["🔍 診斷", "📌 股票", "🧭 方向", "📅 買入 ➡️ 賣出日", "💰 買價 ➡️ 賣價", "📈 實現盈虧 (R)", "🔭 賣出後發展追蹤 (T+5/T+10/最高最低)", "🏷️ 賣出操作評級", "🧠 交易利弊與改善方案"]
-        th_html = "".join(f'<th style="padding:7px 9px; text-align:left; font-size:12px; font-weight:800; color:#9A3412; border-bottom:2px solid #F97316; white-space:nowrap;">{c}</th>' for c in th_cols)
-        tr_html_list = []
-        for idx_r, rr in enumerate(review_table_rows):
-            bg_c = "#FFFFFF" if idx_r % 2 == 0 else "#FFFBEB"
-            pnl_col = "#15803D" if rr["pnl_positive"] else "#B91C1C"
-            pnl_bg = "#DCFCE7" if rr["pnl_positive"] else "#FEE2E2"
-            g_bg = "#DCFCE7" if rr["theme_level"] == "success" else ("#FEE2E2" if rr["theme_level"] == "error" else ("#FEF3C7" if rr["theme_level"] == "warning" else "#E0F2FE"))
-            g_fg = "#15803D" if rr["theme_level"] == "success" else ("#B91C1C" if rr["theme_level"] == "error" else ("#B45309" if rr["theme_level"] == "warning" else "#0369A1"))
-            tr_html_list.append(
-                f'<tr style="background:{bg_c}; border-bottom:1px solid #FED7AA;">'
-                f'<td style="padding:7px 9px; white-space:nowrap;"><a href="{rr["link_url"]}" target="_self" style="background:#1E293B; color:#FFF; padding:3px 8px; border-radius:5px; text-decoration:none; font-size:11.5px; font-weight:700;">🔍 復盤K線</a></td>'
-                f'<td style="padding:7px 9px; font-weight:800; font-size:13px; color:#0F172A; white-space:nowrap;">{rr["stock_label"]}</td>'
-                f'<td style="padding:7px 9px; font-weight:700; font-size:12px; white-space:nowrap;">{rr["dir_str"]}</td>'
-                f'<td style="padding:7px 9px; font-family:monospace; font-size:12px; color:#475569; white-space:nowrap;">{rr["dates_str"]}</td>'
-                f'<td style="padding:7px 9px; font-family:monospace; font-weight:700; font-size:12.5px; color:#0F172A; white-space:nowrap;">{rr["prices_str"]}</td>'
-                f'<td style="padding:7px 9px; white-space:nowrap;"><span style="background:{pnl_bg}; color:{pnl_col}; padding:2px 7px; border-radius:5px; font-weight:800; font-family:monospace; font-size:12px;">{rr["pnl_str"]}</span></td>'
-                f'<td style="padding:7px 9px; font-size:12px; font-weight:600; color:#1E293B; white-space:nowrap;">{rr["post_exit_str"]}</td>'
-                f'<td style="padding:7px 9px; white-space:nowrap;"><span style="background:{g_bg}; color:{g_fg}; padding:2px 7px; border-radius:5px; font-weight:800; font-size:12px;">{rr["grade_str"]}</span></td>'
-                f'<td style="padding:7px 9px; font-size:12px; color:#334155; min-width:320px;">{rr["pros_cons_advice"]}</td>'
-                f'</tr>'
-            )
-        st.markdown(
-            f'<div translate="no" class="notranslate" style="border:2px solid #F97316; border-radius:10px; overflow-x:auto; margin-top:8px; margin-bottom:10px; background:#FFFFFF;">'
-            f'<table style="width:100%; border-collapse:collapse;">'
-            f'<thead style="background:#FFEDD5;"><tr>{th_html}</tr></thead>'
-            f'<tbody>{"".join(tr_html_list)}</tbody></table></div>',
-            unsafe_allow_html=True
-        )
-
-        del_c1, del_c2 = st.columns([3.5, 1.5])
-        with del_c1:
-            del_sel = st.selectbox(
-                "選擇要刪除的交易記錄 (若輸入錯誤):",
-                options=[f"#{i+1} {t.get('ticker')} ({t.get('exit_date')} 賣出 @{t.get('exit_price')})" for i, t in enumerate(journal_list)],
-                key=f"sel_del_trd_{context_key}",
-                label_visibility="collapsed"
-            )
-        with del_c2:
-            if st.button("🗑️ 刪除此筆交易記錄", key=f"btn_del_trd_{context_key}", use_container_width=True):
-                idx_del = int(del_sel.split()[0].replace("#", "")) - 1
-                if 0 <= idx_del < len(journal_list):
-                    journal_list.pop(idx_del)
                     save_persisted_state_to_disk(persistent_data, wl_dict)
                     st.rerun()
 
@@ -12939,14 +12330,7 @@ if mode == mode_options[0]:
         st.markdown("---")
 
     # [v54.0 新增：在掃描雷達頁同步提供「🛡️ 持倉分組 × 大市見頂/轉勢每日智能風控與調倉導航中心」]
-    try:
-        render_holdings_group_regime_advisory_hub(context_key="mode1_top")
-    except Exception as _e_hold_m1:
-        st.warning(f"⚠️ 持倉監控面板載入異常 (已自動隔離，不影響下方掃描雷達): {_e_hold_m1}")
-    try:
-        render_trade_journal_and_post_exit_review_hub(context_key="mode1_top")
-    except Exception as _e_jour_m1:
-        st.warning(f"⚠️ 交易復盤日誌載入異常 (已自動隔離，不影響下方掃描雷達): {_e_jour_m1}")
+    render_holdings_group_regime_advisory_hub(context_key="mode1_top")
 
     # [v48.0 升級：將用戶所有「⭐ 自選股票類別」直接納入雷達核心追蹤池選單]
     _wl_pool_opts = [f"⭐ 自選類別：【{c}】({len(gl)}隻)" for c, gl in st.session_state.watchlist_dict.items() if len(gl) > 0]
@@ -13054,14 +12438,7 @@ elif mode == mode_options[2]:
     _all_unique_wl_stocks = list(dict.fromkeys([s for gl in st.session_state.watchlist_dict.values() for s in gl]))
 
     # [v54.0 新增：在自選股票名單頂部自動渲染「🛡️ 持倉分組 × 大市見頂/轉勢每日智能風控與調倉導航中心」]
-    try:
-        render_holdings_group_regime_advisory_hub(context_key="mode3_top")
-    except Exception as _e_hold_m3:
-        st.warning(f"⚠️ 持倉監控面板載入異常 (已自動隔離): {_e_hold_m3}")
-    try:
-        render_trade_journal_and_post_exit_review_hub(context_key="mode3_top")
-    except Exception as _e_jour_m3:
-        st.warning(f"⚠️ 交易復盤日誌載入異常 (已自動隔離): {_e_jour_m3}")
+    render_holdings_group_regime_advisory_hub(context_key="mode3_top")
 
     # --- 頂部總覽與一鍵全掃描工具列 ---
     top_wl_c1, top_wl_c2, top_wl_c3, top_wl_c4 = st.columns([1.4, 1.4, 1.4, 1.8])
@@ -14335,30 +13712,6 @@ elif mode == mode_options[1]:
                 render_atomic_alert_group(_mtf_sniper["entry_timing_cards"], slot=_mtf_cards_slot)
             else:
                 render_atomic_caption("", slot=_mtf_cards_slot)
-
-            # [v57.0 新增：美股/港股開盤流動性獵殺 (掃昨收 PDC / 盤前高低 PMH/PML) 與最佳入場時間窗 + @RohOnChain 馬可夫狀態轉移概率]
-            _open_sweep_info = evaluate_us_market_open_liquidity_sweep_and_orb(
-                ticker=fmt_ticker,
-                daily_df=df,
-                plan_type=plan_type if plan_type in ["LONG", "SHORT"] else "LONG"
-            )
-            _markov_info = compute_markov_regime_transition_info(df)
-            render_color_zone_header(
-                f"🧲 開盤流動性獵殺 (掃昨收 PDC / 盤前高低) & 最佳入場時間窗診斷 — {fmt_ticker}",
-                subtitle=f"💠 近20日回摸昨收率 {_open_sweep_info['pdc_touch_rate_20d']:.0f}% ｜ 下影線吸針收回率 {_open_sweep_info['undercut_reclaim_rate_20d']:.0f}% ｜ {_markov_info['regime_badge']}",
-                theme="cyan"
-            )
-            sw_c1, sw_c2, sw_c3, sw_c4 = st.columns(4)
-            sw_c1.metric("🧲 昨收價 (PDC 流動性磁鐵)", f"{_open_sweep_info['pdc_price']:.2f} {currency}", f"近20日盤中回摸率 {_open_sweep_info['pdc_touch_rate_20d']:.0f}%")
-            sw_c2.metric("📊 昨日高/低 (PDH / PDL)", f"{_open_sweep_info['pdh_price']:.2f} / {_open_sweep_info['pdl_price']:.2f}", f"下影線吸針收回率 {_open_sweep_info['undercut_reclaim_rate_20d']:.0f}%")
-            sw_c3.metric("⏰ 最佳入場黃金時間窗", _open_sweep_info["best_entry_time_window_hkt"][:22], "避開開盤首15分鐘散戶亂掃")
-            sw_c4.metric("🎲 馬可夫下一日轉牛/轉熊率", f"牛 {_markov_info['bull_prob_next']*100:.0f}% / 熊 {_markov_info['bear_prob_next']*100:.0f}%", f"狀態持續率 {_markov_info['persistence_prob']*100:.0f}% (RohOnChain模型)")
-            render_atomic_alert(
-                f"**{_open_sweep_info['dominant_open_play']}**｜關鍵流動性池：{_open_sweep_info['key_liquidity_magnets']}\n\n"
-                f"🎯 **最佳入場時間與操作劇本**：{_open_sweep_info['tactical_instruction']}\n\n"
-                f"⚠️ **獨立驗證防踏空提醒**：{_open_sweep_info['critical_warning']}",
-                "info"
-            )
             st.markdown("---")
 
             st.markdown("### 🎯 結構支撐阻力交易計畫 (依據關鍵價位動態計算)")
@@ -14456,46 +13809,6 @@ elif mode == mode_options[1]:
                     save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
                     st.toast(f"已清除 {fmt_ticker} 鎖定持倉記錄")
                     st.rerun()
-
-            with st.expander(f"💰 【記錄 {fmt_ticker} ({name}) 賣出平倉】輸入賣出價即自動移出持倉並分析賣出後利弊！", expanded=False):
-                with st.form(f"diag_quick_sell_form_{fmt_ticker}", clear_on_submit=False):
-                    qs_c1, qs_c2, qs_c3, qs_c4 = st.columns([1.2, 1.2, 1.4, 1.2])
-                    with qs_c1:
-                        qs_exit_px = st.number_input("💰 實際賣出/平倉價:", min_value=0.001, value=float(last["Close"]), step=0.1, key=f"qs_px_{fmt_ticker}")
-                    with qs_c2:
-                        qs_exit_dt = st.date_input("📅 賣出日期:", value=datetime.now().date(), key=f"qs_dt_{fmt_ticker}")
-                    with qs_c3:
-                        qs_reason = st.selectbox(
-                            "🏷️ 賣出原因:",
-                            ["🎯 觸及目標位止盈", "📈 跌穿 9EMA/20MA 鎖潤", "🛡️ 觸及結構止損離場", "🌩️ 大市轉弱主動減倉", "😰 盤中洗盤提早賣出"],
-                            key=f"qs_reas_{fmt_ticker}"
-                        )
-                    with qs_c4:
-                        st.write("")
-                        qs_submit = st.form_submit_button("✅ 確認記錄賣出", use_container_width=True, type="primary")
-                    if qs_submit:
-                        _e_px_use = float(actual_entry) if float(actual_entry) > 0 else float(_saved_pos.get("entry", last["Close"]))
-                        _d_code_use = "SHORT" if "做空" in pos_dir else "LONG"
-                        _rec_q = record_closed_trade_to_journal(
-                            ticker=fmt_ticker,
-                            dir_code=_d_code_use,
-                            entry_price=_e_px_use,
-                            exit_price=float(qs_exit_px),
-                            shares=int(actual_held_shares),
-                            entry_date_str=str(entry_date_input),
-                            exit_date_str=str(qs_exit_dt),
-                            initial_sl=float(_saved_pos.get("fixed_sl", stop_loss)),
-                            initial_tp=float(_saved_pos.get("fixed_tp", take_profit)),
-                            exit_reason=qs_reason,
-                            notes="於個股技術診斷頁記錄賣出"
-                        )
-                        _saved_pos_map.pop(fmt_ticker, None)
-                        for _cat_k, _cat_l in st.session_state.watchlist_dict.items():
-                            if "持倉" in _cat_k or "holding" in _cat_k.lower():
-                                st.session_state.watchlist_dict[_cat_k] = [x for x in _cat_l if format_and_detect_market(x)[0] != fmt_ticker]
-                        save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
-                        st.success(f"🎉 已記錄 {fmt_ticker} 賣出平倉（實現盈虧 {_rec_q['pnl_pct']:+.2f}% / {_rec_q['realized_r']:+.2f}R），可於『交易記錄與賣出後復盤專區』查看後續走勢利弊分析！")
-                        st.rerun()
                 
             chart_entry = target_entry
             chart_sl = stop_loss
