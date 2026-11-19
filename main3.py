@@ -1136,7 +1136,7 @@ def render_global_multi_timezone_clock_banner(context_id: str = "main") -> None:
         """
         st.markdown(" ".join(line.strip() for line in _clock_html.splitlines() if line.strip()), unsafe_allow_html=True)
     with tz_c2:
-        if st.button("🔄 即時刷新盤前/盤後價", key=f"btn_refresh_ext_quotes_{context_id}", use_container_width=True, help="立即清空短線報價快取並重新拉取最新美股盤前/盤後/夜盤與港股實時價格"):
+        if st.button("🔄 即時刷新盤前/盤後價", key=f"btn_refresh_ext_quotes_{context_id}", width="stretch", help="立即清空短線報價快取並重新拉取最新美股盤前/盤後/夜盤與港股實時價格"):
             _EXTENDED_QUOTE_CACHE.clear()
             _EXTENDED_QUOTE_TS.clear()
             st.toast("⚡ 已刷新全球時區及美股盤前/盤後/夜盤實時報價！")
@@ -3267,7 +3267,7 @@ def render_locked_portfolio_summary_and_export(persistent_dict: dict) -> None:
             })
         if rows:
             port_df = pd.DataFrame(rows)
-            st.dataframe(port_df, use_container_width=True, hide_index=True)
+            st.dataframe(port_df, width="stretch", hide_index=True)
             csv_bytes = port_df.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
                 label="📥 匯出已鎖定持倉交易日誌 (CSV)",
@@ -7898,52 +7898,7 @@ def is_mobile_mode_active() -> bool:
 from contextlib import contextmanager
 
 UI_THEME_PRESETS: Dict[str, Dict[str, str]] = {
-    "經典深藍": {
-        "bg": "#F3F6FA",
-        "surface": "#FFFFFF",
-        "surface_alt": "#F8FAFC",
-        "border": "#E2E8F0",
-        "text": "#0F172A",
-        "muted": "#64748B",
-        "primary": "#00B865",
-        "primary_2": "#059669",
-        "accent": "#2563EB",
-        "header_bg": "rgba(243, 246, 250, 0.94)",
-        "sb_bg": "linear-gradient(180deg, #0F172A 0%, #162036 100%)",
-        "sb_border": "#1E293B",
-        "sb_text": "#F1F5F9",
-        "sb_muted": "#94A3B8",
-        "sb_input_bg": "#1E293B",
-        "sb_input_border": "#334155",
-        "sb_input_text": "#F8FAFC",
-        "sb_placeholder": "#94A3B8",
-        "sb_btn_bg": "#1E293B",
-        "sb_btn_border": "#475569",
-        "sb_btn_text": "#F8FAFC",
-        "sb_btn_hover_bg": "#2563EB",
-        "sb_btn_hover_text": "#FFFFFF",
-        "sb_card_bg": "rgba(30, 41, 59, 0.80)",
-        "popover_bg": "#FFFFFF",
-        "popover_text": "#0F172A",
-        "popover_hover": "#EFF6FF",
-        "popover_border": "#CBD5E1",
-        "tab_list_bg": "#E2E8F0",
-        "tab_text": "#475569",
-        "tab_active_bg": "#FFFFFF",
-        "tab_active_text": "#0F172A",
-        "zone_blue_bg": "#EBF3FF",
-        "zone_blue_bd": "#BFDBFE",
-        "zone_indigo_bg": "#F3EEFF",
-        "zone_indigo_bd": "#DDD6FE",
-        "zone_emerald_bg": "#EBFBF3",
-        "zone_emerald_bd": "#A7F3D0",
-        "zone_amber_bg": "#FEF7E6",
-        "zone_amber_bd": "#FDE68A",
-        "zone_slate_bg": "#EEF2F7",
-        "zone_slate_bd": "#CBD5E1",
-        "is_dark_main": "0"
-    },
-    "簡約純白": {
+    "淺色 (預設)": {
         "bg": "#F8FAFC",
         "surface": "#FFFFFF",
         "surface_alt": "#F1F5F9",
@@ -7988,7 +7943,52 @@ UI_THEME_PRESETS: Dict[str, Dict[str, str]] = {
         "zone_slate_bd": "#CBD5E1",
         "is_dark_main": "0"
     },
-    "暗黑夜盤": {
+    "深藍側欄": {
+        "bg": "#F3F6FA",
+        "surface": "#FFFFFF",
+        "surface_alt": "#F8FAFC",
+        "border": "#E2E8F0",
+        "text": "#0F172A",
+        "muted": "#64748B",
+        "primary": "#00B865",
+        "primary_2": "#059669",
+        "accent": "#2563EB",
+        "header_bg": "rgba(243, 246, 250, 0.94)",
+        "sb_bg": "linear-gradient(180deg, #0F172A 0%, #162036 100%)",
+        "sb_border": "#1E293B",
+        "sb_text": "#F1F5F9",
+        "sb_muted": "#94A3B8",
+        "sb_input_bg": "#1E293B",
+        "sb_input_border": "#334155",
+        "sb_input_text": "#F8FAFC",
+        "sb_placeholder": "#94A3B8",
+        "sb_btn_bg": "#1E293B",
+        "sb_btn_border": "#475569",
+        "sb_btn_text": "#F8FAFC",
+        "sb_btn_hover_bg": "#2563EB",
+        "sb_btn_hover_text": "#FFFFFF",
+        "sb_card_bg": "rgba(30, 41, 59, 0.80)",
+        "popover_bg": "#FFFFFF",
+        "popover_text": "#0F172A",
+        "popover_hover": "#EFF6FF",
+        "popover_border": "#CBD5E1",
+        "tab_list_bg": "#E2E8F0",
+        "tab_text": "#475569",
+        "tab_active_bg": "#FFFFFF",
+        "tab_active_text": "#0F172A",
+        "zone_blue_bg": "#EBF3FF",
+        "zone_blue_bd": "#BFDBFE",
+        "zone_indigo_bg": "#F3EEFF",
+        "zone_indigo_bd": "#DDD6FE",
+        "zone_emerald_bg": "#EBFBF3",
+        "zone_emerald_bd": "#A7F3D0",
+        "zone_amber_bg": "#FEF7E6",
+        "zone_amber_bd": "#FDE68A",
+        "zone_slate_bg": "#EEF2F7",
+        "zone_slate_bd": "#CBD5E1",
+        "is_dark_main": "0"
+    },
+    "深色": {
         "bg": "#0B1120",
         "surface": "#111827",
         "surface_alt": "#1E293B",
@@ -8033,7 +8033,7 @@ UI_THEME_PRESETS: Dict[str, Dict[str, str]] = {
         "zone_slate_bd": "#334155",
         "is_dark_main": "1"
     },
-    "翡翠商務": {
+    "墨綠側欄": {
         "bg": "#F4F8F6",
         "surface": "#FFFFFF",
         "surface_alt": "#ECFDF5",
@@ -8077,24 +8077,131 @@ UI_THEME_PRESETS: Dict[str, Dict[str, str]] = {
         "zone_slate_bg": "#ECF2EF",
         "zone_slate_bd": "#CBDAD3",
         "is_dark_main": "0"
-    }
+    },
+    "自訂配色": {}
+}
+
+DEFAULT_CUSTOM_THEME_COLORS: Dict[str, str] = {
+    "bg": "#F8FAFC",
+    "sb_bg": "#FFFFFF",
+    "primary": "#00B865",
+    "zone_blue_bg": "#EFF6FF",
+    "zone_indigo_bg": "#F5F3FF",
+    "zone_amber_bg": "#FFFBEB",
 }
 
 _LEGACY_THEME_NAME_MAP: Dict[str, str] = {
-    "🌌 機構深藍淺灰 (TailAdmin 預設)": "經典深藍",
-    "☀️ 極簡純白金融 (Stockopedia 清爽亮色)": "簡約純白",
-    "🌙 專業暗黑看盤 (美股夜盤護眼黑)": "暗黑夜盤",
-    "💎 翡翠尊爵白金 (財富管理綠金)": "翡翠商務",
+    "🌌 機構深藍淺灰 (TailAdmin 預設)": "深藍側欄",
+    "☀️ 極簡純白金融 (Stockopedia 清爽亮色)": "淺色 (預設)",
+    "🌙 專業暗黑看盤 (美股夜盤護眼黑)": "深色",
+    "💎 翡翠尊爵白金 (財富管理綠金)": "墨綠側欄",
+    "經典深藍": "深藍側欄",
+    "簡約純白": "淺色 (預設)",
+    "暗黑夜盤": "深色",
+    "翡翠商務": "墨綠側欄",
 }
 
+def _hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
+    h = str(hex_color or "").strip().lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) != 6:
+        return (248, 250, 252)
+    try:
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    except Exception:
+        return (248, 250, 252)
+
+def _is_hex_dark(hex_color: str) -> bool:
+    r, g, b = _hex_to_rgb(hex_color)
+    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+    return lum < 0.52
+
+def _shift_hex(hex_color: str, delta: int) -> str:
+    r, g, b = _hex_to_rgb(hex_color)
+    r2 = max(0, min(255, r + delta))
+    g2 = max(0, min(255, g + delta))
+    b2 = max(0, min(255, b + delta))
+    return f"#{r2:02X}{g2:02X}{b2:02X}"
+
+def build_custom_theme_palette(custom_cfg: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """依使用者自訂顏色自動計算高對比文字、邊框、卡片與下拉選單配色，防止任何撞色。"""
+    cfg = dict(DEFAULT_CUSTOM_THEME_COLORS)
+    if isinstance(custom_cfg, dict):
+        for k in DEFAULT_CUSTOM_THEME_COLORS:
+            v = str(custom_cfg.get(k, "")).strip()
+            if v.startswith("#") and len(v) in (4, 7):
+                cfg[k] = v
+
+    bg_dark = _is_hex_dark(cfg["bg"])
+    sb_dark = _is_hex_dark(cfg["sb_bg"])
+    base = dict(UI_THEME_PRESETS["深色" if bg_dark else "淺色 (預設)"])
+
+    # 主畫面顏色
+    base["bg"] = cfg["bg"]
+    base["header_bg"] = cfg["bg"]
+    base["primary"] = cfg["primary"]
+    base["primary_2"] = _shift_hex(cfg["primary"], -18)
+    base["accent"] = cfg["primary"]
+
+    # 側欄顏色（自動適配深／淺側欄文字對比）
+    base["sb_bg"] = cfg["sb_bg"]
+    if sb_dark:
+        base["sb_border"] = _shift_hex(cfg["sb_bg"], 24)
+        base["sb_text"] = "#F1F5F9"
+        base["sb_muted"] = "#94A3B8"
+        base["sb_input_bg"] = _shift_hex(cfg["sb_bg"], 16)
+        base["sb_input_border"] = _shift_hex(cfg["sb_bg"], 42)
+        base["sb_input_text"] = "#F8FAFC"
+        base["sb_placeholder"] = "#94A3B8"
+        base["sb_btn_bg"] = _shift_hex(cfg["sb_bg"], 16)
+        base["sb_btn_border"] = _shift_hex(cfg["sb_bg"], 48)
+        base["sb_btn_text"] = "#F8FAFC"
+        base["sb_btn_hover_bg"] = cfg["primary"]
+        base["sb_btn_hover_text"] = "#FFFFFF"
+        base["sb_card_bg"] = _shift_hex(cfg["sb_bg"], 14)
+    else:
+        base["sb_border"] = _shift_hex(cfg["sb_bg"], -24)
+        base["sb_text"] = "#0F172A"
+        base["sb_muted"] = "#475569"
+        base["sb_input_bg"] = "#FFFFFF"
+        base["sb_input_border"] = "#CBD5E1"
+        base["sb_input_text"] = "#0F172A"
+        base["sb_placeholder"] = "#64748B"
+        base["sb_btn_bg"] = "#FFFFFF"
+        base["sb_btn_border"] = "#CBD5E1"
+        base["sb_btn_text"] = "#0F172A"
+        base["sb_btn_hover_bg"] = "#EFF6FF"
+        base["sb_btn_hover_text"] = "#1D4ED8"
+        base["sb_card_bg"] = _shift_hex(cfg["sb_bg"], -10)
+
+    # 三大區域方框底色與自動邊框
+    bd_delta = 32 if bg_dark else -24
+    base["zone_blue_bg"] = cfg["zone_blue_bg"]
+    base["zone_blue_bd"] = _shift_hex(cfg["zone_blue_bg"], bd_delta)
+    base["zone_indigo_bg"] = cfg["zone_indigo_bg"]
+    base["zone_indigo_bd"] = _shift_hex(cfg["zone_indigo_bg"], bd_delta)
+    base["zone_amber_bg"] = cfg["zone_amber_bg"]
+    base["zone_amber_bd"] = _shift_hex(cfg["zone_amber_bg"], bd_delta)
+    return base
+
 def get_active_ui_theme_name() -> str:
-    default_t = "經典深藍"
+    default_t = "淺色 (預設)"
     try:
         sel = st.session_state.get("ui_theme_preset", default_t)
         sel = _LEGACY_THEME_NAME_MAP.get(sel, sel)
         return sel if sel in UI_THEME_PRESETS else default_t
     except Exception:
         return default_t
+
+def get_active_theme_palette(theme_name: Optional[str] = None) -> Dict[str, str]:
+    t_name = _LEGACY_THEME_NAME_MAP.get(theme_name, theme_name) if theme_name else get_active_ui_theme_name()
+    if t_name not in UI_THEME_PRESETS:
+        t_name = "淺色 (預設)"
+    if t_name == "自訂配色":
+        custom_cfg = st.session_state.get("custom_theme_colors")
+        return build_custom_theme_palette(custom_cfg)
+    return UI_THEME_PRESETS[t_name]
 
 @contextmanager
 def section_zone_box(zone_theme: str = "blue"):
@@ -8119,10 +8226,7 @@ def inject_fintech_responsive_theme(theme_name: Optional[str] = None) -> None:
     [v61.3 多主題 FinTech 視覺引擎 + 全元件無撞色修復 + 明確淡色分區方框 + 寬鬆說明排版 + 手機版自適應]
     """
     st.session_state["_sq_zone_render_seq"] = 0
-    t_name = _LEGACY_THEME_NAME_MAP.get(theme_name, theme_name) if theme_name else get_active_ui_theme_name()
-    if t_name not in UI_THEME_PRESETS:
-        t_name = "經典深藍"
-    p = UI_THEME_PRESETS[t_name]
+    p = get_active_theme_palette(theme_name)
     is_dark = (p["is_dark_main"] == "1")
     main_btn_bg = "#1E293B" if is_dark else "#FFFFFF"
     main_btn_txt = "#F8FAFC" if is_dark else "#0F172A"
@@ -8176,6 +8280,8 @@ def inject_fintech_responsive_theme(theme_name: Optional[str] = None) -> None:
     [data-testid="stMain"] [data-testid="stAlert"] {
         background-color: #1E293B !important;
         border: 1px solid #334155 !important;
+        border-radius: 10px !important;
+        overflow: hidden !important;
     }
     [data-testid="stMain"] [data-testid="stAlert"] p,
     [data-testid="stMain"] [data-testid="stAlert"] li,
@@ -8197,6 +8303,16 @@ def inject_fintech_responsive_theme(theme_name: Optional[str] = None) -> None:
         color: #64748B !important;
         -webkit-text-fill-color: #64748B !important;
         opacity: 0.9 !important;
+    }
+    /* 淺色主題下確保紅/黃/藍/綠提示框以純白實色為底，絕不與外層淡綠/淡藍區框混色變濁 */
+    [data-testid="stMain"] [data-testid="stAlert"] {
+        background-color: #FFFFFF !important;
+        border-radius: 10px !important;
+        overflow: hidden !important;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04) !important;
+    }
+    [data-testid="stMain"] [data-testid="stAlert"] [data-testid="stAlertContainer"] {
+        border-radius: 10px !important;
     }
     """
 
@@ -8236,9 +8352,11 @@ def inject_fintech_responsive_theme(theme_name: Optional[str] = None) -> None:
     }}
 
     .block-container {{
-        padding-top: 1.2rem !important;
+        padding-top: 1.05rem !important;
         padding-bottom: 2.5rem !important;
-        max-width: 1480px !important;
+        padding-left: 2rem !important;
+        padding-right: 2rem !important;
+        max-width: 100% !important;
     }}
 
     /* ================= 下拉選單 Popover 徹底修復白底白字 ================= */
@@ -9434,7 +9552,7 @@ def render_sector_rs_compass_panel(context_key: str = "mode1_sector") -> None:
         else:
             top3 = " ｜ ".join(df_sec["板塊 ETF"].head(3).tolist())
             st.success(f"**相對強弱領先板塊 (Top 3)**：{top3}")
-            st.dataframe(df_sec, use_container_width=True, hide_index=True)
+            st.dataframe(df_sec, width="stretch", hide_index=True)
 
 
 @st.cache_data(ttl=3600)
@@ -11735,13 +11853,18 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
 st.sidebar.markdown(
     '<div class="sq-sb-brand">'
     '<div class="sq-sb-brand-title">📈 SwingQuant <span style="color:#00B865 !important;">Pro</span></div>'
-    '<div class="sq-sb-brand-sub">v61.4 波段量化終端 · 電腦 / 手機自適應</div>'
+    '<div class="sq-sb-brand-sub">v61.6 波段量化終端 · 電腦 / 手機自適應</div>'
     '</div>',
     unsafe_allow_html=True
 )
-# [v61.1 修復 StreamlitAPIException] 在建立 mobile_compact_mode widget 前先處理頂部按鈕嘅待切換狀態
+# [v61.1 修復 StreamlitAPIException] 在建立 widget 前先處理待切換狀態
 if "_pending_mobile_compact_mode" in st.session_state:
     st.session_state["mobile_compact_mode"] = bool(st.session_state.pop("_pending_mobile_compact_mode"))
+if st.session_state.pop("_pending_reset_custom_colors", False):
+    st.session_state["custom_theme_colors"] = dict(DEFAULT_CUSTOM_THEME_COLORS)
+    for _ck, _cv in DEFAULT_CUSTOM_THEME_COLORS.items():
+        st.session_state[f"cp_custom_{_ck}"] = _cv
+    persistent_data["custom_theme_colors"] = dict(DEFAULT_CUSTOM_THEME_COLORS)
 
 _theme_keys = list(UI_THEME_PRESETS.keys())
 _cur_theme_saved = _LEGACY_THEME_NAME_MAP.get(
@@ -11752,15 +11875,50 @@ if _cur_theme_saved not in _theme_keys:
     _cur_theme_saved = _theme_keys[0]
 if st.session_state.get("ui_theme_preset") in _LEGACY_THEME_NAME_MAP:
     st.session_state["ui_theme_preset"] = _LEGACY_THEME_NAME_MAP[st.session_state["ui_theme_preset"]]
+
+if "custom_theme_colors" not in st.session_state:
+    _saved_cc = persistent_data.get("custom_theme_colors", {})
+    st.session_state["custom_theme_colors"] = {
+        k: _saved_cc.get(k, v) for k, v in DEFAULT_CUSTOM_THEME_COLORS.items()
+    }
+
 ui_theme_preset = st.sidebar.selectbox(
     "🎨 介面風格",
     options=_theme_keys,
     index=_theme_keys.index(_cur_theme_saved),
     key="ui_theme_preset",
-    help="切換介面配色：經典深藍、簡約純白、暗黑夜盤、翡翠商務"
+    help="切換介面配色：淺色（預設）、深藍側欄、深色、墨綠側欄，或選擇自訂配色自由調色"
 )
 if ui_theme_preset != persistent_data.get("ui_theme_preset"):
     persistent_data["ui_theme_preset"] = ui_theme_preset
+
+if ui_theme_preset == "自訂配色":
+    with st.sidebar.expander("🎨 調整自訂顏色", expanded=True):
+        _cc = st.session_state["custom_theme_colors"]
+        _c1, _c2 = st.columns(2)
+        with _c1:
+            _new_bg = st.color_picker("主背景", value=_cc.get("bg", "#F8FAFC"), key="cp_custom_bg")
+            _new_pri = st.color_picker("主按鈕色", value=_cc.get("primary", "#00B865"), key="cp_custom_primary")
+            _new_zi = st.color_picker("持倉區底色", value=_cc.get("zone_indigo_bg", "#F5F3FF"), key="cp_custom_zone_indigo_bg")
+        with _c2:
+            _new_sb = st.color_picker("側欄背景", value=_cc.get("sb_bg", "#FFFFFF"), key="cp_custom_sb_bg")
+            _new_zb = st.color_picker("掃描區底色", value=_cc.get("zone_blue_bg", "#EFF6FF"), key="cp_custom_zone_blue_bg")
+            _new_za = st.color_picker("復盤區底色", value=_cc.get("zone_amber_bg", "#FFFBEB"), key="cp_custom_zone_amber_bg")
+        _updated_cc = {
+            "bg": _new_bg,
+            "sb_bg": _new_sb,
+            "primary": _new_pri,
+            "zone_blue_bg": _new_zb,
+            "zone_indigo_bg": _new_zi,
+            "zone_amber_bg": _new_za,
+        }
+        if _updated_cc != _cc:
+            st.session_state["custom_theme_colors"] = _updated_cc
+            persistent_data["custom_theme_colors"] = dict(_updated_cc)
+        if st.button("↺ 恢復預設淺色", key="btn_reset_custom_theme_colors", width="stretch"):
+            st.session_state["_pending_reset_custom_colors"] = True
+            st.rerun()
+
 inject_fintech_responsive_theme(ui_theme_preset)
 
 mobile_compact_mode = st.sidebar.toggle(
@@ -11794,7 +11952,7 @@ stop_profile_mode = st.sidebar.selectbox(
     help="預設為「中線波段標準 (持倉數週至1-2個月)」，要求止損距離買入位至少 ≥1.2x ATR 且 2.8%~7.5%，並錨定於 20MA/21EMA 或 10~20日箱體底，徹底解決止損過貼易被日內洗盤掃出的問題！"
 )
 
-st.sidebar.markdown("### 💵 滿倉本金與單筆 $1,000 止損設定")
+st.sidebar.markdown("### 💵 滿倉本金與單筆止損 (1R) 設定")
 _sb_col1, _sb_col2 = st.sidebar.columns(2)
 with _sb_col1:
     user_max_loss_hkd = st.number_input(
@@ -11832,10 +11990,13 @@ strict_hide_countertrend_signals = st.sidebar.checkbox(
 persistent_data["user_max_loss_hkd"] = float(user_max_loss_hkd)
 persistent_data["user_full_pos_hkd"] = float(user_full_pos_hkd)
 persistent_data["strict_hide_countertrend_signals"] = bool(strict_hide_countertrend_signals)
-st.sidebar.caption(
-    f"💡 **當前風控基準**：單筆 1R = **HK${user_max_loss_hkd:,.0f}** (`US${user_max_loss_hkd/7.8:,.0f}`) ｜ "
-    f"滿倉本金 = **HK${user_full_pos_hkd:,.0f}** (`US${user_full_pos_hkd/7.8:,.0f}`) ｜ "
-    f"直接滿倉要求結構止損 **≤ {((user_max_loss_hkd - 38.0) / max(user_full_pos_hkd, 1.0)) * 100.0:.1f}%**"
+st.sidebar.markdown(
+    f"<div style='font-size:0.78rem;line-height:1.55;opacity:0.86;margin-top:4px;'>"
+    f"💡 <b>當前風控基準</b>：單筆 1R = <b>HK&#36;{user_max_loss_hkd:,.0f}</b> (<code>US&#36;{user_max_loss_hkd/7.8:,.0f}</code>) ｜ "
+    f"滿倉本金 = <b>HK&#36;{user_full_pos_hkd:,.0f}</b> (<code>US&#36;{user_full_pos_hkd/7.8:,.0f}</code>) ｜ "
+    f"直接滿倉要求結構止損 <b>≤ {max(0.0, ((user_max_loss_hkd - 38.0) / max(user_full_pos_hkd, 1.0)) * 100.0):.1f}%</b>"
+    f"</div>",
+    unsafe_allow_html=True,
 )
 
 st.sidebar.markdown("---")
@@ -12350,7 +12511,7 @@ def render_futu_opend_sidebar_bridge() -> None:
             st.code("pip3 install futu-api", language="bash")
             return
 
-        if st.button("🔌 1. 測試連線狀態", use_container_width=True, key="btn_futu_test_ping"):
+        if st.button("🔌 1. 測試連線狀態", width="stretch", key="btn_futu_test_ping"):
             try:
                 from futu import OpenQuoteContext, RET_OK  # type: ignore
                 q_ctx = OpenQuoteContext(host=futu_host, port=int(futu_port))
@@ -12363,7 +12524,7 @@ def render_futu_opend_sidebar_bridge() -> None:
             except Exception as e:
                 st.error(f"❌ 連線失敗（請確認 Mac 背景已打開並登入 FutuOpenD 軟件）：{e}")
 
-        if st.button("💼 2. 同步持倉與歷史成交", use_container_width=True, type="primary", key="btn_futu_sync_positions"):
+        if st.button("💼 2. 同步持倉與歷史成交", width="stretch", type="primary", key="btn_futu_sync_positions"):
             try:
                 ok_sync, msg_sync = sync_full_account_all_trades_from_futu_opend(
                     futu_host=futu_host,
@@ -12386,7 +12547,7 @@ def render_futu_opend_sidebar_bridge() -> None:
             options=list(st.session_state.watchlist_dict.keys()),
             key="sel_futu_push_group"
         )
-        if st.button("📤 3. 推送所選自選分組至富途", use_container_width=True, key="btn_futu_push_watchlist"):
+        if st.button("📤 3. 推送所選自選分組至富途", width="stretch", key="btn_futu_push_watchlist"):
             try:
                 from futu import OpenQuoteContext, ModifyUserSecurityOp, RET_OK  # type: ignore
                 t_list = st.session_state.watchlist_dict.get(sync_group_sel, [])
@@ -12512,10 +12673,10 @@ def render_futu_quick_watchlist_bar(fmt_ticker: str, stock_name: str, context_ke
             ).strip()
         with bar_c3:
             st.write("")
-            sub_save = st.form_submit_button("⭐ 存入自選分組", use_container_width=True)
+            sub_save = st.form_submit_button("⭐ 存入自選分組", width="stretch")
         with bar_c4:
             st.write("")
-            sub_rm = st.form_submit_button("❌ 移出全部", use_container_width=True)
+            sub_rm = st.form_submit_button("❌ 移出全部", width="stretch")
 
         if sub_save:
             target_cats = list(selected_cats)
@@ -12808,7 +12969,7 @@ def render_color_zone_header(title: str, subtitle: str = "", theme: str = "indig
     [v61.2 多主題區塊標題卡]
     自動跟隨當前介面風格（淺色／暗黑夜盤），避免深淺撞色。
     """
-    is_dark = (UI_THEME_PRESETS.get(get_active_ui_theme_name(), {}).get("is_dark_main") == "1")
+    is_dark = (get_active_theme_palette().get("is_dark_main") == "1")
     palettes_light = {
         "indigo": ("#6366F1", "#EEF2FF", "#3730A3"),
         "cyan":   ("#0891B2", "#ECFEFF", "#0E7490"),
@@ -13210,7 +13371,7 @@ def render_hk_adr_and_us_lead_panel(hk_tickers_to_check: List[str], locked_map: 
                     "開市風控提示": risk_flag
                 })
             if adr_rows:
-                st.dataframe(pd.DataFrame(adr_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(adr_rows), width="stretch", hide_index=True)
         else:
             st.info("ℹ️ 目前持倉及自選股中暫無常見美股 ADR 對應港股（如 9988.HK / 0700.HK / 9618.HK / 3690.HK / 9868.HK 等）；上方期貨與 KWEB/FXI/EWH 仍可作為大市跳空濾網。")
 
@@ -13245,7 +13406,7 @@ def render_watchlist_quick_action_radar_hub(context_key: str = "mode1_wl") -> No
         wl_syms = list(dict.fromkeys([format_and_detect_market(x)[0] for x in tks_raw if str(x).strip()]))
         with wc2:
             st.caption(f"目前追蹤：**{len(wl_syms)} 隻**自選標的")
-            _refresh_wl = st.button("🔄 刷新自選股行情", key=f"btn_refresh_wl_radar_{context_key}", use_container_width=True)
+            _refresh_wl = st.button("🔄 刷新自選股行情", key=f"btn_refresh_wl_radar_{context_key}", width="stretch")
 
         if not wl_syms:
             st.info("目前所選自選分組暫無股票。")
@@ -13311,7 +13472,7 @@ def render_watchlist_quick_action_radar_hub(context_key: str = "mode1_wl") -> No
         wm3.metric("🎯 回踩支撐觀察", f"{cnt_pullback} 隻")
         wm4.metric("✂️ 破線建議剔除", f"{cnt_weak} 隻")
         if rows_wl:
-            st.dataframe(pd.DataFrame(rows_wl), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows_wl), width="stretch", hide_index=True)
 
 
 def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> None:
@@ -13371,7 +13532,7 @@ def _render_holdings_group_regime_advisory_hub_impl(context_key: str = "wl_hub")
             with hc1:
                 st.info("💡 目前「持倉」分組尚無股票。請點擊右方按鈕一鍵載入你富途牛牛「持倉」分組嘅 9 隻標的（VOO, PYPL, 00700, 01919, 02382, 06030, 01929, RKLB, TOST）：")
             with hc2:
-                if st.button("🔄 一鍵載入富途「持倉」9 隻標的", key=f"btn_init_hold_cat_{context_key}", use_container_width=True, type="primary"):
+                if st.button("🔄 一鍵載入富途「持倉」9 隻標的", key=f"btn_init_hold_cat_{context_key}", width="stretch", type="primary"):
                     _target_c = active_hold_cat or "持倉"
                     wl_dict[_target_c] = list(DEFAULT_USER_FUTU_HOLDINGS)
                     save_persisted_state_to_disk(persistent_data, wl_dict)
@@ -13843,7 +14004,7 @@ def _render_holdings_group_regime_advisory_hub_impl(context_key: str = "wl_hub")
                     inp_hold_dt = st.date_input("買入日期", value=pd.to_datetime(_cur_l.get("anchor_date", datetime.now().strftime("%Y-%m-%d"))).date() if _cur_l.get("anchor_date") else datetime.now().date(), key=f"inp_h_dt_{context_key}")
                 with qe_c6:
                     st.write("")
-                    btn_save_hold_all = st.form_submit_button("💾 儲存成本與方向", use_container_width=True, type="primary")
+                    btn_save_hold_all = st.form_submit_button("💾 儲存成本與方向", width="stretch", type="primary")
 
                 if btn_save_hold_all:
                     u_k = sel_hold_sym.upper().strip()
@@ -13889,7 +14050,7 @@ def _render_holdings_group_regime_advisory_hub_impl(context_key: str = "wl_hub")
                 inp_add_hold_tks = st.text_input("輸入股票代碼加入「持倉」 (多個用逗號分隔):", placeholder="例: VOO, PYPL, 0700.HK, RKLB, TOST", key=f"inp_add_hold_tks_{context_key}")
             with hm_c2:
                 st.write("")
-                if st.button("➕ 加入持倉", key=f"btn_add_hold_tks_{context_key}", use_container_width=True, type="primary"):
+                if st.button("➕ 加入持倉", key=f"btn_add_hold_tks_{context_key}", width="stretch", type="primary"):
                     _t_cat = active_hold_cat or "持倉"
                     wl_dict.setdefault(_t_cat, [])
                     for _r_s in str(inp_add_hold_tks).replace("，", ",").split(","):
@@ -13901,7 +14062,7 @@ def _render_holdings_group_regime_advisory_hub_impl(context_key: str = "wl_hub")
                     st.rerun()
             with hm_c3:
                 st.write("")
-                if st.button("🔄 一鍵補齊富途 9 隻持倉", key=f"btn_align_futu9_{context_key}", use_container_width=True, help="自動補齊 VOO, PYPL, 0700.HK, 1919.HK, 2382.HK, 6030.HK, 1929.HK, RKLB, TOST"):
+                if st.button("🔄 一鍵補齊富途 9 隻持倉", key=f"btn_align_futu9_{context_key}", width="stretch", help="自動補齊 VOO, PYPL, 0700.HK, 1919.HK, 2382.HK, 6030.HK, 1929.HK, RKLB, TOST"):
                     _t_cat = active_hold_cat or "持倉"
                     wl_dict.setdefault(_t_cat, [])
                     _cur_norm_s = [format_and_detect_market(x)[0] for x in wl_dict[_t_cat]]
@@ -13917,7 +14078,7 @@ def _render_holdings_group_regime_advisory_hub_impl(context_key: str = "wl_hub")
             with hm_c4:
                 rm_hold_sel = st.selectbox("選擇要移出持倉的股票:", options=["(選擇要移除的持倉)"] + hold_tickers, key=f"sel_rm_hold_tk_{context_key}")
                 if rm_hold_sel != "(選擇要移除的持倉)":
-                    if st.button(f"🗑️ 從持倉移除 {rm_hold_sel}", key=f"btn_rm_hold_tk_{context_key}", use_container_width=True):
+                    if st.button(f"🗑️ 從持倉移除 {rm_hold_sel}", key=f"btn_rm_hold_tk_{context_key}", width="stretch"):
                         for _hc in holding_cats:
                             wl_dict[_hc] = [x for x in wl_dict.get(_hc, []) if format_and_detect_market(x)[0] != rm_hold_sel]
                         locked_map.pop(rm_hold_sel, None)
@@ -14152,7 +14313,7 @@ def _render_trade_journal_and_post_exit_review_hub_impl(context_key: str = "main
                     inp_notes = st.text_input("✍️ 交易心得備註 (選填):", placeholder="例如：開盤衝高賣出一半，或補錄過往歷史交易...", key=f"j_note_{context_key}")
                 with nc2:
                     st.write("")
-                    sub_sell_btn = st.form_submit_button("💰 確認記錄此筆交易", use_container_width=True, type="primary")
+                    sub_sell_btn = st.form_submit_button("💰 確認記錄此筆交易", width="stretch", type="primary")
 
                 if sub_sell_btn:
                     target_raw_tk = manual_tk_inp if (sel_pos_opt.startswith("✏️") or manual_tk_inp) else sel_pos_opt.split()[0].strip()
@@ -14253,12 +14414,12 @@ def _render_trade_journal_and_post_exit_review_hub_impl(context_key: str = "main
                         data=csv_j,
                         file_name=f"swing_all_closed_trades_review_{datetime.now().strftime('%Y%m%d')}.csv",
                         mime="text/csv",
-                        use_container_width=True,
+                        width="stretch",
                         key=f"dl_closed_journal_csv_{context_key}"
                     )
                 with flt_c6:
                     st.write("")
-                    if st.button("🧹 重建與去重紀錄", use_container_width=True, key=f"btn_dedup_journal_{context_key}", help="去重並清除已被真實成交覆蓋的錯誤自動清倉日期，若存在真實成交流水則按真 FIFO 重建"):
+                    if st.button("🧹 重建與去重紀錄", width="stretch", key=f"btn_dedup_journal_{context_key}", help="去重並清除已被真實成交覆蓋的錯誤自動清倉日期，若存在真實成交流水則按真 FIFO 重建"):
                         before_j = len(persistent_data.get("closed_trades_journal", []))
                         before_e = len(persistent_data.get("account_all_executions_ledger", []))
                         clean_execs = _dedup_executions_ledger(persistent_data.get("account_all_executions_ledger", []))
@@ -14395,7 +14556,7 @@ def _render_trade_journal_and_post_exit_review_hub_impl(context_key: str = "main
                         label_visibility="collapsed"
                     )
                 with del_c2:
-                    if st.button("🗑️ 刪除此筆誤錄記錄", key=f"btn_del_trd_{context_key}", use_container_width=True):
+                    if st.button("🗑️ 刪除此筆誤錄記錄", key=f"btn_del_trd_{context_key}", width="stretch"):
                         idx_del = int(del_sel.split()[0].replace("#", "")) - 1
                         if 0 <= idx_del < len(journal_list):
                             journal_list.pop(idx_del)
@@ -14424,7 +14585,7 @@ def _render_trade_journal_and_post_exit_review_hub_impl(context_key: str = "main
                         data=csv_el,
                         file_name=f"swing_account_all_executions_{datetime.now().strftime('%Y%m%d')}.csv",
                         mime="text/csv",
-                        use_container_width=True,
+                        width="stretch",
                         key=f"dl_all_exec_ledger_{context_key}"
                     )
 
@@ -14451,7 +14612,7 @@ def _render_trade_journal_and_post_exit_review_hub_impl(context_key: str = "main
                         "來源": ex.get("source", "-"),
                         "成交單號 / 備註": f"{ex.get('exec_id', '')} {ex.get('notes', '')}".strip()
                     })
-                st.dataframe(pd.DataFrame(disp_execs), use_container_width=True, hide_index=True, key=f"df_all_execs_{context_key}")
+                st.dataframe(pd.DataFrame(disp_execs), width="stretch", hide_index=True, key=f"df_all_execs_{context_key}")
 
         # ======================================================================
         # Tab 3: 批量匯入富途全歷史交易 (CSV / Excel 匯入 + 一鍵觸發 OpenD 跨年份歷史同步)
@@ -14467,7 +14628,7 @@ def _render_trade_journal_and_post_exit_review_hub_impl(context_key: str = "main
             with od_c3:
                 q_years = st.slider("回溯拉取歷史年數", min_value=1, max_value=10, value=5, key=f"tab3_futu_yrs_{context_key}")
 
-            if st.button("🚀 立即從富途 OpenD 拉取全帳號所有歷史交易 & 持倉", key=f"btn_tab3_futu_all_{context_key}", type="primary", use_container_width=True):
+            if st.button("🚀 立即從富途 OpenD 拉取全帳號所有歷史交易 & 持倉", key=f"btn_tab3_futu_all_{context_key}", type="primary", width="stretch"):
                 try:
                     ok_f, msg_f = sync_full_account_all_trades_from_futu_opend(
                         futu_host=q_host,
@@ -14901,7 +15062,7 @@ def render_watchlist_drag_and_drop_sorter(cat: str, current_list: List[str]) -> 
                 )
             with _seq_c2:
                 st.write("")
-                _sub_seq = st.form_submit_button(f"✅ 確認儲存「{cat}」新次序", use_container_width=True)
+                _sub_seq = st.form_submit_button(f"✅ 確認儲存「{cat}」新次序", width="stretch")
             if _sub_seq and _manual_seq_str:
                 _parsed_toks = [format_and_detect_market(x.strip())[0] for x in re.split(r'[\s,，、➔#0-9]+', _manual_seq_str) if x.strip() and not x.strip().isdigit()]
                 # 更精準提取：按逗號或空白分割並匹配現有股票
@@ -15325,7 +15486,7 @@ def render_futu_multi_chart_grid(
                 )
                 st.plotly_chart(
                     fig_mc,
-                    use_container_width=True,
+                    width="stretch",
                     config={"displayModeBar": False, "scrollZoom": (not is_mobile_mode_active())},
                     key=f"futu_mc_plot_{context_key}_{page_idx}_{sym}_{mc_interval}_{mc_bars}"
                 )
@@ -15335,22 +15496,22 @@ def render_futu_multi_chart_grid(
                     if allow_reorder_cat and allow_reorder_cat in st.session_state.watchlist_dict:
                         b_c1, b_c2, b_c3, b_c4 = st.columns([1.6, 1.0, 1.0, 1.0])
                         with b_c1:
-                            if st.button("🔍 本頁診斷", key=f"mc_diag_{context_key}_{sym}", use_container_width=True):
+                            if st.button("🔍 本頁診斷", key=f"mc_diag_{context_key}_{sym}", width="stretch"):
                                 trigger_same_tab_diagnosis(sym, source_mode_label=mode_options[2])
                         with b_c2:
-                            if st.button("🔼 前移", key=f"mc_up_{context_key}_{sym}", use_container_width=True, help="在自選分組中將此股票往前移一位"):
+                            if st.button("🔼 前移", key=f"mc_up_{context_key}_{sym}", width="stretch", help="在自選分組中將此股票往前移一位"):
                                 ok_m, msg_m = move_watchlist_stock_position(allow_reorder_cat, sym, "UP")
                                 st.toast(msg_m)
                                 if ok_m:
                                     st.rerun()
                         with b_c3:
-                            if st.button("🔽 後移", key=f"mc_dn_{context_key}_{sym}", use_container_width=True, help="在自選分組中將此股票往後移一位"):
+                            if st.button("🔽 後移", key=f"mc_dn_{context_key}_{sym}", width="stretch", help="在自選分組中將此股票往後移一位"):
                                 ok_m, msg_m = move_watchlist_stock_position(allow_reorder_cat, sym, "DOWN")
                                 st.toast(msg_m)
                                 if ok_m:
                                     st.rerun()
                         with b_c4:
-                            if st.button("⏫ 置頂", key=f"mc_top_{context_key}_{sym}", use_container_width=True, help="直接置頂到第 1 位"):
+                            if st.button("⏫ 置頂", key=f"mc_top_{context_key}_{sym}", width="stretch", help="直接置頂到第 1 位"):
                                 ok_m, msg_m = move_watchlist_stock_position(allow_reorder_cat, sym, "TOP")
                                 st.toast(msg_m)
                                 if ok_m:
@@ -15358,7 +15519,7 @@ def render_futu_multi_chart_grid(
                     else:
                         b_c1, b_c2 = st.columns([1.4, 2.2])
                         with b_c1:
-                            if st.button(f"🔍 本頁診斷", key=f"mc_rdiag_{context_key}_{sym}", use_container_width=True):
+                            if st.button(f"🔍 本頁診斷", key=f"mc_rdiag_{context_key}_{sym}", width="stretch"):
                                 _r_dir = ""
                                 if sym in _radar_plan_lookup:
                                     _dt = str(_radar_plan_lookup[sym].get("交易方向", ""))
@@ -15399,7 +15560,7 @@ def render_top_mobile_friendly_navbar(current_mode: str) -> None:
                 _lbl_n,
                 key=f"top_nav_btn_{_idx_n}",
                 type="primary" if _is_act else "secondary",
-                use_container_width=True
+                width="stretch"
             ):
                 if not _is_act:
                     st.session_state["_pending_nav_mode"] = _target_m
@@ -15409,7 +15570,7 @@ def render_top_mobile_friendly_navbar(current_mode: str) -> None:
         if st.button(
             "📱 手機:開" if _mob_on else "🖥️ 電腦版",
             key="top_nav_mobile_toggle_btn",
-            use_container_width=True,
+            width="stretch",
             help="一鍵切換手機精簡卡片模式 / 電腦寬屏模式"
         ):
             st.session_state["_pending_mobile_compact_mode"] = (not _mob_on)
@@ -15537,12 +15698,12 @@ def render_styled_dataframe(df, table_key: Optional[str] = None):
                 "📂 所屬自選": st.column_config.TextColumn("📂 所屬自選", width="small")
             },
             disabled=disabled_cols,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             key=f"de_{table_key}"
         )
     except Exception:
-        st.dataframe(work_df, use_container_width=True, hide_index=True, key=f"fb_{table_key}")
+        st.dataframe(work_df, width="stretch", hide_index=True, key=f"fb_{table_key}")
         return
 
     if isinstance(edited_df, pd.DataFrame) and not edited_df.empty:
@@ -15590,7 +15751,7 @@ def render_styled_dataframe(df, table_key: Optional[str] = None):
                 _b_cols = st.columns(_btn_cols_cnt)
                 for _c_idx, _cat_btn_name in enumerate(all_cats):
                     with _b_cols[_c_idx % _btn_cols_cnt]:
-                        if st.button(f"➕ 放入【{_cat_btn_name}】", key=f"chk_add_{table_key}_{_c_idx}", use_container_width=True):
+                        if st.button(f"➕ 放入【{_cat_btn_name}】", key=f"chk_add_{table_key}_{_c_idx}", width="stretch"):
                             for _s_add in _checked_syms:
                                 if _s_add not in wl_dict[_cat_btn_name]:
                                     wl_dict[_cat_btn_name].append(_s_add)
@@ -15627,7 +15788,7 @@ def render_radar_results(df_results, title, market_key=None):
                 st.write(f"- {msg}")
             if corr_matrix is not None:
                 with st.expander("查看 50 日報酬相關性矩陣", expanded=False):
-                    st.dataframe(corr_matrix, use_container_width=True)
+                    st.dataframe(corr_matrix, width="stretch")
         else:
             st.success("✅ 未發現明顯高相關性集群，持倉分散度相對健康。")
 
@@ -15711,7 +15872,7 @@ def render_radar_results(df_results, title, market_key=None):
                     st.warning(
                         f"🧭 **【大市判準：🔴 {_idx_name_b} 弱勢調整期】** 最新 **{_b_c:,.0f}**（今日 **{_b_ret:+.2f}%**）｜ "
                         f"位於 **20MA ({_b_s20:,.0f})** 與 **50MA ({_b_s50:,.0f})** 下方（出貨日 **{_b_dist}** 次）。\n\n"
-                        f"👉 **實戰導航**：下方仍為你完整展示 **🟢 逆市抗跌做多領頭羊** 與 **🔴 順勢做空清單**。在大市站回 9EMA ({_b_e9:,.0f}) 前，做多宜控制倉位並死守 **HK$1,000** 止損紅線！"
+                        f"👉 **實戰導航**：下方仍為你完整展示 **🟢 逆市抗跌做多領頭羊** 與 **🔴 順勢做空清單**。在大市站回 9EMA ({_b_e9:,.0f}) 前，做多宜控制倉位並死守 **HK${float(st.session_state.get('user_max_loss_hkd', 1000.0)):,.0f}** 止損紅線！"
                     )
         except Exception:
             pass
@@ -15815,7 +15976,7 @@ def render_radar_results(df_results, title, market_key=None):
                                     st.toast(f"⭐ 已將 {_pb_tk_code} ({r_row['股票名稱']}) 放入【{_pb_sel_cat}】！")
                                     st.rerun()
                         with _pb_c2:
-                            if st.button(f"🔍 本頁診斷 {_pb_tk_code}", key=f"pb_card_go_{market_key}_{idx_r}_{_pb_tk_code}", use_container_width=True):
+                            if st.button(f"🔍 本頁診斷 {_pb_tk_code}", key=f"pb_card_go_{market_key}_{idx_r}_{_pb_tk_code}", width="stretch"):
                                 trigger_same_tab_diagnosis(_pb_tk_code, dir_code="LONG", source_mode_label=mode_options[0])
                 else:
                     st.info("目前無同時滿足「多頭觸發 + 結構盈虧比 ≥ 1.8R」的優先買入股票，建議耐心等待。")
@@ -15852,7 +16013,7 @@ def render_radar_results(df_results, title, market_key=None):
                                     st.toast(f"⭐ 已將 {_ps_tk_code} ({r_row['股票名稱']}) 放入【{_ps_sel_cat}】！")
                                     st.rerun()
                         with _ps_c2:
-                            if st.button(f"🔍 本頁診斷 {_ps_tk_code}", key=f"ps_card_go_{market_key}_{idx_r}_{_ps_tk_code}", use_container_width=True):
+                            if st.button(f"🔍 本頁診斷 {_ps_tk_code}", key=f"ps_card_go_{market_key}_{idx_r}_{_ps_tk_code}", width="stretch"):
                                 trigger_same_tab_diagnosis(_ps_tk_code, dir_code="SHORT", source_mode_label=mode_options[0])
                 else:
                     st.info("目前無同時滿足「空頭觸發 + 結構盈虧比 ≥ 1.8R」的優先沽空股票。")
@@ -15879,7 +16040,7 @@ def render_radar_results(df_results, title, market_key=None):
                 jump_ticker_raw = st.selectbox("🔍 選擇要深度診斷的股票:", _labeled_opts, index=None, placeholder="點擊此處輸入或搜尋代碼 / 名稱...", key=f"jump_sel_{market_key}")
             with c2:
                 st.write("")
-                if st.button("🚀 本頁進入個股診斷", key=f"jump_btn_{market_key}", use_container_width=True):
+                if st.button("🚀 本頁進入個股診斷", key=f"jump_btn_{market_key}", width="stretch"):
                     if jump_ticker_raw:
                         jump_ticker = jump_ticker_raw.split()[0].strip()
                         _matched_rows = df_results[df_results['代碼'] == jump_ticker]
@@ -15918,7 +16079,7 @@ def render_radar_results(df_results, title, market_key=None):
                     ).strip()
                 with rw_c4:
                     st.write("")
-                    if st.button("⭐ 一鍵存入自選", key=f"radar_wl_add_btn_{market_key}", use_container_width=True):
+                    if st.button("⭐ 一鍵存入自選", key=f"radar_wl_add_btn_{market_key}", width="stretch"):
                         _dest_cat = _radar_new_cat_name if _radar_target_cat == "➕ 新建自選分組..." else _radar_target_cat
                         if not _dest_cat:
                             st.warning("請輸入新分組名稱！")
@@ -16410,7 +16571,7 @@ def render_interactive_tutorial_hub():
                     <ul class="sq-guide-list">
                         <li>開啟 FutuOpenD 可一鍵同步港美持倉與跨年歷史成交，並自動進行真 FIFO 配對。</li>
                         <li>未開 OpenD 亦可透過 CSV / Excel 匯入完整歷史交易紀錄。</li>
-                        <li>左側欄提供 <b>經典深藍、簡約純白、暗黑夜盤、翡翠商務</b> 4 套風格；手機開啟可切換卡片與單欄模式。</li>
+                        <li>左側欄提供 <b>淺色（預設）、深藍側欄、深色、墨綠側欄</b> 及 <b>自訂配色</b>（可自由調整背景、側欄、按鈕與各分區底色）；手機開啟可切換卡片與單欄模式。</li>
                     </ul>
                 </div>
             </div>
@@ -16444,7 +16605,7 @@ def render_interactive_tutorial_hub():
                     "執行紀律": "Stage 2 嚴禁做空；到 TP1 先回補一半防軋空"
                 }
             ])
-            st.dataframe(futu_map_df, use_container_width=True, hide_index=True)
+            st.dataframe(futu_map_df, width="stretch", hide_index=True)
 
         # ---------------- TAB 2 ----------------
         with t_tab2:
@@ -16700,7 +16861,7 @@ if mode == mode_options[0]:
             _trigger_full_scan = st.button(
                 f"🚀 開始掃描 ({_btn_lbl_cnt})",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 key="btn_mode1_top_full_scan"
             )
 
@@ -16794,10 +16955,10 @@ if mode == mode_options[0]:
                 ).strip()
             with rad_top_c4:
                 st.write("")
-                _btn_q_scan = st.form_submit_button("🔍 即時掃描股票", use_container_width=True)
+                _btn_q_scan = st.form_submit_button("🔍 即時掃描股票", width="stretch")
             with rad_top_c5:
                 st.write("")
-                _btn_q_add_wl = st.form_submit_button("⭐ 直接加入自選", use_container_width=True)
+                _btn_q_add_wl = st.form_submit_button("⭐ 直接加入自選", width="stretch")
 
             if _btn_q_add_wl:
                 _dest_c = _rad_top_new_cat if (_rad_top_sel_cat == "➕ 新建自選類別..." or _rad_top_new_cat) else _rad_top_sel_cat
@@ -16893,7 +17054,7 @@ elif mode == mode_options[2]:
     top_wl_c3.metric("🔒 已鎖定實戰持倉", f"{len(persistent_data.get('user_locked_positions', {}))} 筆", "多股同列自動顯示紅綠盈虧區")
     with top_wl_c4:
         st.write("")
-        if st.button("⚡ 一鍵深度掃描全部自選分組", use_container_width=True, key="btn_scan_all_wl_groups"):
+        if st.button("⚡ 一鍵深度掃描全部自選分組", width="stretch", key="btn_scan_all_wl_groups"):
             with st.spinner("正在批量預載並掃描所有自選分組..."):
                 if _all_unique_wl_stocks:
                     batch_preload_ohlcv_cache(_all_unique_wl_stocks)
@@ -16923,7 +17084,7 @@ elif mode == mode_options[2]:
             with st.form("form_wl_mgr_create", clear_on_submit=True):
                 new_cat = st.text_input("輸入新分組名稱 (必填):", placeholder="例如: 美股突破池, 港股精選...").strip()
                 new_cat_init_stks = st.text_input("同時加入股票 (選填，逗號分隔):", placeholder="例: 700, NVDA, TSLA").strip()
-                sub_create_grp = st.form_submit_button("➕ 建立新分組 (或按 Enter)", use_container_width=True)
+                sub_create_grp = st.form_submit_button("➕ 建立新分組 (或按 Enter)", width="stretch")
                 if sub_create_grp:
                     if not new_cat:
                         st.warning("⚠️ 請輸入新分組名稱！")
@@ -16951,7 +17112,7 @@ elif mode == mode_options[2]:
             with st.form("form_wl_mgr_rename", clear_on_submit=False):
                 cat_to_rename = st.selectbox("選擇要改名的分組:", _all_wl_groups, key="wl_mgr_ren_src")
                 renamed_cat_str = st.text_input("輸入修改後的新名稱:", placeholder="輸入新分組名稱 (按 Enter 即改)...").strip()
-                sub_rename_grp = st.form_submit_button("✏️ 確認修改分組名稱", use_container_width=True)
+                sub_rename_grp = st.form_submit_button("✏️ 確認修改分組名稱", width="stretch")
                 if sub_rename_grp:
                     ok_ren, msg_ren = rename_watchlist_group_in_place(cat_to_rename, renamed_cat_str)
                     if ok_ren:
@@ -16966,7 +17127,7 @@ elif mode == mode_options[2]:
             with st.form("form_wl_mgr_merge", clear_on_submit=False):
                 copy_src_cat = st.selectbox("來源分組:", _all_wl_groups, key="wl_mgr_cp_src")
                 copy_dst_cat = st.selectbox("目標分組:", [c for c in _all_wl_groups if c != copy_src_cat] or _all_wl_groups, key="wl_mgr_cp_dst")
-                sub_merge_grp = st.form_submit_button("📋 將來源股票合併至目標", use_container_width=True)
+                sub_merge_grp = st.form_submit_button("📋 將來源股票合併至目標", width="stretch")
                 if sub_merge_grp:
                     if copy_src_cat != copy_dst_cat:
                         _src_items = st.session_state.watchlist_dict.get(copy_src_cat, [])
@@ -16988,14 +17149,14 @@ elif mode == mode_options[2]:
             cat_to_del = st.selectbox("選擇要操作的分組:", _all_wl_groups, key="wl_mgr_del_target")
             d_col_a, d_col_b = st.columns(2)
             with d_col_a:
-                if st.button("🧹 清空股票", use_container_width=True, key="wl_mgr_btn_clear"):
+                if st.button("🧹 清空股票", width="stretch", key="wl_mgr_btn_clear"):
                     st.session_state.watchlist_dict[cat_to_del] = []
                     save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
                     st.session_state["_wl_op_feedback_msg"] = ("info", f"🧹 已清空分組【{cat_to_del}】內的股票。")
                     st.toast(f"已清空【{cat_to_del}】內的股票")
                     st.rerun()
             with d_col_b:
-                if st.button("🗑️ 刪除分組", use_container_width=True, key="wl_mgr_btn_delete"):
+                if st.button("🗑️ 刪除分組", width="stretch", key="wl_mgr_btn_delete"):
                     if len(st.session_state.watchlist_dict) > 1:
                         del st.session_state.watchlist_dict[cat_to_del]
                         st.session_state.watchlist_radar_results.pop(cat_to_del, None)
@@ -17038,7 +17199,7 @@ elif mode == mode_options[2]:
                         f"➕ 加入股票至「{cat}」(支援代碼、中文名或多個代碼逗號/空格分隔，按 Enter 即加):",
                         placeholder="例: 700, 藥明生物, NVDA, TSLA"
                     ).strip()
-                    sub_add_stk = st.form_submit_button(f"➕ 加入股票至「{cat}」", use_container_width=True)
+                    sub_add_stk = st.form_submit_button(f"➕ 加入股票至「{cat}」", width="stretch")
                     if sub_add_stk:
                         if raw_add_str:
                             tokens = [x.strip() for x in re.split(r'[\s,，、;；]+', raw_add_str) if x.strip()]
@@ -17071,14 +17232,14 @@ elif mode == mode_options[2]:
                 other_cats = [c for c in cat_names if c != cat]
                 mv_c1, mv_c2, mv_c3, mv_c4, mv_c5, mv_c6 = st.columns([1.0, 1.0, 1.0, 1.4, 1.1, 1.0])
                 with mv_c1:
-                    if st.button("⏫ 置頂", key=f"wl_btn_pin_{cat}", use_container_width=True, disabled=(not sel_manage_syms)):
+                    if st.button("⏫ 置頂", key=f"wl_btn_pin_{cat}", width="stretch", disabled=(not sel_manage_syms)):
                         rem_items = [t for t in current_list if t not in sel_manage_syms]
                         st.session_state.watchlist_dict[cat] = sel_manage_syms + rem_items
                         save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
                         st.toast(f"⏫ 已將所選股票置頂於【{cat}】")
                         st.rerun()
                 with mv_c2:
-                    if st.button("🔼 上移", key=f"wl_btn_up_{cat}", use_container_width=True, disabled=(not sel_manage_syms)):
+                    if st.button("🔼 上移", key=f"wl_btn_up_{cat}", width="stretch", disabled=(not sel_manage_syms)):
                         new_l = list(current_list)
                         for s_tk in sel_manage_syms:
                             if s_tk in new_l:
@@ -17090,7 +17251,7 @@ elif mode == mode_options[2]:
                         st.toast("🔼 已將所選股票上移一位")
                         st.rerun()
                 with mv_c3:
-                    if st.button("🔽 下移", key=f"wl_btn_dn_{cat}", use_container_width=True, disabled=(not sel_manage_syms)):
+                    if st.button("🔽 下移", key=f"wl_btn_dn_{cat}", width="stretch", disabled=(not sel_manage_syms)):
                         new_l = list(current_list)
                         for s_tk in reversed(sel_manage_syms):
                             if s_tk in new_l:
@@ -17104,7 +17265,7 @@ elif mode == mode_options[2]:
                 with mv_c4:
                     dest_grp = st.selectbox("目標分組:", other_cats if other_cats else [cat], key=f"wl_dest_grp_{cat}", label_visibility="collapsed")
                 with mv_c5:
-                    if st.button("📂 移至該組", key=f"wl_btn_mv_{cat}", use_container_width=True, disabled=(not sel_manage_syms or not other_cats)):
+                    if st.button("📂 移至該組", key=f"wl_btn_mv_{cat}", width="stretch", disabled=(not sel_manage_syms or not other_cats)):
                         for s_tk in sel_manage_syms:
                             if s_tk in st.session_state.watchlist_dict[cat]:
                                 st.session_state.watchlist_dict[cat].remove(s_tk)
@@ -17114,7 +17275,7 @@ elif mode == mode_options[2]:
                         st.toast(f"已將 {len(sel_manage_syms)} 隻股票移至【{dest_grp}】")
                         st.rerun()
                 with mv_c6:
-                    if st.button("❌ 移除", key=f"wl_btn_rm_sel_{cat}", use_container_width=True, disabled=(not sel_manage_syms)):
+                    if st.button("❌ 移除", key=f"wl_btn_rm_sel_{cat}", width="stretch", disabled=(not sel_manage_syms)):
                         st.session_state.watchlist_dict[cat] = [t for t in current_list if t not in sel_manage_syms]
                         save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
                         st.toast(f"已從【{cat}】移除 {len(sel_manage_syms)} 隻股票")
@@ -17231,13 +17392,13 @@ elif mode == mode_options[2]:
                                     "代碼": st.column_config.TextColumn("股票代碼", width="small"),
                                 },
                                 disabled=_q_disabled,
-                                use_container_width=True,
+                                width="stretch",
                                 hide_index=True,
                                 key=f"wl_instant_de_tbl_{cat}"
                             )
                         except Exception:
                             _q_edited = _q_work
-                            st.dataframe(quote_df, use_container_width=True, hide_index=True, key=f"wl_instant_fb_tbl_{cat}")
+                            st.dataframe(quote_df, width="stretch", hide_index=True, key=f"wl_instant_fb_tbl_{cat}")
 
                         if isinstance(_q_edited, pd.DataFrame) and not _q_edited.empty:
                             # A. 檢測「🔍 本頁診斷」點擊 -> 同頁切換！
@@ -17296,14 +17457,14 @@ elif mode == mode_options[2]:
                                 )
                                 _tb_c1, _tb_c2, _tb_c3, _tb_c4, _tb_c5, _tb_c6, _tb_c7 = st.columns([1.0, 1.0, 1.0, 1.0, 1.4, 1.2, 1.0])
                                 with _tb_c1:
-                                    if st.button("⏫ 置頂", key=f"tbl_chk_pin_{cat}", use_container_width=True):
+                                    if st.button("⏫ 置頂", key=f"tbl_chk_pin_{cat}", width="stretch"):
                                         _rest = [t for t in current_list if t not in _q_chk_syms]
                                         st.session_state.watchlist_dict[cat] = _q_chk_syms + _rest
                                         save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
                                         st.toast(f"⏫ 已將 {len(_q_chk_syms)} 隻股票置頂！")
                                         st.rerun()
                                 with _tb_c2:
-                                    if st.button("🔼 上移一位", key=f"tbl_chk_up_{cat}", use_container_width=True):
+                                    if st.button("🔼 上移一位", key=f"tbl_chk_up_{cat}", width="stretch"):
                                         _nl = list(current_list)
                                         for _s in _q_chk_syms:
                                             if _s in _nl:
@@ -17315,7 +17476,7 @@ elif mode == mode_options[2]:
                                         st.toast("🔼 已上移一位！")
                                         st.rerun()
                                 with _tb_c3:
-                                    if st.button("🔽 下移一位", key=f"tbl_chk_dn_{cat}", use_container_width=True):
+                                    if st.button("🔽 下移一位", key=f"tbl_chk_dn_{cat}", width="stretch"):
                                         _nl = list(current_list)
                                         for _s in reversed(_q_chk_syms):
                                             if _s in _nl:
@@ -17327,7 +17488,7 @@ elif mode == mode_options[2]:
                                         st.toast("🔽 已下移一位！")
                                         st.rerun()
                                 with _tb_c4:
-                                    if st.button("⏬ 置底", key=f"tbl_chk_bot_{cat}", use_container_width=True):
+                                    if st.button("⏬ 置底", key=f"tbl_chk_bot_{cat}", width="stretch"):
                                         _rest = [t for t in current_list if t not in _q_chk_syms]
                                         st.session_state.watchlist_dict[cat] = _rest + _q_chk_syms
                                         save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
@@ -17336,7 +17497,7 @@ elif mode == mode_options[2]:
                                 with _tb_c5:
                                     _tbl_dest_cat = st.selectbox("目標類別:", _other_wl_cats if _other_wl_cats else [cat], key=f"tbl_chk_dest_{cat}", label_visibility="collapsed")
                                 with _tb_c6:
-                                    if st.button(f"📂 移至【{_tbl_dest_cat}】", key=f"tbl_chk_mv_{cat}", use_container_width=True, disabled=(not _other_wl_cats)):
+                                    if st.button(f"📂 移至【{_tbl_dest_cat}】", key=f"tbl_chk_mv_{cat}", width="stretch", disabled=(not _other_wl_cats)):
                                         for _s in _q_chk_syms:
                                             if _s in st.session_state.watchlist_dict[cat]:
                                                 st.session_state.watchlist_dict[cat].remove(_s)
@@ -17346,7 +17507,7 @@ elif mode == mode_options[2]:
                                         st.toast(f"📂 已將 {len(_q_chk_syms)} 隻股票移至【{_tbl_dest_cat}】！")
                                         st.rerun()
                                 with _tb_c7:
-                                    if st.button("❌ 移除", key=f"tbl_chk_rm_{cat}", use_container_width=True):
+                                    if st.button("❌ 移除", key=f"tbl_chk_rm_{cat}", width="stretch"):
                                         st.session_state.watchlist_dict[cat] = [t for t in current_list if t not in _q_chk_syms]
                                         save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
                                         st.toast(f"❌ 已從【{cat}】移除 {len(_q_chk_syms)} 隻股票！")
@@ -17368,7 +17529,7 @@ elif mode == mode_options[2]:
                 # 3. 啟動此分組深度量化雷達掃描
                 scan_col1, scan_col2 = st.columns([3, 1])
                 with scan_col1:
-                    if st.button(f"🚀 啟動「{cat}」深度買賣點與《超級績效》盈虧比雷達掃描", use_container_width=True, key=f"scan_{cat}"):
+                    if st.button(f"🚀 啟動「{cat}」深度買賣點與《超級績效》盈虧比雷達掃描", width="stretch", key=f"scan_{cat}"):
                         with st.spinner(f"正在對「{cat}」({len(current_list)} 隻股票) 執行完整買賣位與盈虧比運算..."):
                             df_res = run_all_inclusive_radar(current_list)
                             if df_res is not None:
@@ -17394,7 +17555,7 @@ elif mode == mode_options[2]:
                                 st.error("掃描失敗，未取得有效數據。")
                 with scan_col2:
                     _quick_wl_jump = st.selectbox("快速跳轉:", current_list, index=0, key=f"wl_qjump_sel_{cat}", label_visibility="collapsed")
-                    if st.button("🔍 本頁診斷選中股", key=f"wl_qjump_btn_{cat}", use_container_width=True):
+                    if st.button("🔍 本頁診斷選中股", key=f"wl_qjump_btn_{cat}", width="stretch"):
                         trigger_same_tab_diagnosis(_quick_wl_jump, source_mode_label=mode_options[2])
             else:
                 render_atomic_alert(f"⚪ **「{cat}」分組目前為空**：請在上方輸入股票代碼或中文名稱（如 `0700`、`藥明生物`、`NVDA`）加入自選，或在「掃描雷達 / 個股診斷」頁面一鍵存入。", "info")
@@ -17423,11 +17584,11 @@ elif mode == mode_options[1]:
         render_atomic_section_header("📊 個股技術與風險診斷", level=1)
     with hdr_d2:
         st.write("")
-        if st.button("⬅️ 同頁返回掃描雷達", key="btn_back_to_radar_same_tab", use_container_width=True):
+        if st.button("⬅️ 同頁返回掃描雷達", key="btn_back_to_radar_same_tab", width="stretch"):
             return_to_origin_mode_same_tab(mode_options[0])
     with hdr_d3:
         st.write("")
-        if st.button("⭐ 同頁前往自選名單", key="btn_go_to_wl_same_tab", use_container_width=True):
+        if st.button("⭐ 同頁前往自選名單", key="btn_go_to_wl_same_tab", width="stretch"):
             return_to_origin_mode_same_tab(mode_options[2])
 
     render_global_multi_timezone_clock_banner("mode2_diag")
@@ -17450,7 +17611,7 @@ elif mode == mode_options[1]:
             tf_choice = st.selectbox("K線週期", ["1m", "5m", "15m", "1h", "4h", "1d", "1wk"], index=5)
         with c_sub_go:
             st.write("")
-            _sub_diag_go = st.form_submit_button("🔍 切換診斷股票", use_container_width=True)
+            _sub_diag_go = st.form_submit_button("🔍 切換診斷股票", width="stretch")
         if _sub_diag_go and ticker_input_raw:
             _new_fmt_t, _, _, _, _ = format_and_detect_market(ticker_input_raw)
             if _new_fmt_t != _init_diag_tk:
@@ -18340,7 +18501,7 @@ elif mode == mode_options[1]:
                         )
                     with qs_c4:
                         st.write("")
-                        qs_submit = st.form_submit_button("✅ 確認記錄賣出", use_container_width=True, type="primary")
+                        qs_submit = st.form_submit_button("✅ 確認記錄賣出", width="stretch", type="primary")
                     if qs_submit:
                         _e_px_use = float(actual_entry) if float(actual_entry) > 0 else float(_saved_pos.get("entry", last["Close"]))
                         _d_code_use = "SHORT" if "做空" in pos_dir else "LONG"
@@ -18564,7 +18725,7 @@ elif mode == mode_options[1]:
                             _long_cards.append((
                                 "success",
                                 f"🚦 **【滿倉 × 單筆 {_rk_lim_dlr:,.0f} {currency} 止損綠燈通過】**：你當前持倉 **{actual_held_shares:,} 股**（本金 **{_anchored_plan['invested_amount']:,.0f} {currency}**），"
-                                f"就算跌穿真實圖表結構止損位 (**{fixed_sl:.2f}**，幅度 **-{_anchored_plan['initial_stop_pct']:.2f}%**)，含富途雙邊費用總虧損僅 **-{_init_risk_dlr:,.0f} {currency}**（符合你約 1,000 港元止損上限），"
+                                f"就算跌穿真實圖表結構止損位 (**{fixed_sl:.2f}**，幅度 **-{_anchored_plan['initial_stop_pct']:.2f}%**)，含富途雙邊費用總虧損僅 **-{_init_risk_dlr:,.0f} {currency}**（符合你單筆 {float(st.session_state.get('user_max_loss_hkd', 1000.0)):,.0f} 港元止損上限），"
                                 f"**請安心將止損單設於結構位 `{fixed_sl:.2f}`，切勿無故上移！**"
                             ))
                         else:
@@ -18783,7 +18944,7 @@ elif mode == mode_options[1]:
                 st.markdown("### 📰 實時新聞情報搜尋與 AI 利好/利空 × 量價反應診斷 (News & Catalyst Intelligence)")
             with nw_hdr_col2:
                 st.write("")
-                _force_refresh_news = st.button("🔄 重新抓取最新新聞", key=f"btn_refresh_news_{fmt_ticker}", use_container_width=True)
+                _force_refresh_news = st.button("🔄 重新抓取最新新聞", key=f"btn_refresh_news_{fmt_ticker}", width="stretch")
 
             _news_intel = fetch_and_analyze_stock_news_intelligence(
                 fmt_ticker,
@@ -18832,7 +18993,7 @@ elif mode == mode_options[1]:
                         column_config={
                             "原文連結": st.column_config.LinkColumn("🔗 新聞連結", display_text="閱讀原文")
                         },
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                         key=f"news_df_{fmt_ticker}_{selected_interval}"
                     )
@@ -19197,11 +19358,11 @@ elif mode == mode_options[1]:
                 # OLD:
                 # fig.update_layout(uirevision=target_ticker)
                 # plot_config = dict(scrollZoom=True, displayModeBar=True, modeBarButtonsToRemove=['lasso2d', 'select2d'], displaylogo=False)
-                # st.plotly_chart(fig, use_container_width=True, config=plot_config, theme=None, key=f"main_chart_{target_ticker}")
+                # st.plotly_chart(fig, width="stretch", config=plot_config, theme=None, key=f"main_chart_{target_ticker}")
                 # NEW: [v25.5 綁定 fmt_ticker 與 selected_interval，徹底消除手動輸入新代碼時之 Plotly DOM 衝突]
                 fig.update_layout(uirevision=f"{fmt_ticker}_{selected_interval}")
                 plot_config = dict(scrollZoom=(not is_mobile_mode_active()), displayModeBar=(not is_mobile_mode_active()), modeBarButtonsToRemove=['lasso2d', 'select2d'], displaylogo=False)
-                st.plotly_chart(fig, use_container_width=True, config=plot_config, theme=None, key=f"main_chart_{fmt_ticker}_{selected_interval}")
+                st.plotly_chart(fig, width="stretch", config=plot_config, theme=None, key=f"main_chart_{fmt_ticker}_{selected_interval}")
 
                 # --- 恢復 K 線型態詳細解讀文字區塊 ---
                 st.markdown("### 🕯️ K 線型態解讀")
@@ -19248,8 +19409,8 @@ elif mode == mode_options[1]:
                     
                 fig_bench.update_xaxes(type='category', nticks=20, showspikes=True, spikemode='across', spikesnap='cursor', showline=True, spikethickness=1, spikecolor='#757575')
                 fig_bench.update_yaxes(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, spikethickness=1, spikecolor='#757575')
-                # OLD: st.plotly_chart(fig_bench, use_container_width=True, config=plot_config, theme=None)
-                st.plotly_chart(fig_bench, use_container_width=True, config=plot_config, theme=None, key=f"bench_chart_{fmt_ticker}_{selected_interval}")
+                # OLD: st.plotly_chart(fig_bench, width="stretch", config=plot_config, theme=None)
+                st.plotly_chart(fig_bench, width="stretch", config=plot_config, theme=None, key=f"bench_chart_{fmt_ticker}_{selected_interval}")
 
             st.markdown("---")
             st.markdown("### ⚡ 快速回測此標的")
@@ -19261,7 +19422,7 @@ elif mode == mode_options[1]:
                 with cqbt2:
                     btmodeq = st.selectbox("方向", ["全部雙向", "僅做多頭(做多)", "僅做空頭(做空)"], key=f"btmodeq_{fmt_ticker}")
                 with cqbt3:
-                    btfullposq = st.checkbox("💵 採用側欄『滿倉 + 單筆 $1,000 定額止損』模式", value=True, key=f"btfullq_{fmt_ticker}")
+                    btfullposq = st.checkbox(f"💵 採用側欄『滿倉 + 單筆 HK${float(st.session_state.get('user_max_loss_hkd', 1000.0)):,.0f} 定額止損』模式", value=True, key=f"btfullq_{fmt_ticker}")
                     btrelaxq = st.checkbox("寬鬆模式 (關閉則 100% 同步掃描雷達嚴格結構邏輯)", value=False, help="預設關閉以確保回測與掃描雷達理念 100% 一致；勾選則僅用 50MA+MACD", key=f"btrelaxq_{fmt_ticker}")
 
                 cqdate1, cqdate2 = st.columns(2)
@@ -19296,11 +19457,11 @@ elif mode == mode_options[1]:
                             fig_eq.add_trace(go.Scatter(x=x_eq_dates, y=eqcurve.values, mode='lines', name='資產曲線', line=dict(color='green', width=2.5)))
                             fig_eq.update_layout(title="帳戶資產曲線", xaxis_title="日期", yaxis_title="總資產", template="plotly_white", height=300)
                             fig_eq.update_xaxes(type='category', nticks=20)
-                            st.plotly_chart(fig_eq, use_container_width=True, theme=None)
+                            st.plotly_chart(fig_eq, width="stretch", theme=None)
 
                             if not trdsdf.empty:
                                 show_df = trdsdf.drop(columns=['利潤', '_trade_id', '_initial_notional', '_entry_fee'], errors='ignore')
-                                st.dataframe(show_df, use_container_width=True)
+                                st.dataframe(show_df, width="stretch")
 
 # ==========================================
 # 15. 模式 4：回測系統
@@ -19321,7 +19482,7 @@ elif mode == mode_options[3]:
     with cbt3:
         bt_mode = st.selectbox("交易方向", ["全部雙向", "僅做多頭(做多)", "僅做空頭(做空)"])
     with cbt4:
-        bt_use_full_1k = st.checkbox("💵 採用側欄『滿倉 + 單筆 $1,000 定額止損』實戰模式", value=True, help="開啟後，回測完全按照你在側欄設定的滿倉本金 (HK$18,000~25,000) 及單筆最大虧損 (HK$1,000 / US$128) 計算每筆股數與雙軌止盈！")
+        bt_use_full_1k = st.checkbox(f"💵 採用側欄『滿倉 + 單筆 HK${float(st.session_state.get('user_max_loss_hkd', 1000.0)):,.0f} 定額止損』實戰模式", value=True, help="開啟後，回測完全按照你在側欄設定的滿倉本金及單筆最大虧損 (1R) 計算每筆股數與雙軌止盈！")
         bt_relaxed = st.checkbox("寬鬆模式 (關閉則 100% 同步掃描雷達嚴格結構邏輯)", value=False, help="預設關閉以確保回測與掃描雷達理念 100% 一致；勾選則僅用 50MA+MACD")
 
     cdate1, cdate2 = st.columns(2)
@@ -19374,11 +19535,11 @@ elif mode == mode_options[3]:
                 fig_eq.add_trace(go.Scatter(x=x_eq_dates, y=equity_curve.values, mode='lines', name='資產曲線', line=dict(color='green', width=2.5)))
                 fig_eq.update_layout(title="帳戶資產動態曲線", xaxis_title="日期", yaxis_title="總資產", template="plotly_white", height=400)
                 fig_eq.update_xaxes(type='category', nticks=20)
-                st.plotly_chart(fig_eq, use_container_width=True, theme=None)
+                st.plotly_chart(fig_eq, width="stretch", theme=None)
 
                 if not trades_df.empty:
                     show_df = trades_df.drop(columns=['利潤']) if '利潤' in trades_df.columns else trades_df
-                    st.dataframe(show_df, use_container_width=True)
+                    st.dataframe(show_df, width="stretch")
 
 # ==========================================
 # 17. 模式 5：實戰教學與大師戰法指南 (v25.3 新增)
