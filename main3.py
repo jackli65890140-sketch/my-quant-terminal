@@ -175,7 +175,7 @@ RADAR_CACHE_TTL_SECONDS = 1800  # 雷達結果預設 30 分鐘自動過期重算
 # 5) [Five-Stage Bull/Bear & Correction-Ending Engine] 同時分辨「🐂 確認牛市」、「🌤️ 大盤調整結束 / 熊轉牛初段 (彈簧股爆發期)」、「🟡 牛市中期修正」、「🌩️ 牛市見頂派發預警」與「🐻 確認熊市」；
 # 6) [Small/Mid-Cap High-Velocity Pool] 新增「🚀 超級績效・中小型高彈性潛力池」並配備日均成交額 ≥ 2,000萬港元防老千股護欄。
 # OLD: CURRENT_SCHEMA_VERSION = "v48.0"
-CURRENT_SCHEMA_VERSION = "v60.2"  # [v59.1 修復掃描死鎖與交易記錄去重版：RLock防重入死鎖 + 磁碟寫入移出鎖外 + 全帳號買賣流水與平倉復盤語意去重引擎]
+CURRENT_SCHEMA_VERSION = "v60.6"  # [v59.1 修復掃描死鎖與交易記錄去重版：RLock防重入死鎖 + 磁碟寫入移出鎖外 + 全帳號買賣流水與平倉復盤語意去重引擎]
 import os as _os_lib
 ACCOUNT_ALL_TRADES_LEDGER_FILE = _os_lib.path.expanduser("~/.swing_account_all_trades_ledger_v1.json")
 DEFAULT_USER_FUTU_HOLDINGS = ["VOO", "PYPL", "0700.HK", "1919.HK", "2382.HK", "6030.HK", "1929.HK", "RKLB", "TOST"]
@@ -4406,7 +4406,7 @@ def _dedup_closed_trades_journal(journal_list: List[Dict[str, Any]]) -> List[Dic
             base["net_pnl"] = tot_net
             base["pnl_pct"] = pnl_pct
             base["realized_r"] = realized_r
-            base["exit_reason"] = f"📊 同波段分 {len(camp)} 批平倉整合"
+            base["exit_reason"] = f"📊 分批平倉合併 ({len(camp)} 筆)"
             base["notes"] = f"分 {len(camp)} 批整合：{tranche_desc}"
             consolidated.append(base)
 
@@ -8422,7 +8422,7 @@ def build_core_satellite_hybrid_pool(
         for tk in dyn_tks:
             if tk not in source_map and len(combined) < target_total:
                 combined.append(tk)
-                source_map[tk] = "🆕 富途活水發現"
+                source_map[tk] = "🌐 全市場篩選"
                 futu_added += 1
         status_note = dyn_msg
 
@@ -8430,10 +8430,10 @@ def build_core_satellite_hybrid_pool(
     for tk in supp_base:
         if tk not in source_map and len(combined) < target_total:
             combined.append(tk)
-            source_map[tk] = "🧭 板塊輪動補充"
+            source_map[tk] = "🧭 跨板塊補充"
             supp_added += 1
 
-    summary_msg = f"混合池組成：🏛️ 核心底座 {len(core_base)} 隻 ＋ 🆕 富途活水 {futu_added} 隻 ＋ 🧭 跨板塊補充 {supp_added} 隻（共 {len(combined)} 隻）｜{status_note}"
+    summary_msg = f"掃描池組成：核心池 {len(core_base)} 隻 ＋ 全市場篩選 {futu_added} 隻 ＋ 跨板塊補充 {supp_added} 隻（共 {len(combined)} 隻）｜{status_note}"
     return combined, source_map, summary_msg
 
 
@@ -8496,9 +8496,9 @@ def _compute_sector_rs_compass_df() -> pd.DataFrame:
 
 def render_sector_rs_compass_panel(context_key: str = "mode1_sector") -> None:
     """[v60.1] 按需載入之「🧭 板塊資金輪動羅盤」，幫助 Swing Trader 先看資金流向再掃個股"""
-    with st.expander("🧭 板塊資金輪動羅盤 (Sector RS 強弱排行｜先睇大資金喺邊個板塊，按需載入不拖慢開頁)", expanded=False):
+    with st.expander("🧭 板塊相對強弱總覽 (Sector RS)", expanded=False):
         s_key = f"_sector_compass_loaded_{context_key}"
-        if st.button("🔄 即時掃描港美股主流板塊強弱 (15 隻代表 ETF)", key=f"btn_sector_compass_{context_key}"):
+        if st.button("🔄 載入板塊強弱數據 (15 隻代表 ETF)", key=f"btn_sector_compass_{context_key}"):
             st.session_state[s_key] = True
         if not st.session_state.get(s_key, False):
             st.caption("💡 點擊上方按鈕即時排列科技、半導體、醫療、能源、工業軍工、黃金、金融與恒生科技嘅 5日/20日/63日相對強弱，助你避開弱勢板塊。")
@@ -8509,7 +8509,7 @@ def render_sector_rs_compass_panel(context_key: str = "mode1_sector") -> None:
             st.warning("⚠️ 暫未能取得板塊 ETF 數據，請稍後再試。")
         else:
             top3 = " ｜ ".join(df_sec["板塊 ETF"].head(3).tolist())
-            st.success(f"🔥 **當前資金最強 Top 3 板塊**：{top3}")
+            st.success(f"**相對強弱領先板塊 (Top 3)**：{top3}")
             st.dataframe(df_sec, use_container_width=True, hide_index=True)
 
 
@@ -11323,8 +11323,8 @@ def render_futu_opend_sidebar_bridge() -> None:
     """
     [v59.0 全帳號歷史交易與零缺失持倉同步中心]
     """
-    with st.sidebar.expander("🐂 富途牛牛 OpenD 全帳號持倉 & 歷史交易同步中心", expanded=False):
-        st.caption("無需自己寫任何 Python 代碼！開啟 Mac 版 **FutuOpenD**，即可一鍵同步富途所有子帳戶持倉、自選「持倉」分組，並自動拉取你呢個帳號由開戶至今嘅**所有歷史買賣成交**！")
+    with st.sidebar.expander("🐂 富途 OpenD 帳戶同步", expanded=False):
+        st.caption("開啟本機 **FutuOpenD** 並登入後，可同步實時持倉與歷史成交紀錄（只讀模式，不會執行下單）。")
         _futu_prefs = persistent_data.setdefault("futu_bridge_prefs", {"enabled": False, "host": "127.0.0.1", "port": 11111})
         enable_futu = st.checkbox(
             "⚡ 啟用富途 OpenD 本地連線",
@@ -11384,7 +11384,7 @@ def render_futu_opend_sidebar_bridge() -> None:
             st.code("pip3 install futu-api", language="bash")
             return
 
-        if st.button("🔌 1. 測試連線並檢查富途狀態", use_container_width=True, key="btn_futu_test_ping"):
+        if st.button("🔌 1. 測試連線狀態", use_container_width=True, key="btn_futu_test_ping"):
             try:
                 from futu import OpenQuoteContext, RET_OK  # type: ignore
                 q_ctx = OpenQuoteContext(host=futu_host, port=int(futu_port))
@@ -11397,7 +11397,7 @@ def render_futu_opend_sidebar_bridge() -> None:
             except Exception as e:
                 st.error(f"❌ 連線失敗（請確認 Mac 背景已打開並登入 FutuOpenD 軟件）：{e}")
 
-        if st.button("💼 2. 一鍵全量同步富途「持倉 + 帳號所有歷史買賣交易」", use_container_width=True, type="primary", key="btn_futu_sync_positions"):
+        if st.button("💼 2. 同步持倉與歷史成交", use_container_width=True, type="primary", key="btn_futu_sync_positions"):
             try:
                 ok_sync, msg_sync = sync_full_account_all_trades_from_futu_opend(
                     futu_host=futu_host,
@@ -11420,7 +11420,7 @@ def render_futu_opend_sidebar_bridge() -> None:
             options=list(st.session_state.watchlist_dict.keys()),
             key="sel_futu_push_group"
         )
-        if st.button("📤 3. 一鍵將所選分組推送至富途牛牛 App", use_container_width=True, key="btn_futu_push_watchlist"):
+        if st.button("📤 3. 推送所選自選分組至富途", use_container_width=True, key="btn_futu_push_watchlist"):
             try:
                 from futu import OpenQuoteContext, ModifyUserSecurityOp, RET_OK  # type: ignore
                 t_list = st.session_state.watchlist_dict.get(sync_group_sel, [])
@@ -11460,7 +11460,7 @@ mode_options = [
     "📊 2. 個股量化分析與技術診斷",
     "⭐ 3. 自選股票名單",
     "📈 4. 策略歷史回測系統",
-    "📖 5. 實戰教學與大師戰法指南 (新手必看)"
+    "📖 5. 系統使用說明與策略規則"
 ]
 
 default_idx = 0
@@ -12120,13 +12120,13 @@ def render_hk_adr_and_us_lead_panel(hk_tickers_to_check: List[str], locked_map: 
     matched_hk = [t for t in dict.fromkeys(hk_tickers_to_check) if t in HK_TO_US_ADR_MAP]
     adr_syms = [HK_TO_US_ADR_MAP[t]["adr"] for t in matched_hk]
 
-    with st.expander(f"🌐 隔夜美股期貨 / 中概 ETF / 港股 ADR 開市跳空預警（已匹配 {len(matched_hk)} 隻港股 ADR｜僅作風險濾網）", expanded=False):
+    with st.expander(f"🌐 隔夜期貨與港股 ADR 跳空參考（已匹配 {len(matched_hk)} 隻）", expanded=False):
         st.caption(
             "⚖️ **專業 Swing Trader 提醒**：隔夜 ADR、KWEB、美股期貨只適合作為 **09:30 開市跳空風險預警** 與 **避開高開低走 (Gap & Fade) 陷阱**，"
             "切忌單憑隔夜 ADR 大升便於 09:30 市價追高；OTC ADR（如 TCEHY / MPNGY）成交稀疏，價差僅供方向參考。"
         )
         _adr_state_key = f"_adr_snap_loaded_{context_key}"
-        _btn_adr_load = st.button("🔄 即時載入隔夜美股期貨 / 中概 ETF / 港股 ADR 數據", key=f"btn_load_adr_{context_key}")
+        _btn_adr_load = st.button("🔄 載入隔夜期貨與港股 ADR 數據", key=f"btn_load_adr_{context_key}")
         if _btn_adr_load:
             st.session_state[_adr_state_key] = True
         if not st.session_state.get(_adr_state_key, False):
@@ -12331,12 +12331,12 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
                 hold_tickers.append(ft)
 
     render_color_zone_header(
-        f"🛡️ 【持倉分析專區】分組「{active_hold_cat or '持倉'}」每日大市聯動體檢（共 {len(hold_tickers)} 隻・100% 零漏股保證）",
-        subtitle="🟪 紫色專區：📊 指數ETF(青藍) ｜ 🟢 港美做多持倉(綠色) ｜ 🔴 港美做空持倉(紅色) ｜ 內置成本與方向管理",
+        f"🛡️ 持倉風險監控（共 {len(hold_tickers)} 隻）",
+        subtitle="依資產類型與方向分類：指數／行業 ETF、做多持倉、做空持倉，附止損與風險暴露檢查。",
         theme="indigo"
     )
 
-    with st.expander(f"📂 點擊展開 / 收合：持倉分析詳情、六維度統計與調倉指令（目前追蹤 {len(hold_tickers)} 隻）", expanded=True):
+    with st.expander(f"📂 持倉明細與風險警示（共 {len(hold_tickers)} 隻）", expanded=True):
         if not active_hold_cat or not hold_tickers:
             hc1, hc2 = st.columns([3.0, 2.0])
             with hc1:
@@ -12681,15 +12681,15 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
             _ref_1r = float(st.session_state.get("max_loss_hkd", 1000.0) or 1000.0)
             _heat_r = _tot_heat_hkd / max(_ref_1r, 1.0)
             if _heat_r > 6.0:
-                st.warning(f"🔥 **組合總開倉風險警示 (Total Open Heat)**：已設定止損之 {_heat_cnt} 隻持倉若同時觸及止損，總風險約 **HK${_tot_heat_hkd:,.0f} ({_heat_r:.1f}R)**，高於建議上限 6.0R，請嚴控新開倉及同板塊相關性暴露。")
+                st.warning(f"⚠️ **組合總風險提示 (Total Open Heat)**：已設定止損之 {_heat_cnt} 隻持倉若同時觸及止損，潛在風險合計約 **HK${_tot_heat_hkd:,.0f} ({_heat_r:.1f}R)**，高於 6.0R 參考上限。")
             else:
-                st.caption(f"🛡️ **組合總開倉風險 (Total Open Heat)**：已鎖止損之 {_heat_cnt} 隻持倉總風險約 **HK${_tot_heat_hkd:,.0f} ({_heat_r:.1f}R)**（安全區間 ≤ 6.0R）")
+                st.caption(f"🛡️ **組合總風險 (Total Open Heat)**：已設定止損之 {_heat_cnt} 隻持倉潛在風險合計約 **HK${_tot_heat_hkd:,.0f} ({_heat_r:.1f}R)**（參考上限 6.0R）")
 
         if urgent_alerts:
             st.error("\n\n".join(urgent_alerts))
 
         # [v59.3 新增] 港股開市隔空跌穿止損 SOP 速查卡 + 隔夜美股期貨/ADR 跳空預警
-        with st.expander("📖 港股開市隔空跌穿止損 (Gap-Down Below SL) 實戰應對 SOP（機構 ORL 三級法則）", expanded=False):
+        with st.expander("📖 開市跳空跌穿止損應對規則 (ORL 三級指引)", expanded=False):
             st.markdown(
                 "- **Tier 1 輕度跳空（穿 SL ≤ 1.0×ATR 或 ≤ 3%）**：切忌於 **09:20–09:30 競價盤 / 09:30 首 5 分鐘**恐慌市價踩踏；改以首 15–30 分鐘低點（**ORL**）作底線，若 09:45–10:00 無法反抽收復止損位或跌穿 ORL 即斬倉。\n"
                 "- **Tier 2 中度跳空（穿 SL 1.0–2.0×ATR 或 3%–6%）**：開市回穩後先**減倉 50%**鎖定單筆最大虧損，餘倉嚴守首 15 分鐘 ORL；反抽原止損位下方受阻則全清。\n"
@@ -12706,16 +12706,16 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
         # 4. 渲染三大色彩分區框（青藍 ETF 框 ｜ 綠色做多框 ｜ 紅色做空框）—— 100% 全螢幕上下排列
         if etf_hk_rows or etf_us_rows:
             render_color_zone_header(
-                f"📊 第一區：【追蹤指數 / 行業 ETF 專區】（港股 {len(etf_hk_rows)} 隻 ｜ 美股 {len(etf_us_rows)} 隻）",
-                subtitle="💠 青藍專區：核心 Beta 與對沖配置（同個股分開評估）",
+                f"📊 指數與行業 ETF（港股 {len(etf_hk_rows)} 隻 ｜ 美股 {len(etf_us_rows)} 隻）",
+                subtitle="大市配置與對沖工具（與個股分開計算風險）",
                 theme="cyan"
             )
             _render_color_boxed_holdings_html_table(etf_hk_rows + etf_us_rows, theme="cyan", is_etf=True)
 
         if hk_long_rows or us_long_rows:
             render_color_zone_header(
-                f"🟢 第二區：【做多持倉 (Long) 專區】（🇭🇰 港股做多 {len(hk_long_rows)} 隻 ｜ 🇺🇸 美股做多 {len(us_long_rows)} 隻）",
-                subtitle="🟩 綠色專區：多頭部位監控（跌穿止損或破 50MA 即亮紅牌）",
+                f"🟢 做多持倉 Long（港股 {len(hk_long_rows)} 隻 ｜ 美股 {len(us_long_rows)} 隻）",
+                subtitle="多頭部位監控（觸及止損或跌破 50MA 即提示減倉／平倉）",
                 theme="green"
             )
             if hk_long_rows:
@@ -12727,8 +12727,8 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
 
         if hk_short_rows or us_short_rows:
             render_color_zone_header(
-                f"🔴 第三區：【做空持倉 (Short) 專區】（🇭🇰 港股做空 {len(hk_short_rows)} 隻 ｜ 🇺🇸 美股做空 {len(us_short_rows)} 隻）",
-                subtitle="🟥 紅色專區：空頭部位監控（收復 20/50MA 或穿止損即回補防軋空；若某股實為你做多持倉但跌穿50MA被推斷為空，可於下方一鍵改回做多！）",
+                f"🔴 做空持倉 Short（港股 {len(hk_short_rows)} 隻 ｜ 美股 {len(us_short_rows)} 隻）",
+                subtitle="空頭部位監控（收復 20/50MA 或觸及止損即提示回補；方向有誤可於下方調整）",
                 theme="red"
             )
             if hk_short_rows:
@@ -12737,6 +12737,44 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
             if us_short_rows:
                 st.markdown(f"**🇺🇸 美股 — 做空持倉 ({len(us_short_rows)} 隻)**")
                 _render_color_boxed_holdings_html_table(us_short_rows, theme="red", is_etf=False)
+
+        # [v60.6 升級] 港美股分離之真實持倉 ＋ 宏觀掛鉤指標多股同列走勢對比（按需載入，於模式一及自選股管理頁同步可用）
+        if hold_tickers:
+            _hk_hold_mc = [t for t in hold_tickers if t.endswith(".HK")]
+            _us_hold_mc = [t for t in hold_tickers if not t.endswith(".HK")]
+            with st.expander(f"📊 持倉多股走勢與宏觀指標對比（🇭🇰 港股 {len(_hk_hold_mc)} 隻 ｜ 🇺🇸 美股 {len(_us_hold_mc)} 隻）", expanded=False):
+                _hmc_key = f"_hold_mc_loaded_{context_key}"
+                if st.button("🔄 載入港美分開多股走勢與宏觀掛鉤圖表", key=f"btn_load_hold_mc_{context_key}"):
+                    st.session_state[_hmc_key] = True
+                if st.session_state.get(_hmc_key, False):
+                    _htab_hk, _htab_us = st.tabs([
+                        f"🇭🇰 港股持倉 ＋ 港股宏觀掛鉤 ({len(_hk_hold_mc)} 隻)",
+                        f"🇺🇸 美股持倉 ＋ 美股宏觀掛鉤 ({len(_us_hold_mc)} 隻)"
+                    ])
+                    with _htab_hk:
+                        st.caption("📌 **港股核心掛鉤邏輯**：**美元指數 (DXY)** 或 **美元兌人民幣 (USD/CNY)** 轉強通常壓抑港股流動性與盈利折算；兩者見頂回落時有利港股反彈。")
+                        render_futu_multi_chart_grid(
+                            _hk_hold_mc,
+                            context_key=f"hold_mc_hk_{context_key}",
+                            title_prefix=f"🇭🇰 港股持倉與宏觀掛鉤對比 ({len(_hk_hold_mc)} 隻)",
+                            allow_reorder_cat=active_hold_cat,
+                            default_show_indices=True,
+                            pinned_macro_tickers=["^HSI", "DX-Y.NYB", "CNY=X"],
+                            macro_checkbox_label="📈 首行置頂港股掛鉤指標 (恒指 / 美元指數DXY / 美元兌人民幣)"
+                        )
+                    with _htab_us:
+                        st.caption("📌 **美股核心掛鉤邏輯**：**美債10年息 (US10Y)** 急升會壓抑高估值科技與成長股；**恐慌指數 (VIX)** 升破 20–25 代表市場轉入高波動震盪，突破策略宜收緊倉位。")
+                        render_futu_multi_chart_grid(
+                            _us_hold_mc,
+                            context_key=f"hold_mc_us_{context_key}",
+                            title_prefix=f"🇺🇸 美股持倉與宏觀掛鉤對比 ({len(_us_hold_mc)} 隻)",
+                            allow_reorder_cat=active_hold_cat,
+                            default_show_indices=True,
+                            pinned_macro_tickers=["^IXIC", "^TNX", "^VIX"],
+                            macro_checkbox_label="📈 首行置頂美股掛鉤指標 (納指 / 美債10年息 / VIX恐慌指數)"
+                        )
+                else:
+                    st.caption("💡 點擊上方按鈕即可展開港股與美股分開之多股 K 線圖：港股自動置頂恒指、美元指數 (DXY) 與美元兌人民幣；美股自動置頂納指、美債10年息與 VIX。")
 
         # 5. 內置「⚡ 持倉全方位管理台：修改買入成本價、股數、做多/做空方向 & 快速增刪持倉」
         with st.expander("⚙️ 點擊展開：【持倉成本價 / 股數 / 做多做空方向快速設定】&【新增 / 移除 / 一鍵對齊富途 9 隻持倉】", expanded=False):
@@ -12985,13 +13023,13 @@ def render_trade_journal_and_post_exit_review_hub(context_key: str = "main_journ
     hold_tickers = [format_and_detect_market(t)[0] for t in wl_dict.get(active_hold_cat, [])] if active_hold_cat else list(locked_map.keys())
 
     render_color_zone_header(
-        f"📒 【全帳號永久交易總帳本 & 賣出後復盤專區】累計買賣流水 {len(exec_ledger_list)} 筆 ｜ 已結算復盤 {len(journal_list)} 筆",
-        subtitle="🟧 琥珀金專區：永久記錄此帳號所有歷史與當日買賣交易（絕不只限近期）｜ 自動追蹤賣出後 T+5/10/20 走勢診斷利弊",
+        f"📒 交易紀錄與平倉復盤（成交明細 {len(exec_ledger_list)} 筆 ｜ 已結算 {len(journal_list)} 筆）",
+        subtitle="記錄完整歷史成交、同波段分批平倉合併，並追蹤平倉後 T+5/10/20 走勢。",
         theme="orange"
     )
 
     with st.expander(
-        f"📝 點擊展開：【🔬 全歷史賣出復盤 ({len(journal_list)} 筆)】｜【📜 帳號所有買賣成交流水 ({len(exec_ledger_list)} 筆)】｜【💰 記錄買賣 / 匯入全歷史交易】",
+        f"📝 已結算交易復盤 ({len(journal_list)} 筆) ｜ 成交明細 ({len(exec_ledger_list)} 筆) ｜ 手動新增與匯入",
         expanded=True
     ):
         # --- 頂部全帳號終身統計指標卡 (All-Time Account Performance) ---
@@ -13187,7 +13225,7 @@ def render_trade_journal_and_post_exit_review_hub(context_key: str = "main_journ
                     )
                 with flt_c6:
                     st.write("")
-                    if st.button("🧹 去重 + 重建時間", use_container_width=True, key=f"btn_dedup_journal_{context_key}", help="去重並清除已被真實成交覆蓋的錯誤自動清倉日期，若存在真實成交流水則按真 FIFO 重建"):
+                    if st.button("🧹 重建與去重紀錄", use_container_width=True, key=f"btn_dedup_journal_{context_key}", help="去重並清除已被真實成交覆蓋的錯誤自動清倉日期，若存在真實成交流水則按真 FIFO 重建"):
                         before_j = len(persistent_data.get("closed_trades_journal", []))
                         before_e = len(persistent_data.get("account_all_executions_ledger", []))
                         clean_execs = _dedup_executions_ledger(persistent_data.get("account_all_executions_ledger", []))
@@ -13876,9 +13914,12 @@ def _fetch_mc_intraday_cached(sym: str, mc_interval: str) -> Optional[pd.DataFra
 def render_futu_multi_chart_grid(
     tickers_list: List[str],
     context_key: str,
-    title_prefix: str = "🎛️ 富途牛牛式「多股同列」同屏走勢看板",
+    title_prefix: str = "📊 多股同列走勢看板",
     radar_df: Optional[pd.DataFrame] = None,
-    allow_reorder_cat: Optional[str] = None
+    allow_reorder_cat: Optional[str] = None,
+    default_show_indices: bool = False,
+    pinned_macro_tickers: Optional[List[str]] = None,
+    macro_checkbox_label: Optional[str] = None
 ) -> None:
     """
     [v49.0 核心新增：1:1 還原富途牛牛「多股同列 (Multi-Chart Grid)」同屏走勢系統]
@@ -13914,10 +13955,11 @@ def render_futu_multi_chart_grid(
             key=f"futu_mc_layout_{context_key}"
         )
     with mc_bar4:
+        _chk_lbl = macro_checkbox_label or "📈 首行加入大市與宏觀掛鉤指標"
         show_idx_row = st.checkbox(
-            "📈 首行加入三大指數 (納指/標普/恒指)",
-            value=False,
-            help="勾選後將在九宮格第一行固定顯示 .IXIC 納斯達克、.SPX 標普500 及 ^HSI 恒生指數，與富途牛牛截圖完全一致！",
+            _chk_lbl,
+            value=bool(default_show_indices),
+            help="勾選後於第一行固定顯示對應市場大盤及核心宏觀掛鉤指標（如美元指數、10年債息、VIX 等），方便直接對比強弱與風險環境。",
             key=f"futu_mc_idx_{context_key}"
         )
     with mc_bar5:
@@ -13944,7 +13986,8 @@ def render_futu_multi_chart_grid(
     # 組合最終顯示之標的列表
     display_Wait_list: List[str] = []
     if show_idx_row:
-        display_Wait_list.extend(["^IXIC", "^GSPC", "^HSI"])
+        _macro_list = list(pinned_macro_tickers) if pinned_macro_tickers else ["^IXIC", "^GSPC", "^HSI"]
+        display_Wait_list.extend(_macro_list)
     for _t_raw in tickers_list:
         _ft, _, _, _, _ = format_and_detect_market(_t_raw)
         if _ft not in display_Wait_list:
@@ -13972,7 +14015,8 @@ def render_futu_multi_chart_grid(
 
     page_tickers = display_Wait_list[page_idx * charts_per_page : (page_idx + 1) * charts_per_page]
     # 預載日線快取加速渲染
-    _stk_only_mc = [t for t in page_tickers if not t.startswith("^")]
+    _MACRO_DIRECT_SYMS = {"DX-Y.NYB", "CNY=X", "^HSI", "^IXIC", "^GSPC", "^TNX", "^VIX"}
+    _stk_only_mc = [t for t in page_tickers if not t.startswith("^") and t not in _MACRO_DIRECT_SYMS]
     if _stk_only_mc:
         if mc_interval == "1d" and len(_stk_only_mc) >= 2:
             batch_preload_ohlcv_cache(_stk_only_mc)
@@ -13992,9 +14036,15 @@ def render_futu_multi_chart_grid(
 
     locked_map = persistent_data.get("user_locked_positions", {})
     _INDEX_DISPLAY_NAMES = {
-        "^IXIC": ".IXIC 納斯達克綜合指數",
-        "^GSPC": ".SPX 標普500指數",
-        "^HSI": "800000 恒生指數"
+        "^IXIC": ".IXIC 納斯達克綜合指數 (美股成長)",
+        "^GSPC": ".SPX 標普500指數 (美股大盤)",
+        "^HSI": "800000 恒生指數 (港股大盤)",
+        "DX-Y.NYB": "DXY 美元指數 (升＝港股承壓)",
+        "CNY=X": "USD/CNY 美元兌人民幣 (升＝港股承壓)",
+        "^TNX": "US10Y 美債10年息 (升＝科技股承壓)",
+        "^VIX": "VIX 恐慌指數 (>20＝高波震盪)",
+        "KWEB": "KWEB 中概互聯網 (外資風險偏好)",
+        "3033.HK": "3033.HK 恒生科技ETF"
     }
 
     for row_start in range(0, len(page_tickers), cols_per_row):
@@ -14004,7 +14054,7 @@ def render_futu_multi_chart_grid(
             with grid_cols[col_i]:
                 # 讀取 K 線數據
                 df_mc = None
-                if sym.startswith("^"):
+                if sym.startswith("^") or sym in _MACRO_DIRECT_SYMS:
                     df_mc = get_index_data(sym, interval="1d" if mc_interval in ["1d", "1wk", "1mo"] else mc_interval)
                     if df_mc is not None and not df_mc.empty and mc_interval == "1wk":
                         df_mc = df_mc.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
@@ -14297,7 +14347,7 @@ def render_futu_multi_chart_grid(
 
 mode = st.sidebar.radio("請選擇功能", mode_options, key="app_nav_mode_radio")
 
-with st.sidebar.expander("🧭 30秒速查：點樣靈活運用？", expanded=False):
+with st.sidebar.expander("🧭 操作速查", expanded=False):
     st.markdown(
         "1. **選股**：去 **「1. 掃描雷達」** 睇 **#1、#2 優先榜**（只揀 `R:R ≥ 1.8R`）。\n"
         "2. **切換風格**：上方可切換 **🌊 中線波段**（防洗盤）或 **⚡ Martin Luk 短線緊密**（極高 R 倍數）。\n"
@@ -15227,7 +15277,7 @@ def render_global_quick_guide_banner():
 
 def render_interactive_tutorial_hub():
     """模式 5：完整網頁版互動教學與靈活運用指南"""
-    render_atomic_section_header("📖 實戰教學與大師戰法指南 (富途牛牛實盤落地專版)", level=1)
+    render_atomic_section_header("📖 系統使用說明與策略規則", level=1)
     st.markdown(
         "歡迎使用本系統！本指南專為讓你**在網頁內邊看邊用**而設，結合 **Martin Luk (@martinlukkt，2025 USIC 美股交易大賽 +969.8% 冠軍)**、"
         "**J Law (@jlawstock)** 與 **LEI (@TheMarketMemo)** 三大體系，教你如何由選股、判斷買點、計算富途牛牛真實手數，到持倉分批鎖潤。"
@@ -15409,37 +15459,37 @@ def render_interactive_tutorial_hub():
 # 12. 模式 1：雷達
 # ==========================================
 if mode == mode_options[0]:
-    render_atomic_section_header("🔎 市場動能掃描雷達", level=1)
+    render_atomic_section_header("🔎 市場動能掃描與持倉監控", level=1)
     render_global_multi_timezone_clock_banner("mode1_radar")
     render_global_quick_guide_banner()
 
     # [v59.2 核心追蹤池與全景掃描按鈕置頂顯眼區塊 — 保留 main25 所有優化，解決掃描按鈕被推落底部的問題]
     render_color_zone_header(
-        "🚀 核心追蹤池 & 一鍵全景量化掃描",
-        "先揀選港美股潛力池或你的自選股類別，再點擊右側主按鈕即時啟動全景動能掃描",
+        "🚀 市場動能掃描",
+        "選擇掃描池或自選股分組，點擊右側按鈕開始篩選符合條件之標的。",
         theme="blue"
     )
     _wl_pool_opts = [f"⭐ 自選類別：【{c}】({len(gl)}隻)" for c, gl in st.session_state.watchlist_dict.items() if len(gl) > 0]
     _scan_top_c1, _scan_top_c2 = st.columns([3.2, 1.3])
     with _scan_top_c1:
         pool_choice = st.selectbox(
-            "🎯 核心追蹤池 (保留全部舊池，新增「🔥 兩全其美混合池」兼顧熟股底座與全市場活水黑馬)：",
+            "🎯 選擇掃描池：",
             [
-                "🔥 兩全其美・港股「核心底座 + 富途全市場活水」混合池 (約86隻｜防仙股濾網)",
-                "🔥 兩全其美・美股「核心底座 + 富途全市場活水」混合池 (約86隻｜全板塊+活水)",
-                "🚀 超級績效・港股中小型高彈性潛力池 (ADR 3.2%~7.5% 細分龍頭)",
-                "🚀 超級績效・美股中小型高爆發潛力池 (Minervini 風格高 RS 成長股)",
-                "港股高動能增長池 (全市場強勢成分股｜已剔除慢速內銀)",
-                "美股高動能爆發池 (全市場科技與成長領頭羊)",
-                "港股收息防守池 (低波幅藍籌/內銀公用股)",
+                "🔥 港股核心＋全市場動態掃描池 (約86隻｜含富途流動性初篩)",
+                "🔥 美股核心＋全市場動態掃描池 (約86隻｜跨板塊＋富途初篩)",
+                "🚀 超級績效・港股中小型高彈性潛力池 (30隻｜ADR 3.2%~7.5%)",
+                "🚀 超級績效・美股中小型高爆發潛力池 (30隻｜Minervini 高 RS)",
+                "📈 港股主流動能池 (63隻)",
+                "📈 美股主流動能池 (50隻)",
+                "🛡️ 港股高息防守池 (16隻)",
             ] + _wl_pool_opts + [
-                "自訂擴充名單 (從側欄載入)"
+                "自訂名單 (從側欄載入)"
             ],
             key="mode1_top_pool_choice"
         )
     target_pool = []
-    _is_hybrid_hk = ("兩全其美・港股" in pool_choice)
-    _is_hybrid_us = ("兩全其美・美股" in pool_choice)
+    _is_hybrid_hk = ("港股核心＋全市場動態掃描池" in pool_choice)
+    _is_hybrid_us = ("美股核心＋全市場動態掃描池" in pool_choice)
     if _is_hybrid_hk:
         target_pool = list(dict.fromkeys(HK_MOMENTUM_POOL[:50] + HK_SECTOR_ROTATION_SUPPLEMENT_POOL))[:86]
     elif _is_hybrid_us:
@@ -15451,9 +15501,9 @@ if mode == mode_options[0]:
         target_pool = HK_SMALL_MID_SUPER_POOL
     elif "美股中小型" in pool_choice:
         target_pool = US_SMALL_MID_SUPER_POOL
-    elif "港股高動能" in pool_choice:
+    elif "港股主流動能池" in pool_choice:
         target_pool = HK_MOMENTUM_POOL
-    elif "收息防守" in pool_choice:
+    elif "高息防守" in pool_choice:
         target_pool = HK_DEFENSIVE_DIVIDEND_POOL
     elif "美股" in pool_choice:
         target_pool = US_MOMENTUM_POOL
@@ -15465,9 +15515,9 @@ if mode == mode_options[0]:
 
     with _scan_top_c2:
         st.write("")
-        _btn_lbl_cnt = "動態~86隻" if (_is_hybrid_hk or _is_hybrid_us) else f"{len(target_pool)}隻"
+        _btn_lbl_cnt = "約86隻" if (_is_hybrid_hk or _is_hybrid_us) else f"{len(target_pool)}隻"
         _trigger_full_scan = st.button(
-            f"🚀 啟動全景量化掃描 ({_btn_lbl_cnt})",
+            f"🚀 開始掃描 ({_btn_lbl_cnt})",
             type="primary",
             use_container_width=True,
             key="btn_mode1_top_full_scan"
@@ -15491,7 +15541,7 @@ if mode == mode_options[0]:
                 futu_enabled=_f_en,
                 target_total=86
             )
-            st.info(f"🔥 {_hybrid_msg}")
+            st.info(_hybrid_msg)
         with st.spinner(f"掃描中 (正在分析 {len(_actual_scan_pool)} 隻標的，請稍候)..."):
             df_res = run_all_inclusive_radar(_actual_scan_pool)
             if df_res is not None and _hybrid_src_map and "代碼" in df_res.columns:
@@ -15632,7 +15682,7 @@ elif mode == mode_options[2]:
             del st.query_params["mode"]
         except Exception:
             pass
-    render_atomic_section_header("⭐ 自選股票名單 (富途牛牛式多股同列 & 自由拉動調位系統)", level=1)
+    render_atomic_section_header("⭐ 自選股管理", level=1)
     render_global_multi_timezone_clock_banner("mode3_watchlist")
     render_global_quick_guide_banner()
     render_atomic_caption("✨ v49.0 全新升級：① 支援【🎛️ 富途多股同列】九宮格/六宮格同屏睇晒多隻股票 K 線走勢；② 支援【🖱️ 滑鼠自由拉動調位】及表格內直接改【↕️ 次序】數字調位；③ 全部輸入框已升級為原子表單（按 Enter 或撳掣 100% 即時生效，絕不跳畫面）；④ 點擊【🔍 本頁診斷】固定喺同一個網頁無縫切換！")
@@ -15888,15 +15938,59 @@ elif mode == mode_options[2]:
                 # 渲染滑鼠自由拉動調位面板 (HTML5 Drag-and-Drop + 序列調整)
                 render_watchlist_drag_and_drop_sorter(cat, current_list)
 
-                # 若選擇「純富途多股同列九宮格」，先渲染九宮格走勢
+                # 若選擇「純富途多股同列九宮格」，自動分開港股與美股並置頂對應宏觀掛鉤指標
                 if "純富途「多股同列」" in wl_view_mode:
-                    render_futu_multi_chart_grid(
-                        current_list,
-                        context_key=f"wl_mc_only_{cat}",
-                        title_prefix=f"🎛️ 「{cat}」富途牛牛式多股同列走勢看板 ({len(current_list)} 隻)",
-                        radar_df=st.session_state.watchlist_radar_results.get(cat),
-                        allow_reorder_cat=cat
-                    )
+                    _wl_hk_list = [x for x in current_list if format_and_detect_market(x)[0].endswith(".HK")]
+                    _wl_us_list = [x for x in current_list if not format_and_detect_market(x)[0].endswith(".HK")]
+                    if _wl_hk_list and _wl_us_list:
+                        _wtab_hk, _wtab_us = st.tabs([
+                            f"🇭🇰 港股自選 ＋ 港股宏觀掛鉤 ({len(_wl_hk_list)} 隻)",
+                            f"🇺🇸 美股自選 ＋ 美股宏觀掛鉤 ({len(_wl_us_list)} 隻)"
+                        ])
+                        with _wtab_hk:
+                            render_futu_multi_chart_grid(
+                                _wl_hk_list,
+                                context_key=f"wl_mc_only_hk_{cat}",
+                                title_prefix=f"🇭🇰 「{cat}」港股多股走勢與宏觀對比 ({len(_wl_hk_list)} 隻)",
+                                radar_df=st.session_state.watchlist_radar_results.get(cat),
+                                allow_reorder_cat=cat,
+                                default_show_indices=True,
+                                pinned_macro_tickers=["^HSI", "DX-Y.NYB", "CNY=X"],
+                                macro_checkbox_label="📈 首行置頂港股掛鉤指標 (恒指 / 美元指數DXY / 美元兌人民幣)"
+                            )
+                        with _wtab_us:
+                            render_futu_multi_chart_grid(
+                                _wl_us_list,
+                                context_key=f"wl_mc_only_us_{cat}",
+                                title_prefix=f"🇺🇸 「{cat}」美股多股走勢與宏觀對比 ({len(_wl_us_list)} 隻)",
+                                radar_df=st.session_state.watchlist_radar_results.get(cat),
+                                allow_reorder_cat=cat,
+                                default_show_indices=True,
+                                pinned_macro_tickers=["^IXIC", "^TNX", "^VIX"],
+                                macro_checkbox_label="📈 首行置頂美股掛鉤指標 (納指 / 美債10年息 / VIX恐慌指數)"
+                            )
+                    elif _wl_hk_list:
+                        render_futu_multi_chart_grid(
+                            _wl_hk_list,
+                            context_key=f"wl_mc_only_{cat}",
+                            title_prefix=f"🇭🇰 「{cat}」港股多股走勢與宏觀對比 ({len(_wl_hk_list)} 隻)",
+                            radar_df=st.session_state.watchlist_radar_results.get(cat),
+                            allow_reorder_cat=cat,
+                            default_show_indices=True,
+                            pinned_macro_tickers=["^HSI", "DX-Y.NYB", "CNY=X"],
+                            macro_checkbox_label="📈 首行置頂港股掛鉤指標 (恒指 / 美元指數DXY / 美元兌人民幣)"
+                        )
+                    else:
+                        render_futu_multi_chart_grid(
+                            _wl_us_list,
+                            context_key=f"wl_mc_only_{cat}",
+                            title_prefix=f"🇺🇸 「{cat}」美股多股走勢與宏觀對比 ({len(_wl_us_list)} 隻)",
+                            radar_df=st.session_state.watchlist_radar_results.get(cat),
+                            allow_reorder_cat=cat,
+                            default_show_indices=True,
+                            pinned_macro_tickers=["^IXIC", "^TNX", "^VIX"],
+                            macro_checkbox_label="📈 首行置頂美股掛鉤指標 (納指 / 美債10年息 / VIX恐慌指數)"
+                        )
 
                 # 若選擇「報價清單 + 多股同列」或「純報價清單」，渲染互動報價與調位總覽表
                 if "報價清單" in wl_view_mode:
@@ -16080,7 +16174,8 @@ elif mode == mode_options[2]:
                         context_key=f"wl_mc_both_{cat}",
                         title_prefix=f"🎛️ 「{cat}」富途牛牛式多股同列走勢看板 (可直接在每張圖下方點擊『🔼 前移 / 🔽 後移』調位或『🔍 本頁診斷』)",
                         radar_df=st.session_state.watchlist_radar_results.get(cat),
-                        allow_reorder_cat=cat
+                        allow_reorder_cat=cat,
+                        default_show_indices=True
                     )
 
                 st.markdown("---")
@@ -16139,7 +16234,7 @@ elif mode == mode_options[2]:
 elif mode == mode_options[1]:
     hdr_d1, hdr_d2, hdr_d3 = st.columns([3.0, 1.2, 1.2])
     with hdr_d1:
-        render_atomic_section_header("📊 個股量化分析與技術診斷", level=1)
+        render_atomic_section_header("📊 個股技術與風險診斷", level=1)
     with hdr_d2:
         st.write("")
         if st.button("⬅️ 同頁返回掃描雷達", key="btn_back_to_radar_same_tab", use_container_width=True):
