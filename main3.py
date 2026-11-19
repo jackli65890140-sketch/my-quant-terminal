@@ -175,7 +175,7 @@ RADAR_CACHE_TTL_SECONDS = 1800  # 雷達結果預設 30 分鐘自動過期重算
 # 5) [Five-Stage Bull/Bear & Correction-Ending Engine] 同時分辨「🐂 確認牛市」、「🌤️ 大盤調整結束 / 熊轉牛初段 (彈簧股爆發期)」、「🟡 牛市中期修正」、「🌩️ 牛市見頂派發預警」與「🐻 確認熊市」；
 # 6) [Small/Mid-Cap High-Velocity Pool] 新增「🚀 超級績效・中小型高彈性潛力池」並配備日均成交額 ≥ 2,000萬港元防老千股護欄。
 # OLD: CURRENT_SCHEMA_VERSION = "v48.0"
-CURRENT_SCHEMA_VERSION = "v60.6"  # [v59.1 修復掃描死鎖與交易記錄去重版：RLock防重入死鎖 + 磁碟寫入移出鎖外 + 全帳號買賣流水與平倉復盤語意去重引擎]
+CURRENT_SCHEMA_VERSION = "v61.1"  # [v61.1 修復側欄對比度與頂部按鈕異常 × 4套主題自由切換 × v61最新系統說明與策略指南]
 import os as _os_lib
 ACCOUNT_ALL_TRADES_LEDGER_FILE = _os_lib.path.expanduser("~/.swing_account_all_trades_ledger_v1.json")
 DEFAULT_USER_FUTU_HOLDINGS = ["VOO", "PYPL", "0700.HK", "1919.HK", "2382.HK", "6030.HK", "1929.HK", "RKLB", "TOST"]
@@ -1120,16 +1120,17 @@ def render_global_multi_timezone_clock_banner(context_id: str = "main") -> None:
 
     tz_c1, tz_c2 = st.columns([4.3, 1.1])
     with tz_c1:
+        _us_dot = "#10B981" if tz_info["us_code"] == "REGULAR" else ("#38BDF8" if tz_info["us_code"] in ["PRE", "POST", "OVERNIGHT"] else "#94A3B8")
         _clock_html = f"""
-        <div translate="no" class="notranslate" style="background:{us_bg}; border:1px solid {us_bd}; border-radius:8px; padding:7px 12px; margin-bottom:6px; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; font-size:12.5px;">
-            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                <span style="font-weight:800; color:#0F172A;">🌐 全球交易時區實時追蹤：</span>
-                <span style="background:#FFFFFF; padding:2px 8px; border-radius:5px; border:1px solid #E2E8F0; font-weight:700; color:#1E293B;">🇭🇰 香港 {tz_info['hkt_short']} ({tz_info['hk_phase']})</span>
-                <span style="background:#FFFFFF; padding:2px 8px; border-radius:5px; border:1px solid #93C5FD; font-weight:700; color:#1D4ED8;">🇺🇸 美東 {tz_info['et_short']} ({tz_info['us_phase']})</span>
-                <span style="color:#475569; font-weight:600;">🇬🇧 倫敦 {tz_info['uk_short']} ｜ 🇯🇵 東京 {tz_info['jst_short']}</span>
+        <div translate="no" class="notranslate sq-clock-bar" style="background:linear-gradient(90deg,#0F172A 0%,#1E293B 100%); border:1px solid #334155; border-radius:12px; padding:9px 14px; margin-bottom:8px; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; font-size:12.5px; box-shadow:0 2px 8px rgba(15,23,42,0.12);">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <span style="font-weight:800; color:#F8FAFC; letter-spacing:0.3px;">🌐 實時市場狀態</span>
+                <span style="background:rgba(255,255,255,0.08); padding:3px 9px; border-radius:999px; border:1px solid rgba(255,255,255,0.14); font-weight:700; color:#F1F5F9; font-family:'JetBrains Mono',monospace;">🇭🇰 {tz_info['hkt_short']} · {tz_info['hk_phase']}</span>
+                <span style="background:rgba(56,189,248,0.14); padding:3px 9px; border-radius:999px; border:1px solid rgba(56,189,248,0.35); font-weight:700; color:#E0F2FE; font-family:'JetBrains Mono',monospace;"><span style="color:{_us_dot};">●</span> 🇺🇸 {tz_info['et_short']} · {tz_info['us_phase']}</span>
+                <span style="color:#94A3B8; font-weight:600; font-size:11.5px;">🇬🇧 {tz_info['uk_short']} ｜ 🇯🇵 {tz_info['jst_short']}</span>
             </div>
-            <div style="font-size:11.5px; color:#047857; font-weight:700;">
-                ⚡ 已開啟美股「盤前 / 盤中 / 盤後 / 夜盤」24小時實時價格與穿止損監測
+            <div style="font-size:11.5px; color:#34D399; font-weight:700;">
+                ⚡ 24h 美股盤前/盤後/夜盤監測已啟用
             </div>
         </div>
         """
@@ -3922,18 +3923,18 @@ def _md_bold_to_html(text: str) -> str:
 def build_atomic_alert_html(msg: str, kind: str = "info") -> str:
     """生成單個防翻譯、防 React removeChild 崩潰之原生視覺相容提示框 HTML"""
     styles = {
-        "success": ("#e8f5e9", "#2e7d32", "#1b5e20"),
-        "error":   ("#ffebee", "#c62828", "#b71c1c"),
-        "warning": ("#fff8e1", "#f9a825", "#e65100"),
-        "info":    ("#e3f2fd", "#1565c0", "#0d47a1"),
+        "success": ("#F0FDF4", "#00B865", "#14532D", "#BBF7D0"),
+        "error":   ("#FEF2F2", "#EF4444", "#7F1D1D", "#FECACA"),
+        "warning": ("#FFFBEB", "#F59E0B", "#78350F", "#FDE68A"),
+        "info":    ("#EFF6FF", "#2563EB", "#1E3A8A", "#BFDBFE"),
     }
-    bg, border, fg = styles.get(kind, styles["info"])
+    bg, border, fg, outline = styles.get(kind, styles["info"])
     body_html = _md_bold_to_html(msg)
     return (
         f'<div class="notranslate" translate="no" style="'
-        f'background-color:{bg};border-left:5px solid {border};color:{fg};'
-        f'padding:13px 16px;border-radius:6px;margin-bottom:10px;'
-        f'font-size:0.96rem;line-height:1.55;box-shadow:0 1px 2px rgba(0,0,0,0.04);">'
+        f'background-color:{bg};border:1px solid {outline};border-left:4px solid {border};color:{fg};'
+        f'padding:12px 15px;border-radius:10px;margin-bottom:10px;'
+        f'font-size:0.93rem;line-height:1.58;box-shadow:0 1px 3px rgba(15,23,42,0.04);">'
         f'{body_html}</div>'
     )
 
@@ -3960,7 +3961,7 @@ def render_atomic_caption(msg: str, slot: Any = None) -> None:
     body_html = _md_bold_to_html(msg)
     html_str = (
         f'<div class="notranslate" translate="no" style="'
-        f'color:rgba(49,51,63,0.72);font-size:0.86rem;line-height:1.5;margin-top:2px;margin-bottom:10px;">'
+        f'color:var(--sq-muted);font-size:0.86rem;line-height:1.55;margin-top:4px;margin-bottom:10px;">'
         f'{body_html}</div>'
     )
     target.markdown(html_str, unsafe_allow_html=True)
@@ -3972,7 +3973,7 @@ def render_atomic_section_header(title_text: str, level: int = 3, slot: Any = No
     clean_t = _html_lib.escape(str(title_text).lstrip("#").strip())
     html_str = (
         f'<{tag} class="notranslate" translate="no" style="'
-        f'margin-top:0.8rem;margin-bottom:0.5rem;font-weight:600;line-height:1.35;">'
+        f'margin-top:0.8rem;margin-bottom:0.5rem;font-weight:700;line-height:1.35;color:var(--sq-text);">'
         f'{clean_t}</{tag}>'
     )
     target.markdown(html_str, unsafe_allow_html=True)
@@ -4423,7 +4424,9 @@ def _dedup_closed_trades_journal(journal_list: List[Dict[str, Any]]) -> List[Dic
     return consolidated
 
 def load_persisted_state_from_disk(persistent_dict: dict) -> None:
-    """[v59.1 雙軌永久帳本讀取] 從本地磁碟與獨立交易總帳本載入所有歷史買賣成交、已平倉復盤日誌與全量持倉，支援跨重啟語意去重合併"""
+    """[v61.0 P0-安全修復] 公網雲端環境自動啟用私隱隔離，禁止跨訪客讀取共享本地磁碟持倉與交易日誌"""
+    if is_running_on_public_cloud() and not _os_lib.environ.get("ALLOW_CLOUD_DISK_PERSISTENCE"):
+        return
     try:
         for f_path in [STATE_BACKUP_FILE, ACCOUNT_ALL_TRADES_LEDGER_FILE]:
             if _os_lib.path.exists(f_path):
@@ -4465,7 +4468,11 @@ def load_persisted_state_from_disk(persistent_dict: dict) -> None:
 
 
 def save_persisted_state_to_disk(persistent_dict: dict, watchlist_dict: Optional[ dict ] = None) -> None:
-    """[v59.1 雙軌永久帳本寫入] 以原子寫入方式同時備份至系統狀態檔與獨立全帳號交易總帳本，寫入前自動執行語意去重"""
+    """[v61.0 P0-安全修復] 公網雲端環境自動禁止寫入共享本地磁碟與全域跨用戶快取，防止多用戶資料洩漏"""
+    if is_running_on_public_cloud() and not _os_lib.environ.get("ALLOW_CLOUD_DISK_PERSISTENCE"):
+        if watchlist_dict is not None:
+            persistent_dict["_disk_watchlist_dict"] = watchlist_dict
+        return
     try:
         if watchlist_dict is not None:
             persistent_dict["_disk_watchlist_dict"] = watchlist_dict
@@ -7873,7 +7880,923 @@ def compute_backtest_institutional_metrics(equity_curve: pd.Series, trades_df: p
         swing_logger.warning(f"回測指標計算異常: {e}")
     return metrics
 
-st.set_page_config(layout="wide", page_title="專業波段量化交易系統 v47.0")
+
+st.set_page_config(
+    layout="wide",
+    page_title="SwingQuant Pro v61.0 | 專業波段量化終端",
+    page_icon="📈",
+    initial_sidebar_state="auto"
+)
+
+def is_mobile_mode_active() -> bool:
+    """檢查用戶是否開啟手機精簡模式 (支援單手瀏覽卡片、單列圖表與防誤觸捲動)"""
+    try:
+        return bool(st.session_state.get("mobile_compact_mode", False))
+    except Exception:
+        return False
+
+from contextlib import contextmanager
+
+UI_THEME_PRESETS: Dict[str, Dict[str, str]] = {
+    "經典深藍": {
+        "bg": "#F3F6FA",
+        "surface": "#FFFFFF",
+        "surface_alt": "#F8FAFC",
+        "border": "#E2E8F0",
+        "text": "#0F172A",
+        "muted": "#64748B",
+        "primary": "#00B865",
+        "primary_2": "#059669",
+        "accent": "#2563EB",
+        "header_bg": "rgba(243, 246, 250, 0.94)",
+        "sb_bg": "linear-gradient(180deg, #0F172A 0%, #162036 100%)",
+        "sb_border": "#1E293B",
+        "sb_text": "#F1F5F9",
+        "sb_muted": "#94A3B8",
+        "sb_input_bg": "#1E293B",
+        "sb_input_border": "#334155",
+        "sb_input_text": "#F8FAFC",
+        "sb_placeholder": "#94A3B8",
+        "sb_btn_bg": "#1E293B",
+        "sb_btn_border": "#475569",
+        "sb_btn_text": "#F8FAFC",
+        "sb_btn_hover_bg": "#2563EB",
+        "sb_btn_hover_text": "#FFFFFF",
+        "sb_card_bg": "rgba(30, 41, 59, 0.80)",
+        "popover_bg": "#FFFFFF",
+        "popover_text": "#0F172A",
+        "popover_hover": "#EFF6FF",
+        "popover_border": "#CBD5E1",
+        "tab_list_bg": "#E2E8F0",
+        "tab_text": "#475569",
+        "tab_active_bg": "#FFFFFF",
+        "tab_active_text": "#0F172A",
+        "zone_blue_bg": "#EBF3FF",
+        "zone_blue_bd": "#BFDBFE",
+        "zone_indigo_bg": "#F3EEFF",
+        "zone_indigo_bd": "#DDD6FE",
+        "zone_emerald_bg": "#EBFBF3",
+        "zone_emerald_bd": "#A7F3D0",
+        "zone_amber_bg": "#FEF7E6",
+        "zone_amber_bd": "#FDE68A",
+        "zone_slate_bg": "#EEF2F7",
+        "zone_slate_bd": "#CBD5E1",
+        "is_dark_main": "0"
+    },
+    "簡約純白": {
+        "bg": "#F8FAFC",
+        "surface": "#FFFFFF",
+        "surface_alt": "#F1F5F9",
+        "border": "#E2E8F0",
+        "text": "#0F172A",
+        "muted": "#475569",
+        "primary": "#00B865",
+        "primary_2": "#059669",
+        "accent": "#2563EB",
+        "header_bg": "rgba(255, 255, 255, 0.95)",
+        "sb_bg": "linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 100%)",
+        "sb_border": "#E2E8F0",
+        "sb_text": "#0F172A",
+        "sb_muted": "#64748B",
+        "sb_input_bg": "#FFFFFF",
+        "sb_input_border": "#CBD5E1",
+        "sb_input_text": "#0F172A",
+        "sb_placeholder": "#64748B",
+        "sb_btn_bg": "#FFFFFF",
+        "sb_btn_border": "#CBD5E1",
+        "sb_btn_text": "#0F172A",
+        "sb_btn_hover_bg": "#EFF6FF",
+        "sb_btn_hover_text": "#1D4ED8",
+        "sb_card_bg": "#F1F5F9",
+        "popover_bg": "#FFFFFF",
+        "popover_text": "#0F172A",
+        "popover_hover": "#EFF6FF",
+        "popover_border": "#CBD5E1",
+        "tab_list_bg": "#E2E8F0",
+        "tab_text": "#475569",
+        "tab_active_bg": "#FFFFFF",
+        "tab_active_text": "#0F172A",
+        "zone_blue_bg": "#EFF6FF",
+        "zone_blue_bd": "#BFDBFE",
+        "zone_indigo_bg": "#F5F3FF",
+        "zone_indigo_bd": "#DDD6FE",
+        "zone_emerald_bg": "#ECFDF5",
+        "zone_emerald_bd": "#A7F3D0",
+        "zone_amber_bg": "#FFFBEB",
+        "zone_amber_bd": "#FDE68A",
+        "zone_slate_bg": "#F1F5F9",
+        "zone_slate_bd": "#CBD5E1",
+        "is_dark_main": "0"
+    },
+    "暗黑夜盤": {
+        "bg": "#0B1120",
+        "surface": "#111827",
+        "surface_alt": "#1E293B",
+        "border": "#334155",
+        "text": "#F1F5F9",
+        "muted": "#94A3B8",
+        "primary": "#10B981",
+        "primary_2": "#059669",
+        "accent": "#38BDF8",
+        "header_bg": "rgba(11, 17, 32, 0.95)",
+        "sb_bg": "linear-gradient(180deg, #090E1A 0%, #111827 100%)",
+        "sb_border": "#1F2937",
+        "sb_text": "#F1F5F9",
+        "sb_muted": "#94A3B8",
+        "sb_input_bg": "#1E293B",
+        "sb_input_border": "#475569",
+        "sb_input_text": "#F8FAFC",
+        "sb_placeholder": "#94A3B8",
+        "sb_btn_bg": "#1E293B",
+        "sb_btn_border": "#475569",
+        "sb_btn_text": "#F8FAFC",
+        "sb_btn_hover_bg": "#0284C7",
+        "sb_btn_hover_text": "#FFFFFF",
+        "sb_card_bg": "rgba(30, 41, 59, 0.85)",
+        "popover_bg": "#1E293B",
+        "popover_text": "#F8FAFC",
+        "popover_hover": "#334155",
+        "popover_border": "#475569",
+        "tab_list_bg": "#1E293B",
+        "tab_text": "#CBD5E1",
+        "tab_active_bg": "#334155",
+        "tab_active_text": "#F8FAFC",
+        "zone_blue_bg": "#111E36",
+        "zone_blue_bd": "#1E3A5F",
+        "zone_indigo_bg": "#1B1633",
+        "zone_indigo_bd": "#3B2F6B",
+        "zone_emerald_bg": "#0D241E",
+        "zone_emerald_bd": "#14533C",
+        "zone_amber_bg": "#241C0E",
+        "zone_amber_bd": "#574115",
+        "zone_slate_bg": "#141C2B",
+        "zone_slate_bd": "#334155",
+        "is_dark_main": "1"
+    },
+    "翡翠商務": {
+        "bg": "#F4F8F6",
+        "surface": "#FFFFFF",
+        "surface_alt": "#ECFDF5",
+        "border": "#D1E7DD",
+        "text": "#062C22",
+        "muted": "#4B635B",
+        "primary": "#059669",
+        "primary_2": "#047857",
+        "accent": "#0D9488",
+        "header_bg": "rgba(244, 248, 246, 0.95)",
+        "sb_bg": "linear-gradient(180deg, #022C22 0%, #064E3B 100%)",
+        "sb_border": "#065F46",
+        "sb_text": "#ECFDF5",
+        "sb_muted": "#A7F3D0",
+        "sb_input_bg": "#064E3B",
+        "sb_input_border": "#10B981",
+        "sb_input_text": "#FFFFFF",
+        "sb_placeholder": "#A7F3D0",
+        "sb_btn_bg": "#065F46",
+        "sb_btn_border": "#10B981",
+        "sb_btn_text": "#FFFFFF",
+        "sb_btn_hover_bg": "#10B981",
+        "sb_btn_hover_text": "#022C22",
+        "sb_card_bg": "rgba(6, 78, 59, 0.80)",
+        "popover_bg": "#FFFFFF",
+        "popover_text": "#062C22",
+        "popover_hover": "#ECFDF5",
+        "popover_border": "#A7F3D0",
+        "tab_list_bg": "#D1FAE5",
+        "tab_text": "#065F46",
+        "tab_active_bg": "#FFFFFF",
+        "tab_active_text": "#022C22",
+        "zone_blue_bg": "#E6F7F5",
+        "zone_blue_bd": "#99F6E4",
+        "zone_indigo_bg": "#F1EFFE",
+        "zone_indigo_bd": "#DDD6FE",
+        "zone_emerald_bg": "#E6F9EF",
+        "zone_emerald_bd": "#A7F3D0",
+        "zone_amber_bg": "#FEF7E6",
+        "zone_amber_bd": "#FDE68A",
+        "zone_slate_bg": "#ECF2EF",
+        "zone_slate_bd": "#CBDAD3",
+        "is_dark_main": "0"
+    }
+}
+
+_LEGACY_THEME_NAME_MAP: Dict[str, str] = {
+    "🌌 機構深藍淺灰 (TailAdmin 預設)": "經典深藍",
+    "☀️ 極簡純白金融 (Stockopedia 清爽亮色)": "簡約純白",
+    "🌙 專業暗黑看盤 (美股夜盤護眼黑)": "暗黑夜盤",
+    "💎 翡翠尊爵白金 (財富管理綠金)": "翡翠商務",
+}
+
+def get_active_ui_theme_name() -> str:
+    default_t = "經典深藍"
+    try:
+        sel = st.session_state.get("ui_theme_preset", default_t)
+        sel = _LEGACY_THEME_NAME_MAP.get(sel, sel)
+        return sel if sel in UI_THEME_PRESETS else default_t
+    except Exception:
+        return default_t
+
+@contextmanager
+def section_zone_box(zone_theme: str = "blue"):
+    """
+    [v61.3 穩定淡色區塊外框容器]
+    透過 Streamlit 原生 key 產生 .st-key-sq_zone_{theme}_{seq} 專屬類名，
+    精準為每個大區塊（標題＋明細）套上明顯、柔和嘅淡色外框底色，徹底相容 Streamlit 1.39~1.45+。
+    """
+    _zt = zone_theme if zone_theme in ("blue", "indigo", "emerald", "amber", "slate") else "blue"
+    _seq = int(st.session_state.get("_sq_zone_render_seq", 0)) + 1
+    st.session_state["_sq_zone_render_seq"] = _seq
+    _zkey = f"sq_zone_{_zt}_{_seq}"
+    try:
+        ctx = st.container(border=False, key=_zkey)
+    except TypeError:
+        ctx = st.container(border=True)
+    with ctx:
+        yield
+
+def inject_fintech_responsive_theme(theme_name: Optional[str] = None) -> None:
+    """
+    [v61.3 多主題 FinTech 視覺引擎 + 全元件無撞色修復 + 明確淡色分區方框 + 寬鬆說明排版 + 手機版自適應]
+    """
+    st.session_state["_sq_zone_render_seq"] = 0
+    t_name = _LEGACY_THEME_NAME_MAP.get(theme_name, theme_name) if theme_name else get_active_ui_theme_name()
+    if t_name not in UI_THEME_PRESETS:
+        t_name = "經典深藍"
+    p = UI_THEME_PRESETS[t_name]
+    is_dark = (p["is_dark_main"] == "1")
+    main_btn_bg = "#1E293B" if is_dark else "#FFFFFF"
+    main_btn_txt = "#F8FAFC" if is_dark else "#0F172A"
+    main_btn_bd = "#475569" if is_dark else "#CBD5E1"
+    main_btn_hover_bg = "#2563EB" if is_dark else "#EFF6FF"
+    main_btn_hover_txt = "#FFFFFF" if is_dark else "#1D4ED8"
+    main_code_bg = "#1E293B" if is_dark else "#F1F5F9"
+    main_code_txt = "#E2E8F0" if is_dark else "#0F172A"
+    main_code_bd = "#334155" if is_dark else "#CBD5E1"
+
+    dark_extra_css = """
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] > p,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] > ul > li,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] > ol > li,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] > h1,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] > h2,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] > h3,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] > h4,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] > h5,
+    [data-testid="stMain"] label[data-testid="stWidgetLabel"],
+    [data-testid="stMain"] label[data-testid="stWidgetLabel"] p,
+    [data-testid="stMain"] [data-testid="stCheckbox"] label p,
+    [data-testid="stMain"] [data-testid="stRadio"] label p,
+    [data-testid="stMain"] [data-testid="stToggle"] label p {
+        color: #F1F5F9 !important;
+    }
+    [data-testid="stMain"] [data-testid="stCaptionContainer"],
+    [data-testid="stMain"] [data-testid="stCaptionContainer"] p {
+        color: #94A3B8 !important;
+    }
+    [data-testid="stMain"] input,
+    [data-testid="stMain"] textarea,
+    [data-testid="stMain"] [data-baseweb="select"] > div,
+    [data-testid="stMain"] [data-baseweb="input"] > div {
+        background-color: #1E293B !important;
+        color: #F8FAFC !important;
+        border-color: #475569 !important;
+        -webkit-text-fill-color: #F8FAFC !important;
+    }
+    [data-testid="stMain"] [data-baseweb="select"] span,
+    [data-testid="stMain"] [data-baseweb="select"] svg {
+        color: #F8FAFC !important;
+        fill: #F8FAFC !important;
+    }
+    [data-testid="stMain"] input::placeholder,
+    [data-testid="stMain"] textarea::placeholder {
+        color: #94A3B8 !important;
+        -webkit-text-fill-color: #94A3B8 !important;
+        opacity: 1 !important;
+    }
+    [data-testid="stMain"] [data-testid="stAlert"] {
+        background-color: #1E293B !important;
+        border: 1px solid #334155 !important;
+    }
+    [data-testid="stMain"] [data-testid="stAlert"] p,
+    [data-testid="stMain"] [data-testid="stAlert"] li,
+    [data-testid="stMain"] [data-testid="stAlert"] strong {
+        color: #F1F5F9 !important;
+    }
+    """ if is_dark else """
+    [data-testid="stMain"] input,
+    [data-testid="stMain"] textarea,
+    [data-testid="stMain"] [data-baseweb="select"] > div,
+    [data-testid="stMain"] [data-baseweb="input"] > div {
+        background-color: #FFFFFF !important;
+        color: #0F172A !important;
+        border-color: #CBD5E1 !important;
+        -webkit-text-fill-color: #0F172A !important;
+    }
+    [data-testid="stMain"] input::placeholder,
+    [data-testid="stMain"] textarea::placeholder {
+        color: #64748B !important;
+        -webkit-text-fill-color: #64748B !important;
+        opacity: 0.9 !important;
+    }
+    """
+
+    _css = f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap');
+
+    :root {{
+        --sq-bg: {p['bg']};
+        --sq-surface: {p['surface']};
+        --sq-surface-alt: {p['surface_alt']};
+        --sq-border: {p['border']};
+        --sq-text: {p['text']};
+        --sq-muted: {p['muted']};
+        --sq-primary: {p['primary']};
+        --sq-accent: {p['accent']};
+        --sq-sb-text: {p['sb_text']};
+        --sq-sb-muted: {p['sb_muted']};
+        --sq-sb-border: {p['sb_border']};
+        --sq-radius: 12px;
+        --sq-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+        --sq-shadow-hover: 0 6px 18px rgba(15, 23, 42, 0.10);
+    }}
+
+    /* 主畫布與全域字體 */
+    html, body, [data-testid="stAppViewContainer"] {{
+        background-color: var(--sq-bg) !important;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang HK', 'Microsoft JhengHei', sans-serif !important;
+        color: var(--sq-text);
+    }}
+    {dark_extra_css}
+
+    [data-testid="stHeader"] {{
+        background: {p['header_bg']} !important;
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid var(--sq-border);
+    }}
+
+    .block-container {{
+        padding-top: 1.2rem !important;
+        padding-bottom: 2.5rem !important;
+        max-width: 1480px !important;
+    }}
+
+    /* ================= 下拉選單 Popover 徹底修復白底白字 ================= */
+    div[data-baseweb="popover"],
+    div[data-baseweb="popover"] > div,
+    div[data-baseweb="popover"] ul,
+    div[data-baseweb="popover"] [data-baseweb="menu"],
+    div[data-baseweb="popover"] [role="listbox"] {{
+        background-color: {p['popover_bg']} !important;
+        border: 1px solid {p['popover_border']} !important;
+        border-radius: 10px !important;
+        color: {p['popover_text']} !important;
+    }}
+    div[data-baseweb="popover"] li,
+    div[data-baseweb="popover"] [role="option"],
+    div[data-baseweb="popover"] [role="option"] *,
+    div[data-baseweb="popover"] li * {{
+        background-color: {p['popover_bg']} !important;
+        color: {p['popover_text']} !important;
+    }}
+    div[data-baseweb="popover"] li:hover,
+    div[data-baseweb="popover"] li:hover *,
+    div[data-baseweb="popover"] [role="option"]:hover,
+    div[data-baseweb="popover"] [role="option"]:hover *,
+    div[data-baseweb="popover"] [role="option"][aria-selected="true"],
+    div[data-baseweb="popover"] [role="option"][aria-selected="true"] * {{
+        background-color: {p['popover_hover']} !important;
+        color: {p['popover_text']} !important;
+        font-weight: 700 !important;
+    }}
+
+    /* ================= 側邊欄主題與無撞色對比校正 ================= */
+    [data-testid="stSidebar"] {{
+        background: {p['sb_bg']} !important;
+        border-right: 1px solid {p['sb_border']} !important;
+    }}
+    .sq-sb-brand {{
+        padding: 6px 2px 12px 2px;
+        border-bottom: 1px solid {p['sb_border']};
+        margin-bottom: 12px;
+    }}
+    .sq-sb-brand-title {{
+        font-size: 1.15rem;
+        font-weight: 800;
+        color: {p['sb_text']} !important;
+        letter-spacing: 0.3px;
+    }}
+    .sq-sb-brand-sub {{
+        font-size: 0.75rem;
+        color: {p['sb_muted']} !important;
+        margin-top: 3px;
+    }}
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3,
+    [data-testid="stSidebar"] h4,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] div[data-testid="stMarkdownContainer"] {{
+        color: {p['sb_text']} !important;
+    }}
+    [data-testid="stSidebar"] .stCaption,
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] *,
+    [data-testid="stSidebar"] small {{
+        color: {p['sb_muted']} !important;
+    }}
+    /* 側邊欄與主畫面行內 code 標籤高對比修復（如 US$128 / HK$21,500） */
+    [data-testid="stSidebar"] code {{
+        background-color: {p['sb_input_bg']} !important;
+        color: {p['sb_text']} !important;
+        border: 1px solid {p['sb_input_border']} !important;
+        padding: 1px 5px !important;
+        border-radius: 5px !important;
+        font-weight: 600 !important;
+    }}
+    [data-testid="stMain"] code {{
+        background-color: {main_code_bg} !important;
+        color: {main_code_txt} !important;
+        border: 1px solid {main_code_bd} !important;
+        padding: 1px 5px !important;
+        border-radius: 5px !important;
+    }}
+
+    /* 側邊欄輸入框 / 下拉選單 / NumberInput +/- 按鈕 / Placeholder 高對比 */
+    [data-testid="stSidebar"] [data-baseweb="select"] > div,
+    [data-testid="stSidebar"] [data-baseweb="input"] > div,
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] textarea {{
+        background-color: {p['sb_input_bg']} !important;
+        color: {p['sb_input_text']} !important;
+        border: 1px solid {p['sb_input_border']} !important;
+        border-radius: 8px !important;
+        -webkit-text-fill-color: {p['sb_input_text']} !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stNumberInput"] button {{
+        background-color: {p['sb_btn_bg']} !important;
+        color: {p['sb_btn_text']} !important;
+        border-color: {p['sb_input_border']} !important;
+    }}
+    [data-testid="stSidebar"] input::placeholder,
+    [data-testid="stSidebar"] textarea::placeholder {{
+        color: {p['sb_placeholder']} !important;
+        -webkit-text-fill-color: {p['sb_placeholder']} !important;
+        opacity: 0.95 !important;
+    }}
+    [data-testid="stSidebar"] svg {{
+        fill: {p['sb_text']} !important;
+    }}
+
+    /* 側邊欄按鈕明確深淺配對 */
+    [data-testid="stSidebar"] button[data-testid^="stBaseButton-secondary"],
+    [data-testid="stSidebar"] button[kind="secondary"],
+    [data-testid="stSidebar"] .stButton > button,
+    [data-testid="stSidebar"] .stFormSubmitButton > button,
+    [data-testid="stSidebar"] .stDownloadButton > button {{
+        background: {p['sb_btn_bg']} !important;
+        background-color: {p['sb_btn_bg']} !important;
+        color: {p['sb_btn_text']} !important;
+        border: 1px solid {p['sb_btn_border']} !important;
+        border-radius: 9px !important;
+        font-weight: 700 !important;
+    }}
+    [data-testid="stSidebar"] .stButton > button *,
+    [data-testid="stSidebar"] .stFormSubmitButton > button *,
+    [data-testid="stSidebar"] .stDownloadButton > button * {{
+        color: {p['sb_btn_text']} !important;
+    }}
+    [data-testid="stSidebar"] .stButton > button:hover,
+    [data-testid="stSidebar"] .stFormSubmitButton > button:hover {{
+        background: {p['sb_btn_hover_bg']} !important;
+        background-color: {p['sb_btn_hover_bg']} !important;
+        color: {p['sb_btn_hover_text']} !important;
+        border-color: {p['sb_btn_hover_bg']} !important;
+    }}
+    [data-testid="stSidebar"] .stButton > button:hover *,
+    [data-testid="stSidebar"] .stFormSubmitButton > button:hover * {{
+        color: {p['sb_btn_hover_text']} !important;
+    }}
+    [data-testid="stSidebar"] button[data-testid="stBaseButton-primary"],
+    [data-testid="stSidebar"] .stButton > button[kind="primary"] {{
+        background: linear-gradient(135deg, {p['primary']} 0%, {p['primary_2']} 100%) !important;
+        color: #FFFFFF !important;
+        border: none !important;
+    }}
+    [data-testid="stSidebar"] button[data-testid="stBaseButton-primary"] *,
+    [data-testid="stSidebar"] .stButton > button[kind="primary"] * {{
+        color: #FFFFFF !important;
+    }}
+
+    /* 側邊欄 Expander / Radio / Alert */
+    [data-testid="stSidebar"] [data-testid="stExpander"],
+    [data-testid="stSidebar"] [data-testid="stExpander"] details,
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary,
+    [data-testid="stSidebar"] [data-testid="stExpanderDetails"] {{
+        background: {p['sb_card_bg']} !important;
+        background-color: {p['sb_card_bg']} !important;
+        border-color: {p['sb_input_border']} !important;
+        border-radius: 10px !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary,
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary * {{
+        color: {p['sb_text']} !important;
+    }}
+    [data-testid="stSidebar"] [role="radiogroup"] label {{
+        background: {p['sb_card_bg']} !important;
+        border: 1px solid {p['sb_input_border']} !important;
+        border-radius: 9px;
+        padding: 8px 10px !important;
+        margin-bottom: 5px !important;
+        transition: all 0.16s ease;
+    }}
+    [data-testid="stSidebar"] [role="radiogroup"] label:hover {{
+        border-color: {p['primary']} !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stAlert"] {{
+        background: {p['sb_card_bg']} !important;
+        border: 1px solid {p['sb_input_border']} !important;
+        border-left: 4px solid {p['primary']} !important;
+        border-radius: 9px !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stAlert"] * {{
+        color: {p['sb_text']} !important;
+    }}
+
+    /* ================= 明確淡色區域分組方框 (Streamlit 1.39+ .st-key-* 精準上色) ================= */
+    div[class*="st-key-sq_zone_blue"] {{
+        background-color: {p['zone_blue_bg']} !important;
+        border: 1.5px solid {p['zone_blue_bd']} !important;
+        border-radius: 16px !important;
+        padding: 16px 20px 20px 20px !important;
+        margin-top: 6px !important;
+        margin-bottom: 18px !important;
+    }}
+    div[class*="st-key-sq_zone_indigo"] {{
+        background-color: {p['zone_indigo_bg']} !important;
+        border: 1.5px solid {p['zone_indigo_bd']} !important;
+        border-radius: 16px !important;
+        padding: 16px 20px 20px 20px !important;
+        margin-top: 6px !important;
+        margin-bottom: 18px !important;
+    }}
+    div[class*="st-key-sq_zone_emerald"] {{
+        background-color: {p['zone_emerald_bg']} !important;
+        border: 1.5px solid {p['zone_emerald_bd']} !important;
+        border-radius: 16px !important;
+        padding: 16px 20px 20px 20px !important;
+        margin-top: 6px !important;
+        margin-bottom: 18px !important;
+    }}
+    div[class*="st-key-sq_zone_amber"] {{
+        background-color: {p['zone_amber_bg']} !important;
+        border: 1.5px solid {p['zone_amber_bd']} !important;
+        border-radius: 16px !important;
+        padding: 16px 20px 20px 20px !important;
+        margin-top: 6px !important;
+        margin-bottom: 18px !important;
+    }}
+    div[class*="st-key-sq_zone_slate"] {{
+        background-color: {p['zone_slate_bg']} !important;
+        border: 1.5px solid {p['zone_slate_bd']} !important;
+        border-radius: 16px !important;
+        padding: 16px 20px 20px 20px !important;
+        margin-top: 6px !important;
+        margin-bottom: 18px !important;
+    }}
+
+    /* ================= 主畫面 KPI 指標卡與元件 ================= */
+    [data-testid="stMetric"] {{
+        background: var(--sq-surface) !important;
+        border: 1px solid var(--sq-border) !important;
+        border-radius: var(--sq-radius) !important;
+        padding: 14px 16px !important;
+        box-shadow: var(--sq-shadow) !important;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }}
+    [data-testid="stMetric"]:hover {{
+        transform: translateY(-1px);
+        box-shadow: var(--sq-shadow-hover) !important;
+    }}
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricLabel"] p {{
+        font-size: 0.80rem !important;
+        font-weight: 600 !important;
+        color: var(--sq-muted) !important;
+    }}
+    [data-testid="stMetricValue"] {{
+        font-family: 'JetBrains Mono', 'Inter', monospace !important;
+        font-variant-numeric: tabular-nums !important;
+        font-size: 1.38rem !important;
+        font-weight: 800 !important;
+        color: var(--sq-text) !important;
+    }}
+    [data-testid="stMetricDelta"] {{
+        font-size: 0.78rem !important;
+        font-weight: 600 !important;
+    }}
+
+    /* 主畫面所有按鈕（涵蓋 Streamlit 1.40+ stBaseButton-secondary 徹底修復暗黑模式白底白字） */
+    [data-testid="stMain"] button[data-testid^="stBaseButton-secondary"],
+    [data-testid="stMain"] button[kind="secondary"],
+    [data-testid="stMain"] .stButton > button,
+    [data-testid="stMain"] .stFormSubmitButton > button,
+    [data-testid="stMain"] .stDownloadButton > button {{
+        border-radius: 9px !important;
+        font-weight: 700 !important;
+        border: 1px solid {main_btn_bd} !important;
+        background: {main_btn_bg} !important;
+        background-color: {main_btn_bg} !important;
+        color: {main_btn_txt} !important;
+        transition: all 0.16s ease !important;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05) !important;
+    }}
+    [data-testid="stMain"] button[data-testid^="stBaseButton-secondary"] *,
+    [data-testid="stMain"] button[kind="secondary"] *,
+    [data-testid="stMain"] .stButton > button *,
+    [data-testid="stMain"] .stFormSubmitButton > button *,
+    [data-testid="stMain"] .stDownloadButton > button * {{
+        color: {main_btn_txt} !important;
+    }}
+    [data-testid="stMain"] button[data-testid^="stBaseButton-secondary"]:hover,
+    [data-testid="stMain"] button[kind="secondary"]:hover,
+    [data-testid="stMain"] .stButton > button:hover,
+    [data-testid="stMain"] .stFormSubmitButton > button:hover {{
+        border-color: {main_btn_hover_bg} !important;
+        color: {main_btn_hover_txt} !important;
+        background: {main_btn_hover_bg} !important;
+        background-color: {main_btn_hover_bg} !important;
+    }}
+    [data-testid="stMain"] button[data-testid^="stBaseButton-secondary"]:hover *,
+    [data-testid="stMain"] button[kind="secondary"]:hover *,
+    [data-testid="stMain"] .stButton > button:hover *,
+    [data-testid="stMain"] .stFormSubmitButton > button:hover * {{
+        color: {main_btn_hover_txt} !important;
+    }}
+    [data-testid="stMain"] button[data-testid="stBaseButton-primary"],
+    [data-testid="stMain"] button[data-testid="stBaseButton-primaryFormSubmit"],
+    [data-testid="stMain"] .stButton > button[kind="primary"],
+    [data-testid="stMain"] .stFormSubmitButton > button[kind="primary"] {{
+        background: linear-gradient(135deg, {p['primary']} 0%, {p['primary_2']} 100%) !important;
+        color: #FFFFFF !important;
+        border: none !important;
+        box-shadow: 0 3px 10px rgba(0, 184, 101, 0.25) !important;
+    }}
+    [data-testid="stMain"] button[data-testid="stBaseButton-primary"] *,
+    [data-testid="stMain"] button[data-testid="stBaseButton-primaryFormSubmit"] *,
+    [data-testid="stMain"] .stButton > button[kind="primary"] *,
+    [data-testid="stMain"] .stFormSubmitButton > button[kind="primary"] * {{
+        color: #FFFFFF !important;
+    }}
+
+    /* 主畫面 Expander（涵蓋 details / summary / stExpanderDetails 徹底修復暗黑模式白條） */
+    [data-testid="stMain"] [data-testid="stExpander"] {{
+        background: var(--sq-surface) !important;
+        background-color: var(--sq-surface) !important;
+        border: 1px solid var(--sq-border) !important;
+        border-radius: var(--sq-radius) !important;
+        box-shadow: var(--sq-shadow) !important;
+        overflow: hidden;
+    }}
+    [data-testid="stMain"] [data-testid="stExpander"] details,
+    [data-testid="stMain"] [data-testid="stExpander"] summary,
+    [data-testid="stMain"] [data-testid="stExpanderDetails"] {{
+        background: var(--sq-surface) !important;
+        background-color: var(--sq-surface) !important;
+        color: var(--sq-text) !important;
+    }}
+    [data-testid="stMain"] [data-testid="stExpander"] summary,
+    [data-testid="stMain"] [data-testid="stExpander"] summary * {{
+        font-weight: 700 !important;
+        color: var(--sq-text) !important;
+    }}
+    [data-testid="stMain"] [data-testid="stExpander"] summary svg {{
+        fill: var(--sq-text) !important;
+        color: var(--sq-text) !important;
+    }}
+    [data-testid="stMain"] [data-testid="stForm"] {{
+        background: var(--sq-surface) !important;
+        border: 1px solid var(--sq-border) !important;
+        border-radius: var(--sq-radius) !important;
+        padding: 14px 16px !important;
+        box-shadow: var(--sq-shadow) !important;
+    }}
+
+    /* 頁籤 Tabs 膠囊化風格 */
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 6px;
+        background: {p['tab_list_bg']};
+        padding: 5px;
+        border-radius: 11px;
+        margin-bottom: 14px;
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        border-radius: 8px !important;
+        padding: 8px 14px !important;
+        font-weight: 700 !important;
+        font-size: 0.86rem !important;
+        color: {p['tab_text']} !important;
+        background: transparent !important;
+    }}
+    .stTabs [data-baseweb="tab"] p {{
+        color: inherit !important;
+    }}
+    .stTabs [aria-selected="true"] {{
+        background: {p['tab_active_bg']} !important;
+        color: {p['tab_active_text']} !important;
+        box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12) !important;
+    }}
+
+    /* 資料表容器圓角與陰影 */
+    [data-testid="stDataFrame"], [data-testid="stDataEditor"] {{
+        border-radius: 10px !important;
+        border: 1px solid var(--sq-border) !important;
+        background: var(--sq-surface) !important;
+        box-shadow: var(--sq-shadow) !important;
+    }}
+
+    /* ================= 使用指南寬鬆卡片排版系統 ================= */
+    .sq-guide-hero {{
+        background: var(--sq-surface);
+        border: 1px solid var(--sq-border);
+        border-left: 5px solid var(--sq-primary);
+        border-radius: 14px;
+        padding: 18px 22px;
+        margin-bottom: 20px;
+        line-height: 1.85;
+        color: var(--sq-text);
+        font-size: 14.5px;
+        box-shadow: var(--sq-shadow);
+    }}
+    .sq-guide-grid-2 {{
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+        margin-top: 12px;
+        margin-bottom: 20px;
+    }}
+    .sq-guide-grid-3 {{
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+        margin-top: 12px;
+        margin-bottom: 20px;
+    }}
+    .sq-guide-card {{
+        background: var(--sq-surface);
+        border: 1px solid var(--sq-border);
+        border-radius: 14px;
+        padding: 18px 20px;
+        box-shadow: var(--sq-shadow);
+        color: var(--sq-text);
+        line-height: 1.8;
+    }}
+    .sq-guide-card-title {{
+        font-size: 15px;
+        font-weight: 800;
+        color: var(--sq-text);
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        line-height: 1.4;
+    }}
+    .sq-guide-badge {{
+        display: inline-block;
+        font-size: 11.5px;
+        font-weight: 700;
+        padding: 2px 9px;
+        border-radius: 999px;
+        background: var(--sq-surface-alt);
+        color: var(--sq-accent);
+        border: 1px solid var(--sq-border);
+    }}
+    .sq-guide-list {{
+        margin: 0;
+        padding-left: 18px;
+        color: var(--sq-text);
+        font-size: 13.8px;
+        line-height: 1.85;
+    }}
+    .sq-guide-list li {{
+        margin-bottom: 8px;
+    }}
+    .sq-guide-list li:last-child {{
+        margin-bottom: 0;
+    }}
+    .sq-guide-note {{
+        margin-top: 10px;
+        padding: 10px 14px;
+        border-radius: 10px;
+        background: var(--sq-surface-alt);
+        border: 1px solid var(--sq-border);
+        color: var(--sq-muted);
+        font-size: 13px;
+        line-height: 1.75;
+    }}
+
+    /* 響應式雙欄大市網格 */
+    .sq-regime-grid {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-bottom: 12px;
+    }}
+
+    /* 手機卡片樣式 */
+    .sq-mobile-card {{
+        background: var(--sq-surface);
+        border: 1px solid var(--sq-border);
+        border-radius: 14px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        box-shadow: var(--sq-shadow);
+    }}
+    .sq-mobile-card-top {{
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 8px;
+        margin-bottom: 8px;
+    }}
+    .sq-mobile-card-grid {{
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+        background: var(--sq-surface-alt);
+        border-radius: 10px;
+        padding: 8px 10px;
+        margin-bottom: 8px;
+    }}
+    .sq-mobile-kv-lbl {{
+        font-size: 10.5px;
+        color: var(--sq-muted);
+        font-weight: 600;
+    }}
+    .sq-mobile-kv-val {{
+        font-size: 13px;
+        color: var(--sq-text);
+        font-weight: 700;
+        font-family: 'JetBrains Mono', monospace;
+    }}
+
+    /* 手機版全響應式規則 */
+    @media (max-width: 768px) {{
+        .block-container {{
+            padding-left: 0.65rem !important;
+            padding-right: 0.65rem !important;
+            padding-top: 0.6rem !important;
+            padding-bottom: 2.2rem !important;
+        }}
+        .sq-regime-grid,
+        .sq-guide-grid-2,
+        .sq-guide-grid-3 {{
+            grid-template-columns: 1fr !important;
+        }}
+        .sq-clock-bar {{
+            flex-direction: column !important;
+            align-items: flex-start !important;
+            gap: 6px !important;
+            padding: 10px 12px !important;
+        }}
+        [data-testid="stMetric"] {{
+            padding: 10px 12px !important;
+        }}
+        [data-testid="stMetricValue"] {{
+            font-size: 1.12rem !important;
+        }}
+        .stTabs [data-baseweb="tab-list"] {{
+            overflow-x: auto !important;
+            flex-wrap: nowrap !important;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+        }}
+        .stTabs [data-baseweb="tab"] {{
+            white-space: nowrap !important;
+            padding: 7px 12px !important;
+            font-size: 0.80rem !important;
+        }}
+        [data-testid="stHorizontalBlock"] {{
+            gap: 0.5rem !important;
+        }}
+        .stButton > button, .stFormSubmitButton > button {{
+            min-height: 44px !important;
+            font-size: 0.88rem !important;
+        }}
+        [data-testid="stDataFrame"] {{
+            overflow-x: auto !important;
+            -webkit-overflow-scrolling: touch;
+        }}
+        div[class*="st-key-sq_zone_"] {{
+            padding: 10px 10px 12px 10px !important;
+            border-radius: 12px !important;
+        }}
+    }}
+    </style>
+    """
+    st.markdown(_css, unsafe_allow_html=True)
 
 def inject_parent_dom_and_translate_shield() -> None:
     """[v47.0 終極根治 Chrome Google 翻譯與模式切換觸發之 NotFoundError: Failed to execute 'removeChild' on 'Node']
@@ -7936,6 +8859,7 @@ def inject_parent_dom_and_translate_shield() -> None:
         pass
 
 inject_parent_dom_and_translate_shield()
+inject_fintech_responsive_theme()
 
 # ==========================================
 # 0. 伺服器級持久化快取 (徹底解決雷達刷新消失的問題)
@@ -9743,6 +10667,11 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
             and (not _is_exhausted_bar)
         )
 
+        # [v61.0 P0-1 修復] 明確定義 _reclaimed_short_ma_today，根治 overlap_count==2 分支觸發 NameError 崩潰
+        _reclaimed_short_ma_today = bool(
+            float(last['Close']) >= float(last.get('SMA20', np.inf)) * 0.995
+            or (float(last['Close']) >= float(last.get('EMA9', np.inf)) and float(last['Close']) > float(last['Open']))
+        )
         is_martin_pb_long = bool(_allow_pb_long and martin_luk_info.get("martin_pullback_long", False) and not invalidation_info["long_stop_hit"] and not invalidation_info["downtrend_veto_long"] and not _is_exhausted_bar)
         is_martin_id_long = bool((_allow_bo_long or _is_bottom_rev_day) and martin_luk_info.get("martin_inside_breakout_long", False) and not invalidation_info["long_stop_hit"] and not invalidation_info["downtrend_veto_long"] and not _is_exhausted_bar)
         is_martin_ep_long = bool((_allow_bo_long or _is_bottom_rev_day) and martin_luk_info.get("martin_ep_long", False) and not invalidation_info["long_stop_hit"] and exh_guard_info.get("close_range_pos", 0.5) >= 0.60)
@@ -10803,6 +11732,43 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
 # ==========================================
 # 9. 側欄控制
 # ==========================================
+st.sidebar.markdown(
+    '<div class="sq-sb-brand">'
+    '<div class="sq-sb-brand-title">📈 SwingQuant <span style="color:#00B865 !important;">Pro</span></div>'
+    '<div class="sq-sb-brand-sub">v61.4 波段量化終端 · 電腦 / 手機自適應</div>'
+    '</div>',
+    unsafe_allow_html=True
+)
+# [v61.1 修復 StreamlitAPIException] 在建立 mobile_compact_mode widget 前先處理頂部按鈕嘅待切換狀態
+if "_pending_mobile_compact_mode" in st.session_state:
+    st.session_state["mobile_compact_mode"] = bool(st.session_state.pop("_pending_mobile_compact_mode"))
+
+_theme_keys = list(UI_THEME_PRESETS.keys())
+_cur_theme_saved = _LEGACY_THEME_NAME_MAP.get(
+    persistent_data.get("ui_theme_preset", _theme_keys[0]),
+    persistent_data.get("ui_theme_preset", _theme_keys[0])
+)
+if _cur_theme_saved not in _theme_keys:
+    _cur_theme_saved = _theme_keys[0]
+if st.session_state.get("ui_theme_preset") in _LEGACY_THEME_NAME_MAP:
+    st.session_state["ui_theme_preset"] = _LEGACY_THEME_NAME_MAP[st.session_state["ui_theme_preset"]]
+ui_theme_preset = st.sidebar.selectbox(
+    "🎨 介面風格",
+    options=_theme_keys,
+    index=_theme_keys.index(_cur_theme_saved),
+    key="ui_theme_preset",
+    help="切換介面配色：經典深藍、簡約純白、暗黑夜盤、翡翠商務"
+)
+if ui_theme_preset != persistent_data.get("ui_theme_preset"):
+    persistent_data["ui_theme_preset"] = ui_theme_preset
+inject_fintech_responsive_theme(ui_theme_preset)
+
+mobile_compact_mode = st.sidebar.toggle(
+    "📱 手機精簡模式 (Mobile View)",
+    value=bool(st.session_state.get("mobile_compact_mode", False)),
+    key="mobile_compact_mode",
+    help="在手機開啟網頁時建議開啟：持倉自動轉為 App 風格卡片、多股同列轉單欄大圖、K線圖高度與觸控捲動最佳化！"
+)
 st.sidebar.markdown("## ⚙️ 系統設定")
 st.sidebar.markdown("### 量化過濾條件設定")
 # OLD: strictness = st.sidebar.slider("量化過濾嚴格度 (預設: 5)", min_value=4, max_value=7, value=5, step=1)
@@ -11839,25 +12805,42 @@ def _classify_holding_instrument_and_direction(
 
 def render_color_zone_header(title: str, subtitle: str = "", theme: str = "indigo") -> None:
     """
-    [v56.0 全系統色彩分區視覺標題帶]
-    支援主題：indigo (持倉總覽), cyan (指數ETF), green (做多專區), red (做空專區), orange (多股同列/工具), blue (大市/港美雷達), slate (觀望)
+    [v61.2 多主題區塊標題卡]
+    自動跟隨當前介面風格（淺色／暗黑夜盤），避免深淺撞色。
     """
-    palettes = {
-        "indigo": ("#3730A3", "#EEF2FF", "#6366F1", "#FFFFFF"),
-        "cyan":   ("#0E7490", "#ECFEFF", "#06B6D4", "#FFFFFF"),
-        "green":  ("#15803D", "#F0FDF4", "#22C55E", "#FFFFFF"),
-        "red":    ("#B91C1C", "#FEF2F2", "#EF4444", "#FFFFFF"),
-        "orange": ("#C2410C", "#FFF7ED", "#F97316", "#FFFFFF"),
-        "blue":   ("#1D4ED8", "#EFF6FF", "#3B82F6", "#FFFFFF"),
-        "slate":  ("#334155", "#F8FAFC", "#64748B", "#FFFFFF"),
+    is_dark = (UI_THEME_PRESETS.get(get_active_ui_theme_name(), {}).get("is_dark_main") == "1")
+    palettes_light = {
+        "indigo": ("#6366F1", "#EEF2FF", "#3730A3"),
+        "cyan":   ("#0891B2", "#ECFEFF", "#0E7490"),
+        "green":  ("#00B865", "#ECFDF5", "#047857"),
+        "red":    ("#EF4444", "#FEF2F2", "#B91C1C"),
+        "orange": ("#D97706", "#FFFBEB", "#B45309"),
+        "blue":   ("#2563EB", "#EFF6FF", "#1D4ED8"),
+        "slate":  ("#64748B", "#F1F5F9", "#334155"),
     }
-    bg_dark, bg_light, border_col, txt_col = palettes.get(theme, palettes["indigo"])
-    sub_html = f'<span style="font-size:12.5px; font-weight:500; opacity:0.92; margin-left:10px;">{subtitle}</span>' if subtitle else ""
+    palettes_dark = {
+        "indigo": ("#818CF8", "rgba(99,102,241,0.18)", "#C7D2FE"),
+        "cyan":   ("#22D3EE", "rgba(34,211,238,0.16)", "#A5F3FC"),
+        "green":  ("#34D399", "rgba(16,185,129,0.18)", "#A7F3D0"),
+        "red":    ("#F87171", "rgba(239,68,68,0.18)",  "#FECACA"),
+        "orange": ("#FBBF24", "rgba(245,158,11,0.18)", "#FDE68A"),
+        "blue":   ("#60A5FA", "rgba(59,130,246,0.18)", "#BFDBFE"),
+        "slate":  ("#94A3B8", "rgba(148,163,184,0.16)","#E2E8F0"),
+    }
+    pal = palettes_dark if is_dark else palettes_light
+    accent, pill_bg, pill_fg = pal.get(theme, pal["indigo"])
+    card_bg = "#111827" if is_dark else "#FFFFFF"
+    card_bd = "#334155" if is_dark else "#E2E8F0"
+    title_fg = "#F8FAFC" if is_dark else "#0F172A"
+    sub_html = (
+        f'<div style="font-size:12px; font-weight:600; color:{pill_fg}; background:{pill_bg}; padding:3px 10px; border-radius:999px; margin-top:5px; display:inline-block;">{subtitle}</div>'
+        if subtitle else ""
+    )
     html = (
-        f'<div translate="no" class="notranslate" style="margin-top:10px; margin-bottom:6px; border:2px solid {border_col}; border-radius:10px; overflow:hidden; box-shadow:0 2px 6px rgba(15,23,42,0.06);">'
-        f'<div style="background:{bg_dark}; color:{txt_col}; padding:8px 14px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap;">'
-        f'<div style="font-size:15px; font-weight:800; letter-spacing:0.3px;">{title}{sub_html}</div>'
-        f'</div></div>'
+        f'<div translate="no" class="notranslate" style="margin-top:4px; margin-bottom:10px; background:{card_bg}; border:1px solid {card_bd}; border-left:4px solid {accent}; border-radius:12px; padding:11px 16px; box-shadow:0 2px 6px rgba(15,23,42,0.05);">'
+        f'<div style="font-size:15.5px; font-weight:800; color:{title_fg}; letter-spacing:0.2px; line-height:1.35;">{title}</div>'
+        f'{sub_html}'
+        f'</div>'
     )
     st.markdown(html, unsafe_allow_html=True)
 
@@ -11879,6 +12862,48 @@ def _render_color_boxed_holdings_html_table(rows_list: List[Dict[str, Any]], the
             f'（此分類目前無持倉股票）</div>',
             unsafe_allow_html=True
         )
+        return
+
+    # [v61.0 手機版卡片視圖] 開啟「📱 手機精簡模式」時，自動切換為 App 級股票卡片清單，免橫向拉表！
+    if is_mobile_mode_active():
+        cards_html = []
+        for r in rows_list:
+            link_url = r.get("link_url", "#")
+            action_lvl = r.get("action_level", "hold")
+            act_bg, act_fg = ("#FEE2E2", "#B91C1C") if action_lvl == "clear" else (("#FEF3C7", "#B45309") if action_lvl == "trim" else ("#DCFCE7", "#15803D"))
+            pnl_val = float(r.get("pnl_val", 0.0))
+            has_cost = bool(r.get("has_cost", False))
+            pnl_txt = f"{pnl_val:+.2f}%" if has_cost else "待設成本"
+            pnl_col = "#00B865" if (has_cost and pnl_val >= 0) else ("#EF4444" if has_cost else "#64748B")
+            dir_lbl = r.get("etf_type", "ETF") if is_etf else ("🟢 做多" if r.get("dir_code") == "LONG" else "🔴 做空")
+            kv_html = (
+                f'<div class="sq-mobile-card-grid">'
+                f'<div><div class="sq-mobile-kv-lbl">現價</div><div class="sq-mobile-kv-val">{r.get("price_str", "-")}</div></div>'
+                f'<div><div class="sq-mobile-kv-lbl">買入成本</div><div class="sq-mobile-kv-val">{r.get("cost_str", "-")}</div></div>'
+                f'<div><div class="sq-mobile-kv-lbl">浮盈 %</div><div class="sq-mobile-kv-val" style="color:{pnl_col};">{pnl_txt}</div></div>'
+                f'</div>'
+                if is_etf else
+                f'<div class="sq-mobile-card-grid">'
+                f'<div><div class="sq-mobile-kv-lbl">現價 / 成本</div><div class="sq-mobile-kv-val">{r.get("price_str", "-")} / {r.get("cost_str", "-")}</div></div>'
+                f'<div><div class="sq-mobile-kv-lbl">止損 SL</div><div class="sq-mobile-kv-val" style="color:#EF4444;">{r.get("sl_str", "-")}</div></div>'
+                f'<div><div class="sq-mobile-kv-lbl">目標 TP</div><div class="sq-mobile-kv-val" style="color:#00B865;">{r.get("tp_str", "-")}</div></div>'
+                f'</div>'
+            )
+            cards_html.append(
+                f'<div class="sq-mobile-card" translate="no">'
+                f'<div class="sq-mobile-card-top">'
+                f'<div><div style="font-size:15px;font-weight:800;color:var(--sq-text);">{r.get("stock_label", "")}</div>'
+                f'<div style="font-size:12px;color:#64748B;margin-top:2px;">{dir_lbl} · {r.get("ma_short_str", "")}</div></div>'
+                f'<div style="text-align:right;">'
+                f'<div style="font-family:JetBrains Mono,monospace;font-size:14px;font-weight:800;color:{pnl_col};">{pnl_txt}</div>'
+                f'<a href="{link_url}" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin-top:4px;background:#0F172A;color:#FFF;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:700;text-decoration:none;">🔍 診斷</a>'
+                f'</div></div>'
+                f'{kv_html}'
+                f'<div style="background:{act_bg};color:{act_fg};padding:6px 10px;border-radius:8px;font-size:12.5px;font-weight:700;line-height:1.45;">'
+                f'{r.get("short_verdict", "")} — <span style="font-weight:600;color:#1E293B;">{r.get("short_reason", "")}</span>'
+                f'</div></div>'
+            )
+        st.markdown("".join(cards_html), unsafe_allow_html=True)
         return
 
     if is_etf:
@@ -12290,6 +13315,10 @@ def render_watchlist_quick_action_radar_hub(context_key: str = "mode1_wl") -> No
 
 
 def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> None:
+    with section_zone_box("indigo"):
+        _render_holdings_group_regime_advisory_hub_impl(context_key=context_key)
+
+def _render_holdings_group_regime_advisory_hub_impl(context_key: str = "wl_hub") -> None:
     """
     [v59.0 零漏股 + 六維度完整持倉指揮中心]
     解決所有「持倉部份缺失」問題：
@@ -12360,7 +13389,7 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
         _us_bd = "#EF4444" if us_reg["alert_kind"] == "error" else ("#F59E0B" if us_reg["alert_kind"] == "warning" else "#22C55E")
 
         st.markdown(
-            f'<div translate="no" class="notranslate" style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;">'
+            f'<div translate="no" class="notranslate sq-regime-grid">'
             f'<div style="background:{_hk_bg}; border-left:5px solid {_hk_bd}; padding:8px 12px; border-radius:6px; font-size:13px; color:#0F172A;">'
             f'<b>{hk_reg["regime_title"]}</b>｜現價 <b>{hk_reg["close"]:,.0f}</b> ({hk_reg["ret_1d_pct"]:+.2f}%)｜20MA: {hk_reg["sma20"]:,.0f}｜50MA: {hk_reg["sma50"]:,.0f}'
             f'</div>'
@@ -12678,7 +13707,7 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
                     _tot_heat_hkd += abs(_he - _hsl) * _hsh * _fx
                     _heat_cnt += 1
         if _heat_cnt > 0:
-            _ref_1r = float(st.session_state.get("max_loss_hkd", 1000.0) or 1000.0)
+            _ref_1r = float(st.session_state.get("user_max_loss_hkd", persistent_data.get("user_max_loss_hkd", 1000.0)) or 1000.0)
             _heat_r = _tot_heat_hkd / max(_ref_1r, 1.0)
             if _heat_r > 6.0:
                 st.warning(f"⚠️ **組合總風險提示 (Total Open Heat)**：已設定止損之 {_heat_cnt} 隻持倉若同時觸及止損，潛在風險合計約 **HK${_tot_heat_hkd:,.0f} ({_heat_r:.1f}R)**，高於 6.0R 參考上限。")
@@ -13004,6 +14033,10 @@ def import_account_trades_from_csv_df(df_imp: pd.DataFrame) -> Tuple[int, int, s
 
 
 def render_trade_journal_and_post_exit_review_hub(context_key: str = "main_journal") -> None:
+    with section_zone_box("amber"):
+        _render_trade_journal_and_post_exit_review_hub_impl(context_key=context_key)
+
+def _render_trade_journal_and_post_exit_review_hub_impl(context_key: str = "main_journal") -> None:
     """
     [v59.0 全帳號終身交易總帳本 & 賣出後走勢利弊 AI 復盤中心]
     徹底升級為「記錄這個帳號的所有交易，而不只是單單近期的」：
@@ -13948,10 +14981,12 @@ def render_futu_multi_chart_grid(
             key=f"futu_mc_span_{context_key}"
         )
     with mc_bar3:
+        _mc_layout_opts = ["3×3 九宮格 (每頁9圖)", "3×2 六宮格 (每頁6圖)", "2×2 四宮格 (每頁4大圖)", "1×4 手機單列大圖 (每頁4圖)"]
+        _mc_def_idx = 3 if is_mobile_mode_active() else 0
         layout_label = st.selectbox(
             "🎛️ 同列格數 (宮格):",
-            ["3×3 九宮格 (每頁9圖)", "3×2 六宮格 (每頁6圖)", "2×2 四宮格 (每頁4大圖)"],
-            index=0,
+            _mc_layout_opts,
+            index=_mc_def_idx,
             key=f"futu_mc_layout_{context_key}"
         )
     with mc_bar4:
@@ -13980,8 +15015,8 @@ def render_futu_multi_chart_grid(
     }
     mc_interval = tf_map_mc.get(tf_label, "1d")
     mc_bars = 65 if "65" in span_label else (25 if "25" in span_label else (120 if "120" in span_label else 240))
-    cols_per_row = 3 if "3×" in layout_label else 2
-    charts_per_page = 9 if "3×3" in layout_label else (6 if "3×2" in layout_label else 4)
+    cols_per_row = 1 if ("1×" in layout_label or is_mobile_mode_active()) else (3 if "3×" in layout_label else 2)
+    charts_per_page = 9 if ("3×3" in layout_label and not is_mobile_mode_active()) else (6 if ("3×2" in layout_label and not is_mobile_mode_active()) else 4)
 
     # 組合最終顯示之標的列表
     display_Wait_list: List[str] = []
@@ -14188,7 +15223,7 @@ def render_futu_multi_chart_grid(
                 _hdr_html = (
                     f'<div translate="no" class="notranslate" style="background:#FFFFFF; border:1px solid #E2E8F0; border-bottom:none; border-radius:8px 8px 0 0; padding:8px 10px; display:flex; align-items:center; justify-content:space-between;">'
                     f'<div style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:56%;">'
-                    f'<span style="font-size:13.5px; font-weight:800; color:#0F172A;">{disp_title}</span>{_badge_span_html}'
+                    f'<span style="font-size:13.5px; font-weight:800; color:var(--sq-text);">{disp_title}</span>{_badge_span_html}'
                     f'</div>'
                     f'<div style="text-align:right; font-family:monospace,sans-serif; font-weight:800; font-size:13px; color:{futu_color};">'
                     f'<div>{c_last:,.2f} <span style="font-size:11.5px;">{chg_val:+.2f} ({chg_pct:+.2f}%)</span></div>{_ext_sub_line}'
@@ -14291,7 +15326,7 @@ def render_futu_multi_chart_grid(
                 st.plotly_chart(
                     fig_mc,
                     use_container_width=True,
-                    config={"displayModeBar": False, "scrollZoom": True},
+                    config={"displayModeBar": False, "scrollZoom": (not is_mobile_mode_active())},
                     key=f"futu_mc_plot_{context_key}_{page_idx}_{sym}_{mc_interval}_{mc_bars}"
                 )
 
@@ -14346,6 +15381,41 @@ def render_futu_multi_chart_grid(
                                     st.rerun()
 
 mode = st.sidebar.radio("請選擇功能", mode_options, key="app_nav_mode_radio")
+
+# [v61.0 手機/平板頂部快速導航列] 手機用戶無需拉開左側欄即可一鍵切換五大模組與手機精簡模式
+def render_top_mobile_friendly_navbar(current_mode: str) -> None:
+    _short_nav = [
+        ("🔎 雷達", mode_options[0]),
+        ("📊 診斷", mode_options[1]),
+        ("⭐ 自選", mode_options[2]),
+        ("📈 回測", mode_options[3]),
+        ("📖 說明", mode_options[4]),
+    ]
+    _nc = st.columns([1, 1, 1, 1, 1, 1.15])
+    for _idx_n, (_lbl_n, _target_m) in enumerate(_short_nav):
+        with _nc[_idx_n]:
+            _is_act = (current_mode == _target_m)
+            if st.button(
+                _lbl_n,
+                key=f"top_nav_btn_{_idx_n}",
+                type="primary" if _is_act else "secondary",
+                use_container_width=True
+            ):
+                if not _is_act:
+                    st.session_state["_pending_nav_mode"] = _target_m
+                    st.rerun()
+    with _nc[5]:
+        _mob_on = is_mobile_mode_active()
+        if st.button(
+            "📱 手機:開" if _mob_on else "🖥️ 電腦版",
+            key="top_nav_mobile_toggle_btn",
+            use_container_width=True,
+            help="一鍵切換手機精簡卡片模式 / 電腦寬屏模式"
+        ):
+            st.session_state["_pending_mobile_compact_mode"] = (not _mob_on)
+            st.rerun()
+
+render_top_mobile_friendly_navbar(mode)
 
 with st.sidebar.expander("🧭 操作速查", expanded=False):
     st.markdown(
@@ -15244,216 +16314,326 @@ def run_all_inclusive_radar(stock_list):
 # 16. 內置互動教學組件與模式 5：實戰教學與大師戰法指南 (v25.3 新增)
 # ==========================================
 def render_global_quick_guide_banner():
-    """在模式 1~4 頂部提供不佔空間的可摺疊實戰速查抽屜，方便用戶邊睇數據邊對照操作"""
-    with st.expander("📖 【隨查隨用】網頁版靈活運用速查卡（富途牛牛掛單對照 ／ Martin Luk 雙模式切換 ／ 指標口訣）", expanded=False):
-        qg_c1, qg_c2, qg_c3 = st.columns(3)
-        with qg_c1:
-            st.markdown(
-                "#### 🚀 每日 5 步標準流程\n"
-                "1. **揀週期（左欄）**：中線波段揀 **🌊 中線標準**；短線爆發揀 **⚡ 短線緊密 (Martin Luk)**。\n"
-                "2. **掃雷達（模式1/3）**：直睇 **🏆 今日優先行動精選榜 (#1, #2)**，系統已剔除 `<1.8R` 劣質信號。\n"
-                "3. **睇診斷（模式2）**：一鍵跳轉睇 K 線 **藍線(買入) / 紅線(止損) / 綠線(止盈)**。\n"
-                "4. **計手數（模式2）**：展開 **🧮 Martin Luk 0.5% 風控計算器**，避開港股 1 手超標陷阱。\n"
-                "5. **管持倉（模式2）**：買入後填入 **「實際進場價」**，自動導航 **TP1 減倉 50% + 移至富途打和價**。"
-            )
-        with qg_c2:
-            st.markdown(
-                "#### 📱 富途牛牛 (Futu) 掛單對照\n"
-                "- **突破觸發單 / 埋伏單 (`Stop-Buy`)**：\n"
-                "  👉 富途揀 **【條件單 → 突破買入】**。當股價升穿「建議進場價」才觸發，未突破前絕不提早買！\n"
-                "- **低吸回踩單 / S/R互換單 (`Limit-Buy`)**：\n"
-                "  👉 富途揀 **【限價單 (Limit) 或 回落買入】**。現價已偏高時切勿市價追，掛在支撐位耐心等回踩。\n"
-                "- **破底觸發沽空 (`Stop-Sell`) / 逢高反彈沽空 (`Limit-Sell`)**：\n"
-                "  👉 富途分別對應 **【條件單 → 跌破賣出(沽空)】** 及 **【限價沽空單】**。"
-            )
-        with qg_c3:
-            st.markdown(
-                "#### 🧠 三師核心指標一眼看懂\n"
-                "- **⏱️ 斜率時鐘**：**2點鐘**（回踩積極買）、**3點鐘**（設突破單埋伏）、**12點鐘**（過熱只鎖潤不追高）。\n"
-                "- **🧱 抵扣價防假跌破**：只要 **現價 > 20日/50日抵扣價**，均線必繼續向上，回踩屬洗盤買點！\n"
-                "- **🏆 Martin Luk 雲帶與 AVWAP**：股價回踩 **9/21 EMA + 前高錨定 AVWAP** 多重支撐洗盤收回，即極佳低風險買點。\n"
-                "- 💡 *想睇完整圖解與互動打卡清單？請在左側欄切換至 **「📖 5. 實戰教學與大師戰法指南」**！*"
-            )
+    """[v61.2 寬鬆卡片版速查抽屜] 簡潔好讀，自動適應 4 套介面風格與手機版"""
+    with st.expander("📖 【操作速查卡】每日流程 ／ 富途掛單 ／ 跳空止損 ORL ／ 主題與手機版", expanded=False):
+        _qg_html = """
+        <div class="sq-guide-grid-3">
+            <div class="sq-guide-card">
+                <div class="sq-guide-card-title"><span class="sq-guide-badge">SOP</span> 每日 5 步波段流程</div>
+                <ul class="sq-guide-list">
+                    <li><b>睇大市與板塊</b>：先看大市五態與板塊強弱羅盤，掌握資金流向。</li>
+                    <li><b>掃描混合池</b>：優先用核心＋動態池，檢視前段高分標的。</li>
+                    <li><b>防追高濾網</b>：美股忌買昨夜急拉股，留意開盤掃昨收或 15m ORB。</li>
+                    <li><b>風控紅綠燈</b>：核對單筆止損上限，決定滿倉或等風險縮倉。</li>
+                    <li><b>持倉與復盤</b>：同步富途持倉，平倉後追蹤 T+5 / 10 / 20 走勢。</li>
+                </ul>
+            </div>
+            <div class="sq-guide-card">
+                <div class="sq-guide-card-title"><span class="sq-guide-badge">執行</span> 富途掛單與跳空 ORL</div>
+                <ul class="sq-guide-list">
+                    <li><b>突破單</b>：用「條件單 → 突破買入」，未升穿樞紐位不提早入場。</li>
+                    <li><b>回踩低吸</b>：用「限價單 / 回落買入」，避開開盤首分鐘市價追價。</li>
+                    <li><b>盤前防錯價</b>：美股止損單設為「僅正規盤 RTH 觸發」。</li>
+                    <li><b>跳空穿止損</b>：輕度 (≤3%) 守首 15–30 分鐘低點 ORL；中度 (3–6%) 先減半；極端 (>6%) 禁溝貨優先止血。</li>
+                </ul>
+            </div>
+            <div class="sq-guide-card">
+                <div class="sq-guide-card-title"><span class="sq-guide-badge">紀律</span> 核心規則與介面技巧</div>
+                <ul class="sq-guide-list">
+                    <li><b>港美雙軌止盈</b>：港股跨小阻力取主波段；美股於 2R 先減半，餘倉跟 21EMA。</li>
+                    <li><b>Stage 2 禁空</b>：穩守 50MA / 200MA 之上屬正常回調，嚴禁逆勢做空。</li>
+                    <li><b>介面切換</b>：左側欄可切換 4 套風格；手機開啟時按頂部「手機 / 電腦版」即轉卡片模式。</li>
+                </ul>
+                <div class="sq-guide-note">💡 想查看完整策略框架與落單前檢查清單，請點擊頂部 <b>「📖 說明」</b>。</div>
+            </div>
+        </div>
+        """
+        st.markdown(" ".join(ln.strip() for ln in _qg_html.splitlines() if ln.strip()), unsafe_allow_html=True)
+
 
 def render_interactive_tutorial_hub():
-    """模式 5：完整網頁版互動教學與靈活運用指南"""
-    render_atomic_section_header("📖 系統使用說明與策略規則", level=1)
-    st.markdown(
-        "歡迎使用本系統！本指南專為讓你**在網頁內邊看邊用**而設，結合 **Martin Luk (@martinlukkt，2025 USIC 美股交易大賽 +969.8% 冠軍)**、"
-        "**J Law (@jlawstock)** 與 **LEI (@TheMarketMemo)** 三大體系，教你如何由選股、判斷買點、計算富途牛牛真實手數，到持倉分批鎖潤。"
-    )
+    """[v61.2 寬鬆易讀排版] 系統使用說明與完整策略指南"""
+    render_atomic_section_header("📖 系統使用說明與策略指南 (v61.2)", level=1)
 
-    t_tab1, t_tab2, t_tab3, t_tab4 = st.tabs([
-        "🚀 1. 新手 5 步實戰 SOP & 富途下單對照",
-        "🏆 2. Martin Luk 冠軍戰法 & 兩種模式靈活切換",
-        "📐 3. J Law × LEI 指標活學活用字典",
-        "✅ 4. 每日 10 分鐘互動打卡清單 (落單前必剔)"
-    ])
+    with section_zone_box("slate"):
+        _hero_html = """
+        <div class="sq-guide-hero">
+            <div style="font-size:16px; font-weight:800; margin-bottom:6px;">🧭 系統核心定位與閱讀指引</div>
+            <div>
+                本指南涵蓋 <b>港美雙軌波段規則、大市五態與板塊輪動、24 小時盤前盤後監測、HK$1,000 風控紅綠燈、跳空止損 ORL 與反手三鐵律</b>，以及 <b>富途同步與多主題／手機版操作</b>。
+            </div>
+            <div class="sq-guide-note">
+                ⚠️ 免責聲明：以下所有策略規則與指標均屬系統化交易假設與風控紀律框架，市場存在跳空與流動性風險，不構成任何買賣建議或收益保證。
+            </div>
+        </div>
+        """
+        st.markdown(" ".join(ln.strip() for ln in _hero_html.splitlines() if ln.strip()), unsafe_allow_html=True)
 
-    with t_tab1:
-        st.markdown("### 🚀 第一部分：由打開網頁到富途牛牛落單的 5 步標準作業流程 (SOP)")
-        st.info("💡 **核心原則**：永遠唔好用「現價」盲目市價追入！系統計算嘅每一個「建議進場價」都有明確結構依據（箱體樞紐頂或均線/AVWAP支撐位）。")
-
-        s_col1, s_col2 = st.columns(2)
-        with s_col1:
-            st.markdown(
-                "#### 📍 Step 1 ~ Step 3：選股與定位買賣點\n"
-                "1. **Step 1｜先看大盤體質與寬度（模式 1 雷達頂部）**\n"
-                "   - 啟動港股或美股全景掃描後，先睇頂部 **「🌐 J Law 市場內部體質」**。\n"
-                "   - 若高於 50MA 比例 `< 45%`，或個股診斷出現 **「⚠️ Martin Luk 大盤濾網警示（指數反彈逼近下彎 21/50 EMA）」**，代表假突破率極高，請將單筆風險減半至 `0.25%`。\n"
-                "2. **Step 2｜只從「🏆 今日優先行動精選榜 (#1, #2...)」揀股**\n"
-                "   - 優先榜已自動幫你過濾咗 **真實結構盈虧比 `< 1.8R`**、**已觸及前次止損 (`⛔`)** 或 **純多頭排列但無買點** 嘅股票。\n"
-                "   - 直接揀選排名 **#1 ~ #5** 的標的，喺下方下拉選單一鍵點擊 **「🚀 進入診斷」**。\n"
-                "3. **Step 3｜在六層 K 線圖確認三條關鍵價格線（模式 2 診斷）**\n"
-                "   - **📌 藍色實線 (Entry)**：建議買入或沽空掛單位。\n"
-                "   - **🛡️ 紅色虛線 (SL)**：結構防守止損位（跌穿代表結構破壞，無條件離場）。\n"
-                "   - **🎯 綠色虛線 (TP1)**：上方第一道歷史籌碼峰 / 前浪頂阻力（觸及即減倉 50%）。"
-            )
-        with s_col2:
-            st.markdown(
-                "#### 📍 Step 4 ~ Step 5：富途精算倉位與持倉跟蹤\n"
-                "4. **Step 4｜用 Martin Luk 風控計算器算出準確買入股數（模式 2）**\n"
-                "   - 點擊展開 **「🧮 Martin Luk 0.5% 基準風控、資金曲線反饋與防跳空倉位計算器」**。\n"
-                "   - 輸入你嘅 **帳戶總資金**、**近期連敗筆數** 同 **當前帳戶回撤 (%)**。\n"
-                "   - 系統會自動扣除 **富途牛牛雙邊佣金、HK$15 平台費及 0.1% 政府印花稅**，算出 **建議買入股數/手數** 同埋 **富途實戰打和價**。\n"
-                "   - ⚠️ **港股 1 手陷阱保護**：若出現「港股手數門檻預警」，代表買 1 手嘅止損金額已超過你嘅風險預算，請改買其他標的或用碎股功能！\n"
-                "5. **Step 5｜買入後用「實戰持倉防守與風控導航」跟蹤（模式 2）**\n"
-                "   - 成交後，喺診斷頁下方 **「📌 你的實際進場價」** 填入成交價。\n"
-                "   - 系統會即時告訴你目前處於 **🌱 忍耐洗盤期** 定係 **🛡️ 波段保本期**，並提供明確嘅分批鎖潤價位！"
-            )
-
-        st.markdown("#### 📱 系統信號 vs 富途牛牛 (Futu NiuNiu) 實戰掛單方式對照表")
-        futu_map_df = pd.DataFrame([
-            {
-                "系統顯示之進場類型": "突破觸發單 / 突破埋伏單 (Stop-Buy)",
-                "代表市場狀態": "股價正處於 VCP / Inside Day / 均線密集緊密平台，尚未正式突破",
-                "富途牛牛對應訂單類型": "【條件單】➔【突破買入】(觸發價設為系統「建議進場價」)",
-                "實戰操作要領": "升穿箱體頂樞紐位才自動觸發買入；若一直橫盤唔突破就唔會成交，資金零消耗！"
-            },
-            {
-                "系統顯示之進場類型": "低吸回踩單 / S/R互換支撐低吸單 (Limit-Buy)",
-                "代表市場狀態": "股價處於 2點鐘穩健上升趨勢，正縮量回測 9/21 EMA、20MA 或前波突破頸線",
-                "富途牛牛對應訂單類型": "【限價單 (Limit Order)】或【條件單 ➔ 回落買入】",
-                "實戰操作要領": "切勿喺大陽線當日市價高追！預先喺系統顯示嘅支撐買入位掛限價單耐心承接。"
-            },
-            {
-                "系統顯示之進場類型": "等回測低吸單 (現價已高出突破位 >3%)",
-                "代表市場狀態": "股價當日已大幅放量拉升脫離買點，直接追高會令止損超過 7.8% 上限",
-                "富途牛牛對應訂單類型": "【價格預警】或【限價單】掛喺前高頸線 / 10MA",
-                "實戰操作要領": "寧願錯過都唔好追高！等未來數日縮量回踩至系統建議價位先買。"
-            },
-            {
-                "系統顯示之進場類型": "破底觸發沽空單 (Stop-Sell) / 逢高反彈沽空 (Limit-Sell)",
-                "代表市場狀態": "空頭排列且 RS 弱於大盤，跌穿箱體下沿或弱勢反抽下彎 20MA/21EMA 受阻",
-                "富途牛牛對應訂單類型": "【條件單 ➔ 跌破賣出】或【限價賣出(沽空)】",
-                "實戰操作要領": "只喺大盤指數低於 50MA 或弱勢時執行做空，觸及下方結構支撐 TP1 即回補一半。"
-            }
+        t_tab1, t_tab2, t_tab3, t_tab4, t_tab5, t_tab6 = st.tabs([
+            "🚀 1. 每日流程與下單",
+            "⚖️ 2. 雙軌 R:R 與資金風控",
+            "🌐 3. 美股 24h 與隔夜濾網",
+            "🛡️ 4. 跳空止損與交易復盤",
+            "📚 5. 六大師指標字典",
+            "✅ 6. 落單前 8 點檢查"
         ])
-        st.dataframe(futu_map_df, use_container_width=True, hide_index=True)
 
-    with t_tab2:
-        st.markdown("### 🏆 第二部分：Martin Luk (@martinlukkt) USIC 冠軍戰法與兩種模式靈活切換")
-        st.markdown(
-            "香港科大 (HKUST) 學生 **Martin Luk (@martinlukkt)** 於 2024 年及 2025 年連續參加 US Investing Championship (USIC)，"
-            "分別創下 **+283%** 及 **+969.8%（歷史最高紀錄之一）** 的驚人成績。本系統已將其公開專訪與教學影片的核心武器 100% 量化植入："
-        )
-        ml_col1, ml_col2 = st.columns(2)
-        with ml_col1:
-            st.success(
-                "#### 🔥 Martin Luk 五大實戰支柱\n"
-                "1. **只做高 ADR% 的市場領頭羊 (Leader Scanner)**：\n"
-                "   - 篩選過去 **1M / 3M / 6M 漲幅最強** 的領先股，且要求 **20日平均日內波幅 (ADR%)** 美股 `≥ 4.2%`、港股 `≥ 3.0%`。股性夠活先有爆發力！\n"
-                "2. **9 / 21 / 50 EMA 動能雲帶 + 前高錨定 AVWAP**：\n"
-                "   - 多頭強勢股必須維持 `Close > 9 EMA > 21 EMA > 50 EMA` 且均線向上發散。\n"
-                "   - 同時由 **前波段高點 (High60 / 52W High)** 及 **跳空缺口 (EP)** 畫出錨定成交量加權均價 (**AVWAP**)，掌握機構真實平均持倉成本。\n"
-                "3. **兩大王牌買點：多重支撐回踩 (Pullback) & Inside Day 突破**：\n"
-                "   - **回踩買點**：股價回落測試 `9/21 EMA + 前高 AVWAP + 前突破頸線` 至少兩重支撐匯聚，日內洗盤跌穿後收盤強勢收回 (**Undercut & Reclaim**)。\n"
-                "   - **突破買點**：在 9/21 EMA 旁形成 **Inside Day (內包日)** 或波幅 `< 0.6x ADR%` 的極窄幅壓縮日，隔日升穿前日高點 (PDH) 觸發！"
-            )
-        with ml_col2:
-            st.warning(
-                "#### ⚖️ 拋物線 R 倍數效應與資金曲線反饋風控\n"
-                "4. **止損寬度與 R 倍數的拋物線關係 (Parabolic R-Multiple)**：\n"
-                "   - 同樣捕捉一段 `+30%` 的波段升幅：若止損寬度係 `10%`，你只賺到 **`3R`**；若透過支撐匯聚將止損收緊至 `3%`，同樣 `+30%` 升幅會變成 **`10R`**；若在 Inside Day 將止損壓至 `1.5%`，更可高達 **`20R`**！\n"
-                "5. **0.5% 基準風險 + 資金曲線反饋 (Equity Curve Feedback)**：\n"
-                "   - 正常期每筆只冒總資金 **`0.5%`** 風險；連敗 `≥ 2` 筆或回撤 `≥ 6%` 自動減半至 **`0.25%`**；連敗 `≥ 4` 筆觸發 **`🛑 NO TRADE TODAY`** 強制冷靜。\n"
-                "   - **防黑天鵝單倉上限**：高波動股 (`ADR% ≥ 6%`) 單一持倉市值嚴禁超過總資金 **`25%`**（大型股不超過 **`35%`**），防止隔夜跳空暴跌重創帳戶！"
-            )
+        # ---------------- TAB 1 ----------------
+        with t_tab1:
+            _t1_html = """
+            <div class="sq-guide-grid-2">
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">Step 1</span> 先看大市五態與板塊羅盤</div>
+                    <ul class="sq-guide-list">
+                        <li>大市劃分為 <b>確認牛市、見底反攻、中期回調、高位派發、確認熊市</b> 五種狀態。</li>
+                        <li>系統預設保留做多與做空名單，方便在大市轉勢初期捕捉率先走強的領頭股。</li>
+                        <li>配合「板塊相對強弱總覽」，優先聚焦資金淨流入的強勢行業。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">Step 2</span> 掃描核心＋動態混合池</div>
+                    <ul class="sq-guide-list">
+                        <li>混合池結合龍頭底座、富途流動性初篩（過濾仙股）與板塊輪動補充股。</li>
+                        <li>表格左起優先顯示入場時機、姊妹股共振、評級、盈虧比與 T+1 動能。</li>
+                        <li>直接勾選方格或選擇分組，即可把標的歸類到自選名單。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">Step 3</span> 同頁診斷與多股同列</div>
+                    <ul class="sq-guide-list">
+                        <li>點擊「本頁診斷」會在同一個分頁內無縫切換至個股深度分析。</li>
+                        <li>於自選名單展開「多股同列」，港股自動置頂恒指／DXY／人民幣，美股自動置頂納指／美債息／VIX。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">Step 4</span> 富途同步、風格與手機版</div>
+                    <ul class="sq-guide-list">
+                        <li>開啟 FutuOpenD 可一鍵同步港美持倉與跨年歷史成交，並自動進行真 FIFO 配對。</li>
+                        <li>未開 OpenD 亦可透過 CSV / Excel 匯入完整歷史交易紀錄。</li>
+                        <li>左側欄提供 <b>經典深藍、簡約純白、暗黑夜盤、翡翠商務</b> 4 套風格；手機開啟可切換卡片與單欄模式。</li>
+                    </ul>
+                </div>
+            </div>
+            """
+            st.markdown(" ".join(ln.strip() for ln in _t1_html.splitlines() if ln.strip()), unsafe_allow_html=True)
 
-        st.markdown("#### 🔄 點樣喺網頁左側欄靈活切換「中線波段」與「Martin Luk 短線緊密」模式？")
-        mode_cmp_df = pd.DataFrame([
-            {
-                "比較維度": "側欄選擇名稱",
-                "🌊 模式 A：中線波段標準 (系統預設)": "🌊 中線波段標準 (持倉數週至1-2個月｜防洗盤 ≥1.2x ATR / 3.2%~7.8%)",
-                "⚡ 模式 B：Martin Luk 短線緊密模式": "⚡ 短線緊密模式 (Martin Luk 日內/極短線｜≥0.45x ATR / 1.2%~5.2%)"
-            },
-            {
-                "比較維度": "適合邊類投資者？",
-                "🌊 模式 A：中線波段標準 (系統預設)": "返工忙碌、唔想成日睇盤、希望食盡幾星期至 1~2 個月大波段嘅投資者",
-                "⚡ 模式 B：Martin Luk 短線緊密模式": "可每日睇盤或設條件單、追求極高盈虧比 (5R~15R) 同快速資金周轉嘅進階交易者"
-            },
-            {
-                "比較維度": "止損位 (SL) 設定邏輯",
-                "🌊 模式 A：中線波段標準 (系統預設)": "設於 20MA/21EMA 或 10~20日箱體底下方 0.35~0.6x ATR，距離買入位至少 3.2%~7.8%，防日常洗盤",
-                "⚡ 模式 B：Martin Luk 短線緊密模式": "直接設於回踩當日或 Inside Day 當日低點 (LOD) 下方微幅緩衝，止損極緊 (約 1.2%~5.2%)"
-            },
-            {
-                "比較維度": "移至保本價與尾倉跟蹤",
-                "🌊 模式 A：中線波段標準 (系統預設)": "持倉滿 5 日且浮盈 ≥1R 移至富途打和價；TP1 減半後尾倉沿 20MA/21EMA 跟蹤",
-                "⚡ 模式 B：Martin Luk 短線緊密模式": "持倉滿 2 日且脫離成本即移至保本；大漲過熱時沿 9 EMA 緊密鎖潤"
-            }
-        ])
-        st.dataframe(mode_cmp_df, use_container_width=True, hide_index=True)
+            st.markdown("#### 📱 系統信號與富途掛單對照表")
+            futu_map_df = pd.DataFrame([
+                {
+                    "系統進場類型": "⚡ 即時入場 (突破 / 支撐確認)",
+                    "適用市況": "現價貼近樞紐帶 (-0.5% ~ +2.5%) 或回踩 10/20MA 止跌，且未過熱",
+                    "富途掛單方式": "限價單 (Limit) 貼近現價或 15m VWAP",
+                    "執行紀律": "避開開盤首 15 分鐘亂掃，守穩 VWAP 才成交"
+                },
+                {
+                    "系統進場類型": "🎯 突破觸發單 (Stop-Buy)",
+                    "適用市況": "處於 VCP / Inside Day / 均線壓縮平台，尚未升穿樞紐頂",
+                    "富途掛單方式": "條件單 → 突破買入（設於建議進場價）",
+                    "執行紀律": "未突破不提早入場，資金零空轉"
+                },
+                {
+                    "系統進場類型": "⏳ 回調低吸單 (Limit-Buy)",
+                    "適用市況": "昨夜急拉過熱 (RSI2 ≥ 86) 或偏離樞紐 > 3.2%",
+                    "富途掛單方式": "限價單 / 條件單 → 回落買入",
+                    "執行紀律": "寧可踏空絕不追高，等縮量回踩均線承接"
+                },
+                {
+                    "系統進場類型": "🔴 破底／反彈沽空單",
+                    "適用市況": "股價處於 50MA / 200MA 下方空頭格局，且無極端超賣",
+                    "富途掛單方式": "條件單 → 跌破賣出 / 限價沽空",
+                    "執行紀律": "Stage 2 嚴禁做空；到 TP1 先回補一半防軋空"
+                }
+            ])
+            st.dataframe(futu_map_df, use_container_width=True, hide_index=True)
 
-    with t_tab3:
-        st.markdown("### 📐 第三部分：J Law (@jlawstock) × LEI (@TheMarketMemo) 指標活學活用字典")
-        st.markdown("喺 **「📊 2. 個股量化分析與技術診斷」** 頁面入面，每個儀表板都有明確嘅實戰意義，以下係快速解讀口訣：")
+        # ---------------- TAB 2 ----------------
+        with t_tab2:
+            _t2_html = """
+            <div class="sq-guide-grid-2">
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">港股軌道</span> 跨小阻力取主波段</div>
+                    <ul class="sq-guide-list">
+                        <li><b>考量成本</b>：港股有雙邊印花稅與每手股數門檻，單手倉位不宜過早拆賣。</li>
+                        <li><b>目標投射</b>：若近期小阻力不足 2.0R，自動跨過小阻力並投射 +9% ~ +14% 主升浪目標。</li>
+                        <li><b>推保本節奏</b>：升穿 +1.25R 且站穩 +0.8R 以上再推至含費打和價，減少首日被洗出。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">美股軌道</span> 2R 減半＋21EMA 奔跑</div>
+                    <ul class="sq-guide-list">
+                        <li><b>靈活分批</b>：美股零印花稅且 1 股可拆賣，突破後常見 +6% ~ +8.5% 回抽。</li>
+                        <li><b>分批鎖利</b>：到達 2.0R ~ 2.4R 先賣出 50% 鎖定利潤，餘倉跟隨 21EMA 追蹤趨勢。</li>
+                        <li><b>精準控險</b>：以等風險公式精確反推股數，將單筆止損鎖定在預設上限內。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">紅綠燈</span> 滿倉本金 × HK$1,000 三大方案</div>
+                    <ul class="sq-guide-list">
+                        <li>當真實結構止損超過 4.8%，切忌強行收窄止損到噪音區，請改選以下三案之一：</li>
+                        <li><b>方案 ① 滿倉低吸價</b>：維持滿倉與結構止損，反推安全掛單價等回踩。</li>
+                        <li><b>方案 ② 現價等風險縮倉</b>：按比例縮細股數，跌穿止損剛好只蝕 HK$1,000。</li>
+                        <li><b>方案 ③ 底倉＋浮盈加滿</b>：先入等風險底倉，升穿 +0.8R 推保本後再加滿。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">防火牆</span> 組合總熱度與板塊集中度</div>
+                    <ul class="sq-guide-list">
+                        <li><b>總在險熱度</b>：所有未推保本持倉的合計潛在虧損，建議控制在 <b>≤ 5R ~ 6R</b>。</li>
+                        <li><b>同板塊警示</b>：同時持有過多同主題標的易遇跳空共振，系統會自動發出集中度提示。</li>
+                        <li><b>虧損禁溝貨</b>：現價低於成本價或跌穿 10MA 時，嚴格禁止向下攤平補倉。</li>
+                    </ul>
+                </div>
+            </div>
+            """
+            st.markdown(" ".join(ln.strip() for ln in _t2_html.splitlines() if ln.strip()), unsafe_allow_html=True)
 
-        dict_c1, dict_c2 = st.columns(2)
-        with dict_c1:
-            st.markdown(
-                "#### 1️⃣ ⏱️ 斜率時鐘智能診斷（LEI 趨勢姿態）\n"
-                "- **📈 2點鐘方向（穩定上揚 — 最佳買入姿態）**：\n"
-                "  20 / 50 / 120 MA 多頭平行發散向上。此時每次縮量回踩 20MA 或 21EMA 都係高勝率「吃回撤」買點！\n"
-                "- **↔️ 3點鐘方向（橫盤壓縮 — 突破埋伏姿態）**：\n"
-                "  六條均線（20/60/120 MA+EMA）極度黏合（差距 `< 2.5%`），代表籌碼高度集中，請喺箱體頂設 `Stop-Buy` 突破單埋伏。\n"
-                "- **🚀 12點鐘方向（加速過熱 Climax Run — 嚴禁追高）**：\n"
-                "  股價遠離 50MA 超過 25% 且 RSI 極度超買。此時絕不開新倉，已持倉者一旦跌破 **9 EMA** 即刻鎖潤離場！\n\n"
-                "#### 2️⃣ 🧱 均線抵扣價分析（LEI 防假跌破神技）\n"
-                "- **原理**：20MA 今日嘅升跌，取決於「今日收盤價」同「20個交易日前嘅收盤價（即抵扣價）」邊個高。\n"
-                "- **實戰用法**：當股價短暫跌穿 20MA 時唔使驚！只要睇診斷頁顯示 **「✅ 現價 > 20日抵扣價 (均線向上)」**，而且未來 5~10 日抵扣價正快速下移，代表呢次跌破只係**假跌破洗盤**，均線依然會向上托住股價！"
-            )
-        with dict_c2:
-            st.markdown(
-                "#### 3️⃣ 🧱 LEI 頂底構造與 2B 破底翻 / 假突破\n"
-                "- **🟢 2B 破底翻 (Bullish 2B)**：股價短暫跌穿前波低點引誘散戶止損，但隨即收陽強勢站回前低之上，屬極高盈虧比嘅底部反轉買點。\n"
-                "- **🟢 底構造確認 (HL+HH)**：經過 K 線包含關係合併後，確認出現「更高低點 + 更高高點」轉折。\n"
-                "- **🔴 頂構造 / 2B 假突破**：升穿前高後迅速殺回前高之下收陰，屬機構誘多派發信號，應立即減倉或結合空頭條件沽空。\n\n"
-                "#### 4️⃣ 💎 J Law META 五大優勢與大戶出貨日預警\n"
-                "- **💎 META 多重優勢 (`≥ 3/5` 為佳)**：綜合評估 (1) Power Trend 強勁趨勢、(2) S/R 阻力轉支撐互換區或 `<5.5%` 緊密平台、(3) 10/20MA 保護、(4) 縮量洗盤/底構造、(5) 30週線向上且空間 `≥ 1.8R`。湊齊越多優勢，勝率越高！\n"
-                "- **🚨 大戶出貨日 (Distribution Days)**：近 20 個交易日內如果出現 **4 次或以上**「放量滯漲或放量下跌」（已自動排除四巫日結算量），圖表會標示紫色倒三角 `🔻`，代表機構正在暗中派發，必須提高警覺！"
-            )
+        # ---------------- TAB 3 ----------------
+        with t_tab3:
+            _t3_html = """
+            <div class="sq-guide-grid-2">
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">24h 監測</span> 雙軌報價與防錯價過濾</div>
+                    <ul class="sq-guide-list">
+                        <li><b>日線零污染</b>：日線 K 線保留純正規盤（RTH），確保均線、ATR 與 VCP 結構準確。</li>
+                        <li><b>擴展時段疊加</b>：即時顯示盤前、盤後與夜盤報價、區間高低點及擴展 VWAP。</li>
+                        <li><b>過濾針尖毛刺</b>：自動剔除成交量 &lt; 50 股或偏離 &gt; 2.5% 之薄市異常報價。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">T+1 過濾</span> 防隔夜急拉／急跌反轉</div>
+                    <ul class="sq-guide-list">
+                        <li><b>防追高</b>：昨夜急拉 ≥ 1.25×ATR、連漲 ≥ 3 日或 RSI(2) ≥ 86 時，改等回踩 10/21EMA 低吸。</li>
+                        <li><b>防追空</b>：昨夜急挫 ≤ -1.20×ATR 或 RSI(2) ≤ 15 時，禁止地板追空，改等反彈受阻。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">開盤窗</span> 掃昨收 PDC 與 15m ORB</div>
+                    <ul class="sq-guide-list">
+                        <li><b>吸針掃流型（約 68%）</b>：開盤首 15–30 分鐘先下探昨收或盤前低點，宜待開盤後 30–75 分鐘站回 VWAP 右側入場。</li>
+                        <li><b>強勢缺口型（約 32%）</b>：首 15 分鐘穩守 VWAP 之上，可於升穿 15m ORB 高點先建半倉。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">港股開盤</span> 隔夜期貨與 ADR 參考</div>
+                    <ul class="sq-guide-list">
+                        <li>整合 ES=F、NQ=F、KWEB、FXI、EWH 及主要港股 ADR 折合價。</li>
+                        <li>僅作 09:30 開市跳空風險預警與防高開低走參考，切忌單憑 ADR 急升市價高追。</li>
+                    </ul>
+                </div>
+            </div>
+            """
+            st.markdown(" ".join(ln.strip() for ln in _t3_html.splitlines() if ln.strip()), unsafe_allow_html=True)
 
-    with t_tab4:
-        st.markdown("### ✅ 第四部分：每日 10 分鐘實戰打卡清單 (落單前互動檢查)")
-        st.markdown("每次喺富途牛牛落單買入或沽空前，請逐項剔選以下 6 個檢查點，系統會即時評估你呢筆交易嘅準備度：")
+        # ---------------- TAB 4 ----------------
+        with t_tab4:
+            _t4_html = """
+            <div class="sq-guide-grid-3">
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">Tier 1</span> 輕度跳空（≤ 1×ATR / ≤ 3%）</div>
+                    <ul class="sq-guide-list">
+                        <li>忌於開盤首 5 分鐘恐慌市價斬倉。</li>
+                        <li>改守首 15–30 分鐘低點（<b>ORL</b>）為最後防線，反抽乏力或跌穿 ORL 即果斷離場。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">Tier 2</span> 中度跳空（1–2×ATR / 3–6%）</div>
+                    <ul class="sq-guide-list">
+                        <li>開市回穩後先 <b>減倉 50%</b> 鎖定風險。</li>
+                        <li>剩餘 50% 倉位嚴守首 15 分鐘 ORL，跌穿立即全清。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">Tier 3</span> 極端跳空（&gt; 2×ATR / &gt; 6%）</div>
+                    <ul class="sq-guide-list">
+                        <li>已大幅突破 1R 風險上限，<b>嚴禁溝貨攤平</b>。</li>
+                        <li>優先清倉止血，並啟動當日新開倉冷靜期。</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="sq-guide-grid-2">
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">SAR 鐵律</span> 止損後反手三大條件</div>
+                    <ul class="sq-guide-list">
+                        <li><b>生命線破位</b>：多翻空必須實質跌穿 50MA；空翻多須放量收復 20MA 及 50MA。</li>
+                        <li><b>量能實體確認</b>：成交量放大 (≥ 1.28x) 且收盤貼近極端位，無長反方向影線。</li>
+                        <li><b>避開極端區</b>：RSI(2) 未跌破 16（防追空）且未升破 85（防追多），否則只平倉不反手。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">全歷史復盤</span> 六維持倉監控 × 真 FIFO</div>
+                    <ul class="sq-guide-list">
+                        <li>自動區分 <b>指數／行業 ETF、港美做多、港美做空</b>，支援手動校正方向。</li>
+                        <li>真 FIFO 佇列支援分批減倉合併計算，保留原始開倉日與加權均價。</li>
+                        <li>自動追蹤賣出後 <b>T+5 / T+10 / T+20</b> 走勢，檢視止損救命或賣飛情況。</li>
+                    </ul>
+                </div>
+            </div>
+            """
+            st.markdown(" ".join(ln.strip() for ln in _t4_html.splitlines() if ln.strip()), unsafe_allow_html=True)
 
-        chk_1 = st.checkbox("1. 【大盤與寬度過濾】已確認大盤無見頂出貨警報，且無「指數反彈逼近下彎 21/50 EMA」假突破警告（如有警告已將風險減半至 0.25%）。", key="tut_chk_1")
-        chk_2 = st.checkbox("2. 【領頭羊與排名確認】此標的來自雷達「🏆 今日優先行動精選榜 (#1 ~ #5)」，且 ADR% 波幅達標、RS 相對強弱跑贏大盤。", key="tut_chk_2")
-        chk_3 = st.checkbox("3. 【真實結構盈虧比 ≥ 1.8R】已查看個股診斷頁，確認上方第一阻力位 (TP1) 距離建議買入位至少有 1.8R 以上獲利空間。", key="tut_chk_3")
-        chk_4 = st.checkbox("4. 【拒絕盲目市價高追】已分清此單屬「Stop-Buy 突破觸發單」定係「Limit-Buy 回踩低吸單」，並按建議進場價掛單而非市價亂追。", key="tut_chk_4")
-        chk_5 = st.checkbox("5. 【0.5% 風控與港股手數檢查】已用「Martin Luk 風控計算器」算出準確手數，確認含富途雙邊費用後實質風險不超標，且單倉市值 ≤ 25%~35%。", key="tut_chk_5")
-        chk_6 = st.checkbox("6. 【預設結構止損與減倉計劃】已記下紅線結構止損價 (SL) 及綠線第一目標價 (TP1)，承諾跌穿 SL 無條件止損、觸及 TP1 減倉一半並移至富途打和價。", key="tut_chk_6")
+        # ---------------- TAB 5 ----------------
+        with t_tab5:
+            _t5_html = """
+            <div class="sq-guide-grid-2">
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">SEPA</span> Mark Minervini 超級績效</div>
+                    <ul class="sq-guide-list">
+                        <li><b>VCP ＋ 3-C 買點</b>：Low Cheat 止損僅 3%~4.5%，最切合 HK$1,000 滿倉風控。</li>
+                        <li><b>4 組小篩網重疊</b>：RS 抗跌、VCP 收斂、口袋支點、高彈性趨勢，重疊 3/4 以上最優先。</li>
+                        <li><b>網球強彈 &amp; Squat</b>：回踩後速彈收復 9EMA 屬強承接；放量留上影未破止損時觀察 1–2 日。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">階段與動能</span> Weinstein × Pring KST</div>
+                    <ul class="sq-guide-list">
+                        <li><b>Weinstein 四階段</b>：以 150MA 定位，重點做 Stage 1→2 突破與 Stage 2 主升，Stage 4 只順勢空。</li>
+                        <li><b>Pring KST 確然動能</b>：金叉且峰谷抬高確認趨勢共振；創高而 KST 下彎為頂背馳警號。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">結構與共振</span> Martin Luk × J Law × LEI</div>
+                    <ul class="sq-guide-list">
+                        <li><b>Martin Luk</b>：9/21/50 EMA 雲帶＋前高錨定 AVWAP 低吸，連敗自動縮倉保護資金曲線。</li>
+                        <li><b>J Law META</b>：同板塊姊妹股共振加分；近 20 日出貨日 ≥ 4 次（排除四巫日）亮燈預警。</li>
+                        <li><b>LEI 斜率時鐘</b>：2 點鐘回踩買、3 點鐘設突破單、12 點鐘鎖利，配合抵扣價與 2B 破底翻。</li>
+                    </ul>
+                </div>
+                <div class="sq-guide-card">
+                    <div class="sq-guide-card-title"><span class="sq-guide-badge">籌碼與催化</span> VBP × 新聞量價背馳</div>
+                    <ul class="sq-guide-list">
+                        <li><b>VBP 籌碼分佈</b>：站上 POC 且上方處於 LVN 真空區最易加速；受阻 HVN 套牢峰宜等消化。</li>
+                        <li><b>新聞量價交叉</b>：利好消息卻放量收陰即警報「利好出貨」；業績前 7 日嚴禁無利潤墊重倉。</li>
+                    </ul>
+                </div>
+            </div>
+            """
+            st.markdown(" ".join(ln.strip() for ln in _t5_html.splitlines() if ln.strip()), unsafe_allow_html=True)
 
-        passed_checks = sum([chk_1, chk_2, chk_3, chk_4, chk_5, chk_6])
-        st.progress(passed_checks / 6.0)
-        if passed_checks == 6:
-            st.success("🎉 **【滿分 6/6｜完美符合機構級交易紀律】** 你已完成所有風控與結構確認，可以按計劃於富途牛牛執行掛單！")
-        elif passed_checks >= 4:
-            st.warning(f"⚠️ **【已完成 {passed_checks}/6 項檢查】** 尚有 {6 - passed_checks} 項關鍵風控未確認，建議補齊檢查後再落單，切勿衝動交易。")
-        else:
-            st.error(f"🛑 **【僅完成 {passed_checks}/6 項檢查】** 準備不足！請先透過「1. 掃描雷達」與「2. 個股診斷」完成結構、盈虧比與倉位試算。")
+        # ---------------- TAB 6 ----------------
+        with t_tab6:
+            st.markdown("#### ✅ 落單前 8 點風控檢查清單")
+            st.caption("每次準備於富途落單前逐項核對（僅屬系統紀律檢核，不構成買賣建議）：")
 
+            c_left, c_right = st.columns(2)
+            with c_left:
+                chk_1 = st.checkbox("1. 【大市與板塊】已確認大市狀態及所選股屬資金流入板塊。", key="tut_chk_1")
+                chk_2 = st.checkbox("2. 【財報黑天鵝】未來 7 日無業績公布，且無配股／利好出貨背馳。", key="tut_chk_2")
+                chk_3 = st.checkbox("3. 【T+1 隔夜濾網】做多無昨夜過熱 (RSI2 < 86)，做空非 Stage 2 禁空股。", key="tut_chk_3")
+                chk_4 = st.checkbox("4. 【真實盈虧比】確認港美雙軌目標價達 1.8R 以上，上方無沉重 HVN 壓制。", key="tut_chk_4")
+            with c_right:
+                chk_5 = st.checkbox("5. 【進場紀律】分清突破單／回調單，避開盤前薄市與開盤首 15 分鐘亂掃。", key="tut_chk_5")
+                chk_6 = st.checkbox("6. 【倉位與總熱度】含費實質止損 ≤ 單筆上限，且全組合未保本熱度 ≤ 6R。", key="tut_chk_6")
+                chk_7 = st.checkbox("7. 【止損與 ORL】已設「僅正規盤觸發」結構止損，並知悉跳空 ORL 三級方案。", key="tut_chk_7")
+                chk_8 = st.checkbox("8. 【成交與復盤】成交後鎖定開倉價，虧損不溝貨，平倉後寫入復盤日誌。", key="tut_chk_8")
+
+            passed_checks = sum([chk_1, chk_2, chk_3, chk_4, chk_5, chk_6, chk_7, chk_8])
+            st.progress(passed_checks / 8.0)
+            if passed_checks == 8:
+                st.success("🎉 **【滿分 8/8】** 所有風控項目已確認，可按既定計劃冷靜執行。")
+            elif passed_checks >= 5:
+                st.warning(f"⚠️ **【已完成 {passed_checks}/8 項】** 尚有 {8 - passed_checks} 項關鍵風控未核對，建議補齊後再決定。")
+            else:
+                st.error(f"🛑 **【僅完成 {passed_checks}/8 項】** 風控準備不足，請先完成個股診斷與倉位試算。")
 
 # ==========================================
 # 12. 模式 1：雷達
@@ -15463,205 +16643,211 @@ if mode == mode_options[0]:
     render_global_multi_timezone_clock_banner("mode1_radar")
     render_global_quick_guide_banner()
 
-    # [v59.2 核心追蹤池與全景掃描按鈕置頂顯眼區塊 — 保留 main25 所有優化，解決掃描按鈕被推落底部的問題]
-    render_color_zone_header(
-        "🚀 市場動能掃描",
-        "選擇掃描池或自選股分組，點擊右側按鈕開始篩選符合條件之標的。",
-        theme="blue"
-    )
-    _wl_pool_opts = [f"⭐ 自選類別：【{c}】({len(gl)}隻)" for c, gl in st.session_state.watchlist_dict.items() if len(gl) > 0]
-    _scan_top_c1, _scan_top_c2 = st.columns([3.2, 1.3])
-    with _scan_top_c1:
-        pool_choice = st.selectbox(
-            "🎯 選擇掃描池：",
-            [
-                "🔥 港股核心＋全市場動態掃描池 (約86隻｜含富途流動性初篩)",
-                "🔥 美股核心＋全市場動態掃描池 (約86隻｜跨板塊＋富途初篩)",
-                "🚀 超級績效・港股中小型高彈性潛力池 (30隻｜ADR 3.2%~7.5%)",
-                "🚀 超級績效・美股中小型高爆發潛力池 (30隻｜Minervini 高 RS)",
-                "📈 港股主流動能池 (63隻)",
-                "📈 美股主流動能池 (50隻)",
-                "🛡️ 港股高息防守池 (16隻)",
-            ] + _wl_pool_opts + [
-                "自訂名單 (從側欄載入)"
-            ],
-            key="mode1_top_pool_choice"
+    with section_zone_box("blue"):
+        # [v59.2 核心追蹤池與全景掃描按鈕置頂顯眼區塊 — 保留 main25 所有優化，解決掃描按鈕被推落底部的問題]
+        render_color_zone_header(
+            "🚀 市場動能掃描",
+            "選擇掃描池或自選股分組，點擊右側按鈕開始篩選符合條件之標的。",
+            theme="blue"
         )
-    target_pool = []
-    _is_hybrid_hk = ("港股核心＋全市場動態掃描池" in pool_choice)
-    _is_hybrid_us = ("美股核心＋全市場動態掃描池" in pool_choice)
-    if _is_hybrid_hk:
-        target_pool = list(dict.fromkeys(HK_MOMENTUM_POOL[:50] + HK_SECTOR_ROTATION_SUPPLEMENT_POOL))[:86]
-    elif _is_hybrid_us:
-        target_pool = list(dict.fromkeys(US_MOMENTUM_POOL[:46] + US_SECTOR_ROTATION_SUPPLEMENT_POOL))[:86]
-    elif pool_choice.startswith("⭐ 自選類別：【"):
-        _chosen_wl_cat = pool_choice.split("【", 1)[1].split("】", 1)[0]
-        target_pool = list(st.session_state.watchlist_dict.get(_chosen_wl_cat, []))
-    elif "港股中小型" in pool_choice:
-        target_pool = HK_SMALL_MID_SUPER_POOL
-    elif "美股中小型" in pool_choice:
-        target_pool = US_SMALL_MID_SUPER_POOL
-    elif "港股主流動能池" in pool_choice:
-        target_pool = HK_MOMENTUM_POOL
-    elif "高息防守" in pool_choice:
-        target_pool = HK_DEFENSIVE_DIVIDEND_POOL
-    elif "美股" in pool_choice:
-        target_pool = US_MOMENTUM_POOL
-    else:
-        if custom_tickers_raw:
-            target_pool = [x.strip().upper() for x in re.split(r'[\s,]+', custom_tickers_raw) if x.strip()]
+        _wl_pool_opts = [f"⭐ 自選類別：【{c}】({len(gl)}隻)" for c, gl in st.session_state.watchlist_dict.items() if len(gl) > 0]
+        _scan_top_c1, _scan_top_c2 = st.columns([3.2, 1.3])
+        with _scan_top_c1:
+            pool_choice = st.selectbox(
+                "🎯 選擇掃描池：",
+                [
+                    "🔥 港股核心＋全市場動態掃描池 (約86隻｜含富途流動性初篩)",
+                    "🔥 美股核心＋全市場動態掃描池 (約86隻｜跨板塊＋富途初篩)",
+                    "🚀 超級績效・港股中小型高彈性潛力池 (30隻｜ADR 3.2%~7.5%)",
+                    "🚀 超級績效・美股中小型高爆發潛力池 (30隻｜Minervini 高 RS)",
+                    "📈 港股主流動能池 (63隻)",
+                    "📈 美股主流動能池 (50隻)",
+                    "🛡️ 港股高息防守池 (16隻)",
+                ] + _wl_pool_opts + [
+                    "自訂名單 (從側欄載入)"
+                ],
+                key="mode1_top_pool_choice"
+            )
+        target_pool = []
+        _is_hybrid_hk = ("港股核心＋全市場動態掃描池" in pool_choice)
+        _is_hybrid_us = ("美股核心＋全市場動態掃描池" in pool_choice)
+        if _is_hybrid_hk:
+            target_pool = list(dict.fromkeys(HK_MOMENTUM_POOL[:50] + HK_SECTOR_ROTATION_SUPPLEMENT_POOL))[:86]
+        elif _is_hybrid_us:
+            target_pool = list(dict.fromkeys(US_MOMENTUM_POOL[:46] + US_SECTOR_ROTATION_SUPPLEMENT_POOL))[:86]
+        elif pool_choice.startswith("⭐ 自選類別：【"):
+            _chosen_wl_cat = pool_choice.split("【", 1)[1].split("】", 1)[0]
+            target_pool = list(st.session_state.watchlist_dict.get(_chosen_wl_cat, []))
+        elif "港股中小型" in pool_choice:
+            target_pool = HK_SMALL_MID_SUPER_POOL
+        elif "美股中小型" in pool_choice:
+            target_pool = US_SMALL_MID_SUPER_POOL
+        elif "港股主流動能池" in pool_choice:
+            target_pool = HK_MOMENTUM_POOL
+        elif "高息防守" in pool_choice:
+            target_pool = HK_DEFENSIVE_DIVIDEND_POOL
+        elif "美股" in pool_choice:
+            target_pool = US_MOMENTUM_POOL
         else:
-            st.warning("⚠️ 自訂名單為空，請在左側欄位輸入股票代碼！")
+            if custom_tickers_raw:
+                target_pool = [x.strip().upper() for x in re.split(r'[\s,]+', custom_tickers_raw) if x.strip()]
+            else:
+                st.warning("⚠️ 自訂名單為空，請在左側欄位輸入股票代碼！")
 
-    with _scan_top_c2:
-        st.write("")
-        _btn_lbl_cnt = "約86隻" if (_is_hybrid_hk or _is_hybrid_us) else f"{len(target_pool)}隻"
-        _trigger_full_scan = st.button(
-            f"🚀 開始掃描 ({_btn_lbl_cnt})",
-            type="primary",
-            use_container_width=True,
-            key="btn_mode1_top_full_scan"
-        )
-
-    render_sector_rs_compass_panel(context_key="mode1_top")
-
-    if _trigger_full_scan and target_pool:
-        _hybrid_src_map: Dict[str, str] = {}
-        _actual_scan_pool = list(target_pool)
-        if _is_hybrid_hk or _is_hybrid_us:
-            _h_mkt = "HK" if _is_hybrid_hk else "US"
-            _f_prefs_m1 = persistent_data.get("futu_bridge_prefs", {})
-            _f_en = bool(st.session_state.get("chk_enable_futu_opend_bridge", _f_prefs_m1.get("enabled", False)))
-            _f_host = str(st.session_state.get("inp_futu_host", _f_prefs_m1.get("host", "127.0.0.1")) or "127.0.0.1")
-            _f_port = int(st.session_state.get("inp_futu_port", _f_prefs_m1.get("port", 11111)) or 11111)
-            _actual_scan_pool, _hybrid_src_map, _hybrid_msg = build_core_satellite_hybrid_pool(
-                market_code=_h_mkt,
-                futu_host=_f_host,
-                futu_port=_f_port,
-                futu_enabled=_f_en,
-                target_total=86
+        with _scan_top_c2:
+            st.write("")
+            _btn_lbl_cnt = "約86隻" if (_is_hybrid_hk or _is_hybrid_us) else f"{len(target_pool)}隻"
+            _trigger_full_scan = st.button(
+                f"🚀 開始掃描 ({_btn_lbl_cnt})",
+                type="primary",
+                use_container_width=True,
+                key="btn_mode1_top_full_scan"
             )
-            st.info(_hybrid_msg)
-        with st.spinner(f"掃描中 (正在分析 {len(_actual_scan_pool)} 隻標的，請稍候)..."):
-            df_res = run_all_inclusive_radar(_actual_scan_pool)
-            if df_res is not None and _hybrid_src_map and "代碼" in df_res.columns:
-                try:
-                    df_res = df_res.copy()
-                    df_res.insert(1, "池來源", df_res["代碼"].map(lambda x: _hybrid_src_map.get(str(x).strip(), "🏛️ 核心池")))
-                except Exception:
-                    pass
-            if df_res is not None:
-                if "自訂" in pool_choice:
-                    dict_key = "自訂"
-                elif "港股" in pool_choice:
-                    dict_key = "港股"
-                else:
-                    dict_key = "美股"
 
-                st.session_state.radar_results[dict_key] = df_res
-                mark_radar_cache_updated(persistent_data, dict_key)
-                persistent_data.setdefault("radar_breadth_stats", {})[dict_key] = {
-                    "pct_above_50ma": df_res.attrs.get("pct_above_50ma", 0.0),
-                    "pct_above_200ma": df_res.attrs.get("pct_above_200ma", 0.0)
-                }
+        render_sector_rs_compass_panel(context_key="mode1_top")
 
-                active_df = df_res[df_res['交易方向'].astype(str).str.contains("做多|做空", na=False)].copy()
-                rs_map = dict(zip(active_df['代碼'], active_df['RS強度']))
-                warnings, corr_matrix = build_dynamic_correlation_report(
-                    list(active_df['代碼']),
-                    rs_map=rs_map,
-                    lookback=50,
-                    threshold=0.75
+        if _trigger_full_scan and target_pool:
+            _hybrid_src_map: Dict[str, str] = {}
+            _actual_scan_pool = list(target_pool)
+            if _is_hybrid_hk or _is_hybrid_us:
+                _h_mkt = "HK" if _is_hybrid_hk else "US"
+                _f_prefs_m1 = persistent_data.get("futu_bridge_prefs", {})
+                _f_en = bool(st.session_state.get("chk_enable_futu_opend_bridge", _f_prefs_m1.get("enabled", False)))
+                _f_host = str(st.session_state.get("inp_futu_host", _f_prefs_m1.get("host", "127.0.0.1")) or "127.0.0.1")
+                _f_port = int(st.session_state.get("inp_futu_port", _f_prefs_m1.get("port", 11111)) or 11111)
+                _actual_scan_pool, _hybrid_src_map, _hybrid_msg = build_core_satellite_hybrid_pool(
+                    market_code=_h_mkt,
+                    futu_host=_f_host,
+                    futu_port=_f_port,
+                    futu_enabled=_f_en,
+                    target_total=86
                 )
+                st.info(_hybrid_msg)
+            with st.spinner(f"掃描中 (正在分析 {len(_actual_scan_pool)} 隻標的，請稍候)..."):
+                df_res = run_all_inclusive_radar(_actual_scan_pool)
+                if df_res is not None and _hybrid_src_map and "代碼" in df_res.columns:
+                    try:
+                        df_res = df_res.copy()
+                        df_res.insert(1, "池來源", df_res["代碼"].map(lambda x: _hybrid_src_map.get(str(x).strip(), "🏛️ 核心池")))
+                    except Exception:
+                        pass
+                if df_res is not None:
+                    if "自訂" in pool_choice:
+                        dict_key = "自訂"
+                    elif "港股" in pool_choice:
+                        dict_key = "港股"
+                    else:
+                        dict_key = "美股"
 
-                st.session_state.radar_correlation_warnings[dict_key] = warnings
-                st.session_state.radar_correlation_matrices[dict_key] = corr_matrix
-                with _CACHE_LOCK:
-                    _global_persistent_data["radar_results"][dict_key] = df_res
-                    _global_persistent_data["radar_correlation_warnings"][dict_key] = warnings
-                    _global_persistent_data["radar_correlation_matrices"][dict_key] = corr_matrix
-                    _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
-                    _global_persistent_data.setdefault("radar_breadth_stats", {}).update(persistent_data.get("radar_breadth_stats", {}))
-                    _global_persistent_data.setdefault("signal_lifecycle_store", {}).update(persistent_data.get("signal_lifecycle_store", {}))
-                save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
-            else:
-                st.error("⚠️ 未取得任何有效數據，所有股票可能未能符合當前系統的過濾標準。")
+                    st.session_state.radar_results[dict_key] = df_res
+                    mark_radar_cache_updated(persistent_data, dict_key)
+                    persistent_data.setdefault("radar_breadth_stats", {})[dict_key] = {
+                        "pct_above_50ma": df_res.attrs.get("pct_above_50ma", 0.0),
+                        "pct_above_200ma": df_res.attrs.get("pct_above_200ma", 0.0)
+                    }
 
-    render_atomic_caption("💡 提示：掃描結果表格內每隻股票旁均設有 **「☑️ 勾選」方格** 與 **「⭐ 點擊放入自選」下拉格**，點擊即可直接將股票歸類至你的自選股票名單！")
+                    active_df = df_res[df_res['交易方向'].astype(str).str.contains("做多|做空", na=False)].copy()
+                    rs_map = dict(zip(active_df['代碼'], active_df['RS強度']))
+                    warnings, corr_matrix = build_dynamic_correlation_report(
+                        list(active_df['代碼']),
+                        rs_map=rs_map,
+                        lookback=50,
+                        threshold=0.75
+                    )
 
-    # [v49.0 保留：雷達頁單股即時掃描 + 快速加入自選類別原子表單]
-    with st.form("form_radar_top_quick_bar", clear_on_submit=False):
-        rad_top_c1, rad_top_c2, rad_top_c3, rad_top_c4, rad_top_c5 = st.columns([2.1, 1.3, 1.2, 1.1, 1.1])
-        with rad_top_c1:
-            quick_search = st.text_input(
-                "🔍 即時個股掃描 / 快速加入自選 (支援代碼或中文名，多隻用逗號或空格分隔):",
-                placeholder="例: 700, 藥明生物, NVDA, TSLA",
-                key="radar_top_quick_inp"
-            ).strip()
-        with rad_top_c2:
-            _rad_top_cats = list(st.session_state.watchlist_dict.keys())
-            _rad_top_sel_cat = st.selectbox(
-                "⭐ 選擇目標自選類別:",
-                options=_rad_top_cats + ["➕ 新建自選類別..."],
-                key="radar_top_wl_cat"
-            )
-        with rad_top_c3:
-            _rad_top_new_cat = st.text_input(
-                "✏️ 新類別名稱 (若選新建):",
-                placeholder="輸入新類別名",
-                key="radar_top_new_cat_inp"
-            ).strip()
-        with rad_top_c4:
-            st.write("")
-            _btn_q_scan = st.form_submit_button("🔍 即時掃描股票", use_container_width=True)
-        with rad_top_c5:
-            st.write("")
-            _btn_q_add_wl = st.form_submit_button("⭐ 直接加入自選", use_container_width=True)
-
-        if _btn_q_add_wl:
-            _dest_c = _rad_top_new_cat if (_rad_top_sel_cat == "➕ 新建自選類別..." or _rad_top_new_cat) else _rad_top_sel_cat
-            if not quick_search:
-                st.warning("請先在左方輸入股票代碼或名稱！")
-            elif not _dest_c or _dest_c == "➕ 新建自選類別...":
-                st.warning("請輸入新自選類別名稱！")
-            else:
-                if _dest_c not in st.session_state.watchlist_dict:
-                    st.session_state.watchlist_dict[_dest_c] = []
-                _toks = [x.strip() for x in re.split(r'[\s,，、;；]+', quick_search) if x.strip()]
-                _added_tks = []
-                for _tk_raw in _toks:
-                    _fmt_t, _, _, _, _ = format_and_detect_market(_tk_raw)
-                    if _fmt_t not in st.session_state.watchlist_dict[_dest_c]:
-                        st.session_state.watchlist_dict[_dest_c].append(_fmt_t)
-                        _added_tks.append(f"{_fmt_t}({get_stock_name(_fmt_t)})")
-                save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
-                if _added_tks:
-                    st.toast(f"⭐ 已將 {', '.join(_added_tks)} 加入【{_dest_c}】！")
+                    st.session_state.radar_correlation_warnings[dict_key] = warnings
+                    st.session_state.radar_correlation_matrices[dict_key] = corr_matrix
+                    with _CACHE_LOCK:
+                        _global_persistent_data["radar_results"][dict_key] = df_res
+                        _global_persistent_data["radar_correlation_warnings"][dict_key] = warnings
+                        _global_persistent_data["radar_correlation_matrices"][dict_key] = corr_matrix
+                        _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
+                        _global_persistent_data.setdefault("radar_breadth_stats", {}).update(persistent_data.get("radar_breadth_stats", {}))
+                        _global_persistent_data.setdefault("signal_lifecycle_store", {}).update(persistent_data.get("signal_lifecycle_store", {}))
+                    save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
                 else:
-                    st.toast(f"ℹ️ 輸入的股票已在【{_dest_c}】中")
-                st.rerun()
-        elif _btn_q_scan and quick_search:
-            st.session_state["_active_quick_scan_query"] = quick_search
+                    st.error("⚠️ 未取得任何有效數據，所有股票可能未能符合當前系統的過濾標準。")
+
+        render_atomic_caption("💡 提示：掃描結果表格內每隻股票旁均設有 **「☑️ 勾選」方格** 與 **「⭐ 點擊放入自選」下拉格**，點擊即可直接將股票歸類至你的自選股票名單！")
+
+        # [v49.0 保留：雷達頁單股即時掃描 + 快速加入自選類別原子表單]
+        with st.form("form_radar_top_quick_bar", clear_on_submit=False):
+            rad_top_c1, rad_top_c2, rad_top_c3, rad_top_c4, rad_top_c5 = st.columns([2.1, 1.3, 1.2, 1.1, 1.1])
+            with rad_top_c1:
+                quick_search = st.text_input(
+                    "🔍 即時個股掃描 / 快速加入自選 (支援代碼或中文名，多隻用逗號或空格分隔):",
+                    placeholder="例: 700, 藥明生物, NVDA, TSLA",
+                    key="radar_top_quick_inp"
+                ).strip()
+            with rad_top_c2:
+                _rad_top_cats = list(st.session_state.watchlist_dict.keys())
+                _rad_top_sel_cat = st.selectbox(
+                    "⭐ 選擇目標自選類別:",
+                    options=_rad_top_cats + ["➕ 新建自選類別..."],
+                    key="radar_top_wl_cat"
+                )
+            with rad_top_c3:
+                _rad_top_new_cat = st.text_input(
+                    "✏️ 新類別名稱 (若選新建):",
+                    placeholder="輸入新類別名",
+                    key="radar_top_new_cat_inp"
+                ).strip()
+            with rad_top_c4:
+                st.write("")
+                _btn_q_scan = st.form_submit_button("🔍 即時掃描股票", use_container_width=True)
+            with rad_top_c5:
+                st.write("")
+                _btn_q_add_wl = st.form_submit_button("⭐ 直接加入自選", use_container_width=True)
+
+            if _btn_q_add_wl:
+                _dest_c = _rad_top_new_cat if (_rad_top_sel_cat == "➕ 新建自選類別..." or _rad_top_new_cat) else _rad_top_sel_cat
+                if not quick_search:
+                    st.warning("請先在左方輸入股票代碼或名稱！")
+                elif not _dest_c or _dest_c == "➕ 新建自選類別...":
+                    st.warning("請輸入新自選類別名稱！")
+                else:
+                    if _dest_c not in st.session_state.watchlist_dict:
+                        st.session_state.watchlist_dict[_dest_c] = []
+                    _toks = [x.strip() for x in re.split(r'[\s,，、;；]+', quick_search) if x.strip()]
+                    _added_tks = []
+                    for _tk_raw in _toks:
+                        _fmt_t, _, _, _, _ = format_and_detect_market(_tk_raw)
+                        if _fmt_t not in st.session_state.watchlist_dict[_dest_c]:
+                            st.session_state.watchlist_dict[_dest_c].append(_fmt_t)
+                            _added_tks.append(f"{_fmt_t}({get_stock_name(_fmt_t)})")
+                    save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+                    if _added_tks:
+                        st.toast(f"⭐ 已將 {', '.join(_added_tks)} 加入【{_dest_c}】！")
+                    else:
+                        st.toast(f"ℹ️ 輸入的股票已在【{_dest_c}】中")
+                    st.rerun()
+            elif _btn_q_scan and quick_search:
+                st.session_state["_active_quick_scan_query"] = quick_search
 
     _active_q_str = quick_search if quick_search else st.session_state.get("_active_quick_scan_query", "")
-    if _active_q_str:
-        _q_toks = [format_and_detect_market(x.strip())[0] for x in re.split(r'[\s,，、;；]+', _active_q_str) if x.strip()]
-        q_df = run_all_inclusive_radar(_q_toks)
-        if q_df is not None:
-            st.markdown("#### ⚡ 即時掃描結果 (點擊行內「🔍 本頁診斷」同頁看圖，或點擊「⭐ 點擊放入自選」/「☑️ 勾選」歸類)")
-            render_styled_dataframe(q_df, table_key="quick_search_radar_tbl")
-        st.markdown("---")
+    _has_any_radar_output = bool(_active_q_str) or any(
+        st.session_state.radar_results.get(_rk) is not None for _rk in ("港股", "美股", "自訂")
+    )
+    if _has_any_radar_output:
+        with section_zone_box("emerald"):
+            if _active_q_str:
+                _q_toks = [format_and_detect_market(x.strip())[0] for x in re.split(r'[\s,，、;；]+', _active_q_str) if x.strip()]
+                q_df = run_all_inclusive_radar(_q_toks)
+                if q_df is not None:
+                    st.markdown("#### ⚡ 即時掃描結果 (點擊行內「🔍 本頁診斷」同頁看圖，或點擊「⭐ 點擊放入自選」/「☑️ 勾選」歸類)")
+                    render_styled_dataframe(q_df, table_key="quick_search_radar_tbl")
+                st.markdown("---")
 
-    if st.session_state.radar_results.get("港股") is not None:
-        render_radar_results(st.session_state.radar_results["港股"], "### 📋 港股雷達結果 (暫存)", market_key="港股")
-        st.markdown("---")
+            if st.session_state.radar_results.get("港股") is not None:
+                render_radar_results(st.session_state.radar_results["港股"], "### 📋 港股雷達結果 (暫存)", market_key="港股")
+                st.markdown("---")
 
-    if st.session_state.radar_results.get("美股") is not None:
-        render_radar_results(st.session_state.radar_results["美股"], "### 📋 美股雷達結果 (暫存)", market_key="美股")
-        st.markdown("---")
+            if st.session_state.radar_results.get("美股") is not None:
+                render_radar_results(st.session_state.radar_results["美股"], "### 📋 美股雷達結果 (暫存)", market_key="美股")
+                st.markdown("---")
         
-    if st.session_state.radar_results.get("自訂") is not None:
-        render_radar_results(st.session_state.radar_results["自訂"], "### 📋 自訂名單雷達結果 (暫存)", market_key="自訂")
+            if st.session_state.radar_results.get("自訂") is not None:
+                render_radar_results(st.session_state.radar_results["自訂"], "### 📋 自訂名單雷達結果 (暫存)", market_key="自訂")
 
 # ==========================================
 # 🌟 13. 模式 3：自選股票名單 (仿富途牛牛旗艦系統 v49.0：支援自由拉動調位、多股同列九宮格、原子表單防吞鍵與本頁無縫診斷)
@@ -17946,23 +19132,24 @@ elif mode == mode_options[1]:
                     fig.add_hline(y=80, line_dash="dash", line_color="gray", row=6, col=1)
                     fig.add_hline(y=20, line_dash="dash", line_color="gray", row=6, col=1)
 
+                _mob_chart = is_mobile_mode_active()
                 fig.update_layout(
-                    height=1200, template="plotly_white", xaxis_rangeslider_visible=False,
-                    margin=dict(t=30, b=10, l=40, r=40), hovermode="x unified",
+                    height=820 if _mob_chart else 1200, template="plotly_white", xaxis_rangeslider_visible=False,
+                    margin=dict(t=42 if _mob_chart else 30, b=10, l=14 if _mob_chart else 40, r=14 if _mob_chart else 40), hovermode="x unified",
                     showlegend=True,
                     legend=dict(
                         orientation="h",
                         yanchor="bottom",
-                        y=1.05,
+                        y=1.02 if _mob_chart else 1.05,
                         xanchor="center",
                         x=0.5,
-                        itemwidth=40,
-                        bgcolor="rgba(245, 246, 249, 1)",
-                        bordercolor="#D3D3D3",
+                        itemwidth=30 if _mob_chart else 40,
+                        bgcolor="rgba(248, 250, 252, 0.96)",
+                        bordercolor="#E2E8F0",
                         borderwidth=1,
-                        font=dict(size=13, color="black"),
+                        font=dict(size=10.5 if _mob_chart else 12.5, color="#0F172A"),
                         traceorder="normal",
-                        title=dict(text="🎯 點擊下方指標名稱進行獨立開關：")
+                        title=dict(text="" if _mob_chart else "🎯 點擊指標開關：")
                     ),
                     paper_bgcolor='white', plot_bgcolor='white'
                 )
@@ -18013,7 +19200,7 @@ elif mode == mode_options[1]:
                 # st.plotly_chart(fig, use_container_width=True, config=plot_config, theme=None, key=f"main_chart_{target_ticker}")
                 # NEW: [v25.5 綁定 fmt_ticker 與 selected_interval，徹底消除手動輸入新代碼時之 Plotly DOM 衝突]
                 fig.update_layout(uirevision=f"{fmt_ticker}_{selected_interval}")
-                plot_config = dict(scrollZoom=True, displayModeBar=True, modeBarButtonsToRemove=['lasso2d', 'select2d'], displaylogo=False)
+                plot_config = dict(scrollZoom=(not is_mobile_mode_active()), displayModeBar=(not is_mobile_mode_active()), modeBarButtonsToRemove=['lasso2d', 'select2d'], displaylogo=False)
                 st.plotly_chart(fig, use_container_width=True, config=plot_config, theme=None, key=f"main_chart_{fmt_ticker}_{selected_interval}")
 
                 # --- 恢復 K 線型態詳細解讀文字區塊 ---
