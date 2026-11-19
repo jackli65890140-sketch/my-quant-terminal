@@ -1069,7 +1069,8 @@ def batch_prefetch_extended_hours_quotes(tickers: List[str], force_refresh: bool
                 clean_tks.append(ft)
     clean_tks = list(dict.fromkeys(clean_tks))
     if clean_tks:
-        with ThreadPoolExecutor(max_workers=8) as ex:
+        _ext_workers = 2 if is_running_on_public_cloud() else 8
+        with ThreadPoolExecutor(max_workers=_ext_workers) as ex:
             list(ex.map(lambda s: fetch_single_extended_hours_quote(s, force_refresh=force_refresh), clean_tks))
     return {format_and_detect_market(t)[0]: _EXTENDED_QUOTE_CACHE.get(format_and_detect_market(t)[0], {}) for t in tickers if t}
 
@@ -4033,6 +4034,56 @@ def is_running_on_public_cloud() -> bool:
     if _os_lib.path.exists("/mount/src") or str(_os_lib.getcwd()).startswith("/mount/src"):
         return True
     return False
+
+
+def _allow_shared_global_state_write() -> bool:
+    """本地電腦允許寫入進程級與磁碟快取；公網雲端預設隔離各訪客資料（除非顯式啟用環境變數）。"""
+    return (not is_running_on_public_cloud()) or bool(_os_lib.environ.get("ALLOW_CLOUD_DISK_PERSISTENCE"))
+
+
+def _get_configured_cloud_password() -> str:
+    """讀取 Streamlit Cloud Secrets 或環境變數中的可選登入密碼（未設定則回傳空字串，不鎖定）。"""
+    try:
+        pw = str(st.secrets.get("APP_PASSWORD", "") or "").strip()
+        if pw:
+            return pw
+    except Exception:
+        pass
+    return str(_os_lib.environ.get("APP_PASSWORD", "") or "").strip()
+
+
+def enforce_optional_cloud_password_gate() -> None:
+    """
+    [v61.7 雙棲私隱鎖]
+    - 本機電腦運行：自動跳過，無需輸入密碼。
+    - 公網雲端運行：若已於 Streamlit Secrets 設定 APP_PASSWORD，則要求登入驗證後方可進入。
+    """
+    if not is_running_on_public_cloud():
+        return
+    expected_pw = _get_configured_cloud_password()
+    if not expected_pw:
+        return
+    if st.session_state.get("_sq_cloud_authenticated", False):
+        return
+
+    st.markdown(
+        "<div style='max-width:420px;margin:6vh auto 0 auto;padding:28px 24px;border-radius:14px;"
+        "border:1px solid #E2E8F0;background:#FFFFFF;box-shadow:0 8px 24px rgba(15,23,42,0.08);'>"
+        "<h3 style='margin:0 0 8px 0;color:#0F172A;'>🔐 SwingQuant Pro 雲端存取驗證</h3>"
+        "<p style='margin:0 0 14px 0;font-size:0.9rem;color:#475569;'>"
+        "此網頁版已啟用私隱保護，請輸入你在 Streamlit Secrets 設定的存取密碼。</p></div>",
+        unsafe_allow_html=True,
+    )
+    with st.form("sq_cloud_login_form", clear_on_submit=False):
+        entered_pw = st.text_input("存取密碼", type="password", placeholder="請輸入 APP_PASSWORD")
+        submitted = st.form_submit_button("解鎖進入系統", type="primary", width="stretch")
+    if submitted:
+        if entered_pw == expected_pw:
+            st.session_state["_sq_cloud_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("❌ 密碼不正確，請重試。")
+    st.stop()
 
 
 def _merge_dedup_list_by_key(existing_list: List[Dict[str, Any]], incoming_list: List[Dict[str, Any]], key_field: str, sort_field: str) -> List[Dict[str, Any]]:
@@ -7883,10 +7934,11 @@ def compute_backtest_institutional_metrics(equity_curve: pd.Series, trades_df: p
 
 st.set_page_config(
     layout="wide",
-    page_title="SwingQuant Pro v61.0 | 專業波段量化終端",
+    page_title="SwingQuant Pro v61.7 | 電腦 / 網頁雙棲量化終端",
     page_icon="📈",
     initial_sidebar_state="auto"
 )
+enforce_optional_cloud_password_gate()
 
 def is_mobile_mode_active() -> bool:
     """檢查用戶是否開啟手機精簡模式 (支援單手瀏覽卡片、單列圖表與防誤觸捲動)"""
@@ -9368,6 +9420,8 @@ def fetch_futu_dynamic_discovery_pool(
       * 美股 (US)：股價 >= US$8.0、當日成交額 >= US$2,500 萬
     - 按當日升幅/動能由高至低取 Top `max_count` 隻活水標的；若未連線 OpenD 則秒速安全降級，絕不卡死。
     """
+    if is_running_on_public_cloud() and str(futu_host or "").strip().lower() in ("127.0.0.1", "localhost", "::1", ""):
+        return [], "雲端網頁版已自動略過本機 OpenD 探測，採用「核心底座 + 全板塊均衡補充池」"
     q_ctx = None
     try:
         from futu import OpenQuoteContext, Market, SimpleFilter, StockField, SortDir, RET_OK  # type: ignore
@@ -9485,7 +9539,7 @@ def _compute_sector_rs_compass_df() -> pd.DataFrame:
     syms = [x[0] for x in SECTOR_COMPASS_ETFS]
     rows = []
     try:
-        raw = yf.download(syms, period="4mo", interval="1d", progress=False, threads=True, auto_adjust=True)
+        raw = yf.download(syms, period="4mo", interval="1d", progress=False, threads=(not is_running_on_public_cloud()), auto_adjust=True)
         if raw is None or raw.empty:
             return pd.DataFrame()
         for sym, label, mkt in SECTOR_COMPASS_ETFS:
@@ -10388,13 +10442,47 @@ def batch_preload_ohlcv_cache(tickers: List[str]) -> None:
     clean_syms = list(dict.fromkeys(clean_syms))
     if len(clean_syms) < 1:
         return
-    # 分批每組最多 18 隻下載，防止 Yahoo Finance 因為單次 URL 過長或 32 線程併發而封鎖美股/港股請求
-    chunk_size = 18
+    # [v61.7 雙棲防限流分流] 本機電腦維持高速 18 隻/批多線程；公網雲端自動降為 6 隻/批單線程 + 禮貌間隔與單股回退，防止 Yahoo 429 封鎖
+    _on_cloud = is_running_on_public_cloud()
+    chunk_size = 6 if _on_cloud else 18
     for c_idx in range(0, len(clean_syms), chunk_size):
         chunk = clean_syms[c_idx: c_idx + chunk_size]
+        if _on_cloud and c_idx > 0:
+            time.sleep(0.65)
         try:
-            raw = yf.download(chunk, period="2y", interval="1d", group_by="ticker", auto_adjust=True, progress=False, threads=True)
+            raw = yf.download(
+                chunk,
+                period="2y",
+                interval="1d",
+                group_by="ticker",
+                auto_adjust=True,
+                progress=False,
+                threads=(not _on_cloud),
+            )
             if raw is None or raw.empty:
+                if _on_cloud:
+                    time.sleep(1.0)
+                    for sym in chunk:
+                        try:
+                            sub_fb = yf.Ticker(sym).history(period="2y", interval="1d", auto_adjust=True)
+                            if sub_fb is not None and not sub_fb.empty:
+                                if isinstance(sub_fb.columns, pd.MultiIndex):
+                                    sub_fb.columns = sub_fb.columns.get_level_values(-1)
+                                sub_fb = sub_fb.loc[:, ~sub_fb.columns.duplicated()].dropna(subset=['Open', 'High', 'Low', 'Close'])
+                                if len(sub_fb) >= 50:
+                                    sub_fb.index = pd.to_datetime(sub_fb.index)
+                                    if sub_fb.index.tz is not None:
+                                        sub_fb.index = sub_fb.index.tz_localize(None)
+                                    sub_fb.attrs["_preload_ts"] = time.time()
+                                    if len(_PRELOADED_DAILY_CACHE) >= 180 and sym not in _PRELOADED_DAILY_CACHE:
+                                        _oldest_k = min(_PRELOADED_CACHE_TS, key=_PRELOADED_CACHE_TS.get) if _PRELOADED_CACHE_TS else next(iter(_PRELOADED_DAILY_CACHE))
+                                        _PRELOADED_DAILY_CACHE.pop(_oldest_k, None)
+                                        _PRELOADED_CACHE_TS.pop(_oldest_k, None)
+                                    _PRELOADED_DAILY_CACHE[sym] = sub_fb
+                                    _PRELOADED_CACHE_TS[sym] = time.time()
+                        except Exception:
+                            pass
+                        time.sleep(0.25)
                 continue
             for sym in chunk:
                 try:
@@ -10461,14 +10549,22 @@ def analyze_stock_master(ticker, strictness_threshold=5, interval="1d"):
                 df = yf.download(ticker, period=period, interval=_dl_stk_interval, auto_adjust=True, prepost=_use_prepost_flag, progress=False)
             except Exception:
                 df = pd.DataFrame()
-            # [v43.1 雙通道防失敗回退] 若 yf.download 因 Yahoo 併發鎖定返回空表，自動改用 yf.Ticker(ticker).history() 獨立通道抓取
+            # [v43.1 + v61.7 雙通道與雲端防限流重試] 若 yf.download 返回空表，改用 yf.Ticker().history() 獨立通道抓取（雲端遇限流自動退避重試 1 次）
             if df is None or df.empty:
+                if is_running_on_public_cloud():
+                    time.sleep(0.45)
                 try:
                     df = yf.Ticker(ticker).history(period=period, interval=_dl_stk_interval, auto_adjust=True, prepost=_use_prepost_flag)
                 except Exception:
                     df = pd.DataFrame()
+            if (df is None or df.empty) and is_running_on_public_cloud():
+                time.sleep(1.1)
+                try:
+                    df = yf.Ticker(ticker).history(period=period, interval=_dl_stk_interval, auto_adjust=True, prepost=False)
+                except Exception:
+                    df = pd.DataFrame()
             if df is None or df.empty:
-                return {"error": "無數據返回，請確認代號正確。"}
+                return {"error": "無數據返回，請確認代號正確（若在網頁版遇 Yahoo 暫時限流，請稍候數秒再試）。"}
 
             if isinstance(df.columns, pd.MultiIndex):
                 if 'Close' in df.columns.get_level_values(0):
@@ -11853,7 +11949,11 @@ def run_bidirectional_backtest(ticker, start_date, end_date, initial_capital, sc
 st.sidebar.markdown(
     '<div class="sq-sb-brand">'
     '<div class="sq-sb-brand-title">📈 SwingQuant <span style="color:#00B865 !important;">Pro</span></div>'
-    '<div class="sq-sb-brand-sub">v61.6 波段量化終端 · 電腦 / 手機自適應</div>'
+    + (
+        '<div class="sq-sb-brand-sub">v61.7 雙棲終端 · ☁️ 雲端網頁模式（防限流已啟用）</div>'
+        if is_running_on_public_cloud() else
+        '<div class="sq-sb-brand-sub">v61.7 雙棲終端 · 💻 本機電腦模式（支援富途 OpenD）</div>'
+    ) +
     '</div>',
     unsafe_allow_html=True
 )
@@ -12451,7 +12551,10 @@ def render_futu_opend_sidebar_bridge() -> None:
     [v59.0 全帳號歷史交易與零缺失持倉同步中心]
     """
     with st.sidebar.expander("🐂 富途 OpenD 帳戶同步", expanded=False):
-        st.caption("開啟本機 **FutuOpenD** 並登入後，可同步實時持倉與歷史成交紀錄（只讀模式，不會執行下單）。")
+        if is_running_on_public_cloud():
+            st.info("☁️ 目前為**網頁雲端模式**：無法直連本機 `127.0.0.1` 的 FutuOpenD。建議改用頁面內的 **CSV / Excel / JSON 匯入** 同步持倉，或在電腦本地執行以啟用 OpenD 即時同步。")
+        else:
+            st.caption("開啟本機 **FutuOpenD** 並登入後，可同步實時持倉與歷史成交紀錄（只讀模式，不會執行下單）。")
         _futu_prefs = persistent_data.setdefault("futu_bridge_prefs", {"enabled": False, "host": "127.0.0.1", "port": 11111})
         enable_futu = st.checkbox(
             "⚡ 啟用富途 OpenD 本地連線",
@@ -12636,10 +12739,11 @@ def rename_watchlist_group_in_place(old_cat: str, new_cat: str) -> Tuple[bool, s
         if isinstance(store_dict, dict) and old_rk in store_dict:
             store_dict[new_rk] = store_dict.pop(old_rk)
 
-    with _CACHE_LOCK:
-        _global_persistent_data["_disk_watchlist_dict"] = new_wl_dict
-        if old_cat in _global_persistent_data.get("watchlist_radar_results", {}):
-            _global_persistent_data["watchlist_radar_results"][new_cat_clean] = _global_persistent_data["watchlist_radar_results"].pop(old_cat)
+    if _allow_shared_global_state_write():
+        with _CACHE_LOCK:
+            _global_persistent_data["_disk_watchlist_dict"] = new_wl_dict
+            if old_cat in _global_persistent_data.get("watchlist_radar_results", {}):
+                _global_persistent_data["watchlist_radar_results"][new_cat_clean] = _global_persistent_data["watchlist_radar_results"].pop(old_cat)
     save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
     return True, f"✅ 已將分組「{old_cat}」改名為「{new_cat_clean}」（組內股票與掃描記錄已自動保留）！"
 
@@ -13272,7 +13376,7 @@ def _fetch_macro_and_adr_last_change(symbols_tuple: Tuple[str, ...]) -> Dict[str
     if not symbols_tuple:
         return out
     try:
-        raw_df = yf.download(list(symbols_tuple), period="5d", interval="1d", progress=False, threads=True, auto_adjust=False)
+        raw_df = yf.download(list(symbols_tuple), period="5d", interval="1d", progress=False, threads=(not is_running_on_public_cloud()), auto_adjust=False)
         if raw_df is None or raw_df.empty:
             return out
         for sym in symbols_tuple:
@@ -15218,7 +15322,8 @@ def render_futu_multi_chart_grid(
             batch_preload_ohlcv_cache(_stk_only_mc)
         elif mc_interval in ["5m", "15m", "1h"]:
             from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=6) as _ex_mc:
+            _mc_workers = 2 if is_running_on_public_cloud() else 6
+            with ThreadPoolExecutor(max_workers=_mc_workers) as _ex_mc:
                 list(_ex_mc.map(lambda s: _fetch_mc_intraday_cached(s, mc_interval), _stk_only_mc))
         batch_prefetch_extended_hours_quotes(_stk_only_mc)
 
@@ -16918,13 +17023,14 @@ if mode == mode_options[0]:
 
                     st.session_state.radar_correlation_warnings[dict_key] = warnings
                     st.session_state.radar_correlation_matrices[dict_key] = corr_matrix
-                    with _CACHE_LOCK:
-                        _global_persistent_data["radar_results"][dict_key] = df_res
-                        _global_persistent_data["radar_correlation_warnings"][dict_key] = warnings
-                        _global_persistent_data["radar_correlation_matrices"][dict_key] = corr_matrix
-                        _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
-                        _global_persistent_data.setdefault("radar_breadth_stats", {}).update(persistent_data.get("radar_breadth_stats", {}))
-                        _global_persistent_data.setdefault("signal_lifecycle_store", {}).update(persistent_data.get("signal_lifecycle_store", {}))
+                    if _allow_shared_global_state_write():
+                        with _CACHE_LOCK:
+                            _global_persistent_data["radar_results"][dict_key] = df_res
+                            _global_persistent_data["radar_correlation_warnings"][dict_key] = warnings
+                            _global_persistent_data["radar_correlation_matrices"][dict_key] = corr_matrix
+                            _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
+                            _global_persistent_data.setdefault("radar_breadth_stats", {}).update(persistent_data.get("radar_breadth_stats", {}))
+                            _global_persistent_data.setdefault("signal_lifecycle_store", {}).update(persistent_data.get("signal_lifecycle_store", {}))
                     save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
                 else:
                     st.error("⚠️ 未取得任何有效數據，所有股票可能未能符合當前系統的過濾標準。")
@@ -17064,8 +17170,9 @@ elif mode == mode_options[2]:
                         if _g_df is not None:
                             st.session_state.watchlist_radar_results[_g_name] = _g_df
                             mark_radar_cache_updated(persistent_data, f"自選_{_g_name}")
-                            with _CACHE_LOCK:
-                                _global_persistent_data.setdefault("watchlist_radar_results", {})[_g_name] = _g_df
+                            if _allow_shared_global_state_write():
+                                with _CACHE_LOCK:
+                                    _global_persistent_data.setdefault("watchlist_radar_results", {})[_g_name] = _g_df
                 save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
                 st.toast("✅ 已完成全部自選分組深度掃描！")
                 st.rerun()
@@ -17545,11 +17652,12 @@ elif mode == mode_options[2]:
                                 st.session_state.radar_correlation_warnings[f"自選_{cat}"] = warnings
                                 st.session_state.radar_correlation_matrices[f"自選_{cat}"] = corr_matrix
                                 mark_radar_cache_updated(persistent_data, f"自選_{cat}")
-                                with _CACHE_LOCK:
-                                    _global_persistent_data.setdefault("watchlist_radar_results", {})[cat] = df_res
-                                    _global_persistent_data["radar_correlation_warnings"][f"自選_{cat}"] = warnings
-                                    _global_persistent_data["radar_correlation_matrices"][f"自選_{cat}"] = corr_matrix
-                                    _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
+                                if _allow_shared_global_state_write():
+                                    with _CACHE_LOCK:
+                                        _global_persistent_data.setdefault("watchlist_radar_results", {})[cat] = df_res
+                                        _global_persistent_data["radar_correlation_warnings"][f"自選_{cat}"] = warnings
+                                        _global_persistent_data["radar_correlation_matrices"][f"自選_{cat}"] = corr_matrix
+                                        _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
                                 save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
                             else:
                                 st.error("掃描失敗，未取得有效數據。")
