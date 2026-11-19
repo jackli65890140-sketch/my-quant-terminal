@@ -175,7 +175,7 @@ RADAR_CACHE_TTL_SECONDS = 1800  # 雷達結果預設 30 分鐘自動過期重算
 # 5) [Five-Stage Bull/Bear & Correction-Ending Engine] 同時分辨「🐂 確認牛市」、「🌤️ 大盤調整結束 / 熊轉牛初段 (彈簧股爆發期)」、「🟡 牛市中期修正」、「🌩️ 牛市見頂派發預警」與「🐻 確認熊市」；
 # 6) [Small/Mid-Cap High-Velocity Pool] 新增「🚀 超級績效・中小型高彈性潛力池」並配備日均成交額 ≥ 2,000萬港元防老千股護欄。
 # OLD: CURRENT_SCHEMA_VERSION = "v48.0"
-CURRENT_SCHEMA_VERSION = "v59.0"  # [v59.0 全帳號終身交易總帳本 & 零缺失持倉升級版：9隻富途持倉完整對齊 + 零漏股防斷線保護 + 富途OpenD跨年份全歷史成交(Buy/Sell)分段拉取與FIFO配對 + 永久雙軌交易資料庫]
+CURRENT_SCHEMA_VERSION = "v60.2"  # [v59.1 修復掃描死鎖與交易記錄去重版：RLock防重入死鎖 + 磁碟寫入移出鎖外 + 全帳號買賣流水與平倉復盤語意去重引擎]
 import os as _os_lib
 ACCOUNT_ALL_TRADES_LEDGER_FILE = _os_lib.path.expanduser("~/.swing_account_all_trades_ledger_v1.json")
 DEFAULT_USER_FUTU_HOLDINGS = ["VOO", "PYPL", "0700.HK", "1919.HK", "2382.HK", "6030.HK", "1929.HK", "RKLB", "TOST"]
@@ -733,7 +733,7 @@ def compute_weinstein_stage_and_pring_kst(df: pd.DataFrame) -> Dict[str, Any]:
 
 
 import threading as _threading_lib
-_CACHE_LOCK = _threading_lib.Lock()
+_CACHE_LOCK = _threading_lib.RLock()  # [v59.1 修復] 改用可重入鎖 RLock，根治 save_persisted_state_to_disk 重入死鎖導致掃描永久卡死
 
 US_TICKER_ALIAS_MAP: Dict[str, str] = {
     "SQ": "XYZ",       # Block Inc. 2025年1月正式由 SQ 改名為 XYZ
@@ -2473,6 +2473,38 @@ def record_account_execution_to_ledger(
     return exec_rec
 
 
+def _normalize_iso_datetime(dt_raw: Any, default_time: str = "00:00:00") -> str:
+    """[v59.2] 將各種日期/時間字串統一標準化為 YYYY-MM-DD HH:MM:SS，確保排序與配對絕不顛倒"""
+    s = str(dt_raw or "").strip()
+    if not s:
+        return ""
+    s = s.replace("T", " ").replace("/", "-")
+    s = re.sub(r"\.[0-9]+$", "", s)
+    s = re.sub(r"(Z|[+-]\d{2}:?\d{2})$", "", s).strip()
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2}))?)?", s)
+    if m:
+        yr, mo, dy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if m.group(4) is not None:
+            hh = int(m.group(4))
+            mm = int(m.group(5) or 0)
+            ss = int(m.group(6) or 0)
+            return f"{yr:04d}-{mo:02d}-{dy:02d} {hh:02d}:{mm:02d}:{ss:02d}"
+        return f"{yr:04d}-{mo:02d}-{dy:02d} {default_time}"
+    try:
+        dt_parsed = pd.to_datetime(s, errors="coerce")
+        if pd.notna(dt_parsed):
+            return dt_parsed.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    return s[:19]
+
+
+def _normalize_iso_date(dt_raw: Any) -> str:
+    """[v59.2] 統一標準化為 YYYY-MM-DD"""
+    iso_dt = _normalize_iso_datetime(dt_raw)
+    return iso_dt[:10] if len(iso_dt) >= 10 else str(dt_raw or "").strip()[:10]
+
+
 def record_closed_trade_to_journal(
     ticker: str,
     dir_code: str,
@@ -2486,7 +2518,8 @@ def record_closed_trade_to_journal(
     exit_reason: str = "手動平倉/賣出",
     notes: str = "",
     trade_id_override: str = "",
-    also_record_raw_executions: bool = True
+    also_record_raw_executions: bool = True,
+    exit_time_str: str = ""
 ) -> Dict[str, Any]:
     fmt_t, mkt_t, _, _, cur_t = format_and_detect_market(ticker)
     stk_name = get_stock_name(fmt_t)
@@ -2494,6 +2527,16 @@ def record_closed_trade_to_journal(
     e_px = round(float(entry_price), 3)
     x_px = round(float(exit_price), 3)
     d_code = "SHORT" if "SHORT" in str(dir_code).upper() or "空" in str(dir_code) else "LONG"
+
+    e_dt = _normalize_iso_date(entry_date_str) or datetime.now().strftime("%Y-%m-%d")
+    x_dt = _normalize_iso_date(exit_date_str) or datetime.now().strftime("%Y-%m-%d")
+    if e_dt > x_dt:
+        e_dt, x_dt = x_dt, e_dt
+    x_tm = _normalize_iso_datetime(exit_time_str or exit_date_str, default_time="15:30:00")
+    if not x_tm:
+        x_tm = f"{x_dt} 15:30:00"
+    elif x_tm[:10] != x_dt:
+        x_tm = f"{x_dt} {x_tm[11:19] if len(x_tm) >= 19 else '15:30:00'}"
 
     fee_entry = compute_futu_real_fees(market_type=mkt_t, price=e_px, shares=sh_safe, is_sell=(d_code == "SHORT"))
     gross_pnl = (x_px - e_px) * sh_safe if d_code == "LONG" else (e_px - x_px) * sh_safe
@@ -2506,7 +2549,7 @@ def record_closed_trade_to_journal(
         unit_risk = e_px * 0.045
     realized_r = round(((x_px - e_px) if d_code == "LONG" else (e_px - x_px)) / max(unit_risk, 1e-5), 2)
 
-    t_id = str(trade_id_override).strip() if trade_id_override else f"TRD_{fmt_t}_{d_code}_{str(entry_date_str)[:10]}_{str(exit_date_str)[:10]}_{e_px:.2f}_{x_px:.2f}_{sh_safe}"
+    t_id = str(trade_id_override).strip() if trade_id_override else f"TRD_{fmt_t}_{d_code}_{e_dt}_{x_dt}_{e_px:.2f}_{x_px:.2f}_{sh_safe}"
     rec = {
         "trade_id": t_id,
         "ticker": fmt_t,
@@ -2517,8 +2560,9 @@ def record_closed_trade_to_journal(
         "entry_price": e_px,
         "exit_price": x_px,
         "shares": sh_safe,
-        "entry_date": str(entry_date_str)[:10],
-        "exit_date": str(exit_date_str)[:10],
+        "entry_date": e_dt,
+        "exit_date": x_dt,
+        "exit_time": x_tm,
         "initial_sl": round(float(initial_sl), 3) if initial_sl > 0 else round(e_px * (0.955 if d_code == "LONG" else 1.045), 3),
         "initial_tp": round(float(initial_tp), 3) if initial_tp > 0 else round(e_px * (1.10 if d_code == "LONG" else 0.90), 3),
         "round_trip_fee": round(float(fee_entry.get("round_trip_fee", 0.0)), 2),
@@ -2527,7 +2571,7 @@ def record_closed_trade_to_journal(
         "realized_r": realized_r,
         "exit_reason": str(exit_reason),
         "notes": str(notes),
-        "recorded_at": datetime.now().strftime("%Y-%m-%d %H:%M")
+        "recorded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     journal_list = persistent_data.setdefault("closed_trades_journal", [])
     existing_map = {str(x.get("trade_id", "")): i for i, x in enumerate(journal_list)}
@@ -2535,7 +2579,15 @@ def record_closed_trade_to_journal(
         journal_list[existing_map[t_id]] = rec
     else:
         journal_list.insert(0, rec)
-    journal_list.sort(key=lambda x: (str(x.get("exit_date", "")), str(x.get("recorded_at", ""))), reverse=True)
+    journal_list.sort(
+        key=lambda x: (
+            _normalize_iso_datetime(x.get("exit_time") or x.get("exit_date", "")),
+            _normalize_iso_date(x.get("exit_date", "")),
+            _normalize_iso_date(x.get("entry_date", "")),
+            str(x.get("recorded_at", ""))
+        ),
+        reverse=True
+    )
 
     if also_record_raw_executions:
         record_account_execution_to_ledger(
@@ -2543,7 +2595,7 @@ def record_closed_trade_to_journal(
             trd_side="BUY" if d_code == "LONG" else "SELL_SHORT",
             price=e_px,
             shares=sh_safe,
-            trade_time_str=str(entry_date_str)[:10] + " 10:00:00",
+            trade_time_str=e_dt + " 10:00:00",
             exec_id=f"OPEN_{t_id}",
             source="JournalPair",
             notes=f"對應平倉單 {t_id} 之開倉記錄"
@@ -2553,7 +2605,7 @@ def record_closed_trade_to_journal(
             trd_side="SELL" if d_code == "LONG" else "BUY_BACK",
             price=x_px,
             shares=sh_safe,
-            trade_time_str=str(exit_date_str)[:10] + " 15:30:00",
+            trade_time_str=x_tm,
             exec_id=f"CLOSE_{t_id}",
             source="JournalPair",
             notes=f"{exit_reason} | {notes}".strip(" |")
@@ -2563,13 +2615,14 @@ def record_closed_trade_to_journal(
 
 def reconstruct_all_account_trades_and_holdings_fifo(raw_deals: List[Dict[str, Any]], source_tag: str = "FutuOpenD_AllHistory") -> Dict[str, Any]:
     """
-    [v59.0 核心引擎：全帳號歷史買賣成交 FIFO / 移動加權成本自動配對與回合復盤重建器]
-    輸入帳號從開戶/過去數年至今的所有買賣成交明細 (`raw_deals`)：
-    1) 將每一筆買入、加倉、減倉、清倉、沽空、回補永久寫入 `account_all_executions_ledger`（去重、不遺漏任何一筆歷史交易）；
-    2) 按時間先後順序 (`trade_time ASC`) 對每隻股票進行持倉批次配對 (FIFO / Moving Average Cost)：
-       - 凡遇到平倉/減倉交易（如多頭 `SELL` 或空頭 `BUY_BACK`），自動計算該筆賣出對應的真實歷史買入均價、買入日期、持倉天數、富途費用與實現 R 倍數，並自動寫入 `closed_trades_journal` 供 AI 進行賣後 T+5/10/20 復盤！
-       - 返回截至今日仍未平倉的剩餘持倉明細 (`open_positions_from_deals`)，包含最精確的首次買入日 (`anchor_date`) 與加權成本價！
+    [v59.2 真 FIFO 批次佇列引擎：全帳號歷史買賣成交自動配對與回合復盤重建器]
+    - 嚴格標準化所有成交時間 (ISO YYYY-MM-DD HH:MM:SS) 並先合併同一訂單的分批成交 (Partial Fills)；
+    - 採用真 FIFO 批次佇列 (collections.deque) 追蹤每一筆買入/沽空批次的真實買入日與成本價：
+      * 支援部分平倉（例如先賣出一半倉位），剩餘一半仍保留原本的真實買入日期與成本價；
+      * 同日買賣保證開倉優先於平倉，絕不出現買入日晚於賣出日。
     """
+    from collections import deque
+
     summary = {
         "exec_added_or_updated": 0,
         "closed_round_trips_reconstructed": 0,
@@ -2578,8 +2631,7 @@ def reconstruct_all_account_trades_and_holdings_fifo(raw_deals: List[Dict[str, A
     if not raw_deals:
         return summary
 
-    # 1. 先將所有原始成交寫入總流水帳並依時間正序排列
-    norm_deals: List[Dict[str, Any]] = []
+    # 1. 先將所有原始成交標準化時間並寫入總流水帳
     for d in raw_deals:
         tk_raw = str(d.get("ticker", "")).strip()
         if not tk_raw:
@@ -2588,152 +2640,181 @@ def reconstruct_all_account_trades_and_holdings_fifo(raw_deals: List[Dict[str, A
         sh_v = int(round(float(d.get("shares", d.get("qty", 0)) or 0)))
         if px_v <= 0 or sh_v <= 0:
             continue
-        t_str = str(d.get("trade_time", d.get("trade_date", ""))).strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        t_raw = str(d.get("trade_time", d.get("trade_date", ""))).strip()
+        t_str = _normalize_iso_datetime(t_raw) or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ex_id = str(d.get("exec_id", d.get("deal_id", ""))).strip()
         ord_id = str(d.get("order_id", "")).strip()
         side_raw = str(d.get("trd_side", "BUY")).strip()
-        rec_e = record_account_execution_to_ledger(
+        record_account_execution_to_ledger(
             ticker=tk_raw,
             trd_side=side_raw,
             price=px_v,
-            shares=sh_safe if (sh_safe := sh_v) > 0 else 1,
+            shares=max(1, sh_v),
             trade_time_str=t_str,
             exec_id=ex_id,
             order_id=ord_id,
             source=str(d.get("source", source_tag)),
             notes=str(d.get("notes", ""))
         )
-        norm_deals.append(rec_e)
         summary["exec_added_or_updated"] += 1
 
-    # 從總流水帳讀取所有非 JournalPair 衍生之真實成交（或全部成交去重後）進行完整歷史配對
-    all_ledger = persistent_data.get("account_all_executions_ledger", [])
+    # 2. 配對前先執行語意去重與同訂單分批成交合併 (Partial-Fill Aggregation)
+    all_ledger = _dedup_executions_ledger(persistent_data.get("account_all_executions_ledger", []))
+    persistent_data["account_all_executions_ledger"] = all_ledger
     real_execs = [x for x in all_ledger if str(x.get("source", "")) != "JournalPair"]
     if not real_execs:
         real_execs = list(all_ledger)
 
-    # 按股票分組並按成交時間由舊到新排序
     by_ticker: Dict[str, List[Dict[str, Any]]] = {}
     for ex in real_execs:
         by_ticker.setdefault(str(ex["ticker"]), []).append(ex)
 
+    def _exec_sort_key(x: Dict[str, Any]) -> tuple:
+        t_iso = _normalize_iso_datetime(x.get("trade_time") or x.get("trade_date", ""))
+        side_u = str(x.get("trd_side", "BUY")).strip().upper()
+        # 同秒/同日記錄時，確保開倉動作優先於平倉，避免時間倒置
+        side_pri = 0 if side_u in ["BUY", "SELL_SHORT"] else 1
+        return (t_iso, side_pri, str(x.get("exec_id", "")))
+
+    # [v59.6] 重建前先清除本次涵蓋股票的舊 FIFO_/CAMP_ 衍生記錄，確保嚴格由真實成交流水單一來源重建，絕不重複疊加
+    _rebuild_tks = set(by_ticker.keys())
+    if _rebuild_tks and persistent_data.get("closed_trades_journal"):
+        persistent_data["closed_trades_journal"] = [
+            x for x in persistent_data.get("closed_trades_journal", [])
+            if not (
+                str(x.get("ticker", "")).upper() in _rebuild_tks
+                and (
+                    str(x.get("trade_id", "")).startswith("FIFO_")
+                    or str(x.get("trade_id", "")).startswith("CAMP_")
+                )
+            )
+        ]
+
     for tk, ex_list in by_ticker.items():
-        ex_list.sort(key=lambda x: (str(x.get("trade_time", "")), str(x.get("exec_id", ""))))
-        # 維護當前淨持倉狀態：pos_qty > 0 為做多，pos_qty < 0 為做空
-        pos_qty: int = 0
-        avg_cost: float = 0.0
-        anchor_dt: str = ""
+        ex_list.sort(key=_exec_sort_key)
+        long_lots = deque()   # [{"qty": int, "price": float, "date": str, "time": str}]
+        short_lots = deque()  # [{"qty": int, "price": float, "date": str, "time": str}]
 
         for ex in ex_list:
-            side = str(ex.get("trd_side", "BUY"))
-            px = float(ex.get("price", 0.0))
-            qty = int(ex.get("shares", 0))
-            dt_s = str(ex.get("trade_date", str(ex.get("trade_time", ""))[:10]))
+            side = str(ex.get("trd_side", "BUY")).strip().upper()
+            px = float(ex.get("price", 0.0) or 0.0)
+            qty = int(round(float(ex.get("shares", 0) or 0)))
+            t_iso = _normalize_iso_datetime(ex.get("trade_time") or ex.get("trade_date", "")) or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            dt_s = t_iso[:10]
             ex_id = str(ex.get("exec_id", ""))
+            if px <= 0 or qty <= 0:
+                continue
 
             is_buy_action = side in ["BUY", "BUY_BACK"]
             if is_buy_action:
-                if pos_qty >= 0:
-                    # 買入開多或加倉多單
-                    new_qty = pos_qty + qty
-                    avg_cost = ((pos_qty * avg_cost) + (qty * px)) / max(new_qty, 1)
-                    if pos_qty == 0 or not anchor_dt:
-                        anchor_dt = dt_s
-                    pos_qty = new_qty
-                else:
-                    # 買回平空單 (Cover Short)
-                    short_abs = abs(pos_qty)
-                    closed_sh = min(short_abs, qty)
-                    trd_id = f"FIFO_SHORT_{tk}_{anchor_dt}_{dt_s}_{ex_id}"
-                    record_closed_trade_to_journal(
-                        ticker=tk,
-                        dir_code="SHORT",
-                        entry_price=avg_cost,
-                        exit_price=px,
-                        shares=closed_sh,
-                        entry_date_str=anchor_dt or dt_s,
-                        exit_date_str=dt_s,
-                        exit_reason="🐂 帳號歷史成交配對 (空單回補)",
-                        notes=f"由歷史成交單 {ex_id} 自動配對生成",
-                        trade_id_override=trd_id,
-                        also_record_raw_executions=False
-                    )
-                    summary["closed_round_trips_reconstructed"] += 1
-                    rem_buy = qty - closed_sh
-                    pos_qty = pos_qty + closed_sh
-                    if rem_buy > 0:
-                        # 反手轉多單
-                        pos_qty = rem_buy
-                        avg_cost = px
-                        anchor_dt = dt_s
-                    elif pos_qty == 0:
-                        avg_cost = 0.0
-                        anchor_dt = ""
-            else:
-                # SELL or SELL_SHORT
-                if pos_qty > 0:
-                    # 賣出平多單或減倉多單
-                    closed_sh = min(pos_qty, qty)
-                    is_partial = (closed_sh < pos_qty)
-                    trd_id = f"FIFO_LONG_{tk}_{anchor_dt}_{dt_s}_{ex_id}"
-                    record_closed_trade_to_journal(
-                        ticker=tk,
-                        dir_code="LONG",
-                        entry_price=avg_cost,
-                        exit_price=px,
-                        shares=closed_sh,
-                        entry_date_str=anchor_dt or dt_s,
-                        exit_date_str=dt_s,
-                        exit_reason="🐂 帳號歷史成交配對 (部分減倉)" if is_partial else "🐂 帳號歷史成交配對 (全數平倉)",
-                        notes=f"由歷史成交單 {ex_id} 自動配對生成 ({'部分減倉' if is_partial else '全數平倉'})",
-                        trade_id_override=trd_id,
-                        also_record_raw_executions=False
-                    )
-                    summary["closed_round_trips_reconstructed"] += 1
-                    rem_sell = qty - closed_sh
-                    pos_qty = pos_qty - closed_sh
-                    if rem_sell > 0 and side == "SELL_SHORT":
-                        pos_qty = -rem_sell
-                        avg_cost = px
-                        anchor_dt = dt_s
-                    elif pos_qty == 0:
-                        avg_cost = 0.0
-                        anchor_dt = ""
-                else:
-                    # 開空或加空
-                    if side == "SELL_SHORT" or pos_qty < 0:
-                        short_abs = abs(pos_qty)
-                        new_short_abs = short_abs + qty
-                        avg_cost = ((short_abs * avg_cost) + (qty * px)) / max(new_short_abs, 1)
-                        if pos_qty == 0 or not anchor_dt:
-                            anchor_dt = dt_s
-                        pos_qty = -new_short_abs
-                    else:
-                        # 若帳號早期買入記錄在查詢起點之前，而出現直接 SELL，仍為其生成一筆歷史賣出記錄以免遺漏
-                        trd_id = f"FIFO_UNMATCHED_SELL_{tk}_{dt_s}_{ex_id}"
+                rem_qty = qty
+                if short_lots:
+                    # 優先平空單 (FIFO)
+                    closed_sh = 0
+                    weighted_cost_sum = 0.0
+                    earliest_entry_dt = ""
+                    while short_lots and rem_qty > 0:
+                        lot = short_lots[0]
+                        take = min(lot["qty"], rem_qty)
+                        if not earliest_entry_dt or lot["date"] < earliest_entry_dt:
+                            earliest_entry_dt = lot["date"]
+                        weighted_cost_sum += take * lot["price"]
+                        closed_sh += take
+                        lot["qty"] -= take
+                        rem_qty -= take
+                        if lot["qty"] <= 0:
+                            short_lots.popleft()
+                    if closed_sh > 0:
+                        entry_vwap = weighted_cost_sum / closed_sh
+                        is_partial_cov = len(short_lots) > 0
+                        trd_id = f"FIFO_SHORT_{tk}_{earliest_entry_dt}_{dt_s}_{ex_id}"
                         record_closed_trade_to_journal(
                             ticker=tk,
-                            dir_code="LONG",
-                            entry_price=px,
+                            dir_code="SHORT",
+                            entry_price=entry_vwap,
                             exit_price=px,
-                            shares=qty,
-                            entry_date_str=dt_s,
+                            shares=closed_sh,
+                            entry_date_str=earliest_entry_dt or dt_s,
                             exit_date_str=dt_s,
-                            exit_reason="🐂 帳號歷史賣出記錄 (早期底倉平倉)",
-                            notes=f"成交單 {ex_id} 賣出 @{px:.2f} (買入日早於查詢起點，可手動補入買入成本)",
+                            exit_time_str=t_iso,
+                            exit_reason="🐂 帳號歷史成交配對 (空單部分回補)" if is_partial_cov else "🐂 帳號歷史成交配對 (空單回補)",
+                            notes=f"由歷史成交單 {ex_id} FIFO 自動配對生成",
                             trade_id_override=trd_id,
                             also_record_raw_executions=False
                         )
                         summary["closed_round_trips_reconstructed"] += 1
+                if rem_qty > 0:
+                    long_lots.append({"qty": rem_qty, "price": px, "date": dt_s, "time": t_iso})
+            else:
+                # SELL or SELL_SHORT
+                rem_qty = qty
+                if long_lots:
+                    # 優先平多單 (FIFO)
+                    closed_sh = 0
+                    weighted_cost_sum = 0.0
+                    earliest_entry_dt = ""
+                    while long_lots and rem_qty > 0:
+                        lot = long_lots[0]
+                        take = min(lot["qty"], rem_qty)
+                        if not earliest_entry_dt or lot["date"] < earliest_entry_dt:
+                            earliest_entry_dt = lot["date"]
+                        weighted_cost_sum += take * lot["price"]
+                        closed_sh += take
+                        lot["qty"] -= take
+                        rem_qty -= take
+                        if lot["qty"] <= 0:
+                            long_lots.popleft()
+                    if closed_sh > 0:
+                        entry_vwap = weighted_cost_sum / closed_sh
+                        is_partial = len(long_lots) > 0
+                        rem_open_sh = sum(l["qty"] for l in long_lots)
+                        trd_id = f"FIFO_LONG_{tk}_{earliest_entry_dt}_{dt_s}_{ex_id}"
+                        record_closed_trade_to_journal(
+                            ticker=tk,
+                            dir_code="LONG",
+                            entry_price=entry_vwap,
+                            exit_price=px,
+                            shares=closed_sh,
+                            entry_date_str=earliest_entry_dt or dt_s,
+                            exit_date_str=dt_s,
+                            exit_time_str=t_iso,
+                            exit_reason=f"🐂 帳號歷史成交配對 (部分減倉，仍持 {rem_open_sh} 股)" if is_partial else "🐂 帳號歷史成交配對 (全數平倉)",
+                            notes=f"由歷史成交單 {ex_id} FIFO 自動配對生成 ({'部分減倉' if is_partial else '全數平倉'})",
+                            trade_id_override=trd_id,
+                            also_record_raw_executions=False
+                        )
+                        summary["closed_round_trips_reconstructed"] += 1
+                if rem_qty > 0:
+                    if side == "SELL_SHORT" or short_lots:
+                        short_lots.append({"qty": rem_qty, "price": px, "date": dt_s, "time": t_iso})
+                    else:
+                        # [v60.0 修復] 買入日早於查詢起點或無對應開倉的孤立賣單，已完整保存於 Tab 2 總成交流水帳，
+                        # 不再於 Tab 1 已平倉復盤日誌偽造 0.00% (買價=賣價、同日買賣) 幽靈交易（根治 2018.HK / INTC 幽靈 100股記錄）
+                        pass
 
-        if pos_qty != 0 and avg_cost > 0:
+        if long_lots:
+            tot_q = sum(l["qty"] for l in long_lots)
+            tot_v = sum(l["qty"] * l["price"] for l in long_lots)
             summary["open_positions"][tk] = {
-                "dir_code": "LONG" if pos_qty > 0 else "SHORT",
-                "qty": abs(pos_qty),
-                "avg_cost": round(avg_cost, 3),
-                "anchor_date": anchor_dt or datetime.now().strftime("%Y-%m-%d")
+                "dir_code": "LONG",
+                "qty": tot_q,
+                "avg_cost": round(tot_v / max(tot_q, 1), 3),
+                "anchor_date": long_lots[0]["date"] or datetime.now().strftime("%Y-%m-%d")
+            }
+        elif short_lots:
+            tot_q = sum(l["qty"] for l in short_lots)
+            tot_v = sum(l["qty"] * l["price"] for l in short_lots)
+            summary["open_positions"][tk] = {
+                "dir_code": "SHORT",
+                "qty": tot_q,
+                "avg_cost": round(tot_v / max(tot_q, 1), 3),
+                "anchor_date": short_lots[0]["date"] or datetime.now().strftime("%Y-%m-%d")
             }
 
+    # 重建完成後自動執行一次全量去重與嚴格時間排序
+    persistent_data["closed_trades_journal"] = _dedup_closed_trades_journal(
+        persistent_data.get("closed_trades_journal", [])
+    )
     return summary
 
 
@@ -3967,8 +4048,382 @@ def _merge_dedup_list_by_key(existing_list: List[Dict[str, Any]], incoming_list:
     return out_list
 
 
+def _dedup_executions_ledger(exec_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """[v59.2 訂單級分批合併 + 語意去重]
+    1) 標準化全部成交時間為 ISO 格式 (YYYY-MM-DD HH:MM:SS)；
+    2) 若已有真實成交明細 (HistoryDeal / TodayDeal)，自動剔除同一 order_id 的 HistoryOrder 重複記錄；
+    3) 將同一訂單 (ticker, trd_side, order_id) 或同分鐘同價分批成交 (Partial Fills，例如 200+100股) 自動合併為一筆完整委託成交；
+    4) 剔除已被真實成交覆蓋的 JournalPair 衍生流水，並嚴格按成交時間由新到舊排序。
+    """
+    if not exec_list:
+        return []
+
+    def _src_priority(item: Dict[str, Any]) -> int:
+        src = str(item.get("source", ""))
+        if "HistoryDeal" in src or "TodayDeal" in src:
+            return 4
+        if "HistoryOrder" in src or "FutuOpenD" in src:
+            return 3
+        if "JournalPair" in src:
+            return 1
+        return 2
+
+    # Step 1: 找出所有已有真實 Deal 的 order_id，避免 HistoryOrder + HistoryDeal 雙重計算
+    deal_order_ids = set()
+    norm_items: List[Dict[str, Any]] = []
+    for raw in exec_list:
+        if not isinstance(raw, dict):
+            continue
+        it = dict(raw)
+        tk = str(it.get("ticker", "")).strip().upper()
+        side = str(it.get("trd_side", "BUY")).strip().upper()
+        t_iso = _normalize_iso_datetime(it.get("trade_time") or it.get("trade_date", ""))
+        if not t_iso:
+            continue
+        try:
+            px = float(it.get("price", 0.0) or 0.0)
+            sh = int(round(float(it.get("shares", 0) or 0)))
+        except Exception:
+            continue
+        if not tk or px <= 0 or sh <= 0:
+            continue
+        it["ticker"] = tk
+        it["trd_side"] = side
+        it["trade_time"] = t_iso
+        it["trade_date"] = t_iso[:10]
+        it["price"] = round(px, 4)
+        it["shares"] = sh
+        ord_id = str(it.get("order_id", "")).strip()
+        if ord_id.endswith(".0") and ord_id[:-2].isdigit():
+            ord_id = ord_id[:-2]
+        it["order_id"] = ord_id
+        src = str(it.get("source", ""))
+        # 清除由舊版 CAMP_/FIFO_ 誤產生的 JournalPair 衍生流水
+        ex_id_chk = str(it.get("exec_id", ""))
+        if src == "JournalPair" and ("_CAMP_" in ex_id_chk or "_FIFO_" in ex_id_chk):
+            continue
+        if ord_id and ("HistoryDeal" in src or "TodayDeal" in src):
+            deal_order_ids.add((tk, side, ord_id))
+        norm_items.append(it)
+
+    # Step 2: 過濾已被 Deal 覆蓋的 HistoryOrder，並按 exec_id 去重（防止多子帳戶重覆拉取同一成交單）
+    filtered_items: List[Dict[str, Any]] = []
+    seen_exec_ids: Dict[str, Dict[str, Any]] = {}
+    no_id_items: List[Dict[str, Any]] = []
+    for it in norm_items:
+        src = str(it.get("source", ""))
+        ord_id = str(it.get("order_id", "")).strip()
+        if ord_id and "HistoryOrder" in src and (it["ticker"], it["trd_side"], ord_id) in deal_order_ids:
+            continue
+        ex_id = str(it.get("exec_id", "")).strip()
+        if ex_id:
+            prev = seen_exec_ids.get(ex_id)
+            if prev is None or _src_priority(it) >= _src_priority(prev):
+                seen_exec_ids[ex_id] = it
+        else:
+            no_id_items.append(it)
+    filtered_items = list(seen_exec_ids.values()) + no_id_items
+
+    # Step 3: [v60.0 修復港股同分鐘同價多手分批成交被誤刪（如閱文 200+200+200 變 200）]
+    # 先將帶有真實 order_id 的富途分批成交 (不同 deal_id) 完整累加合併，絕不以 (分鐘, 價格, 股數) 誤刪港股同價多手成交！
+    order_groups: Dict[tuple, List[Dict[str, Any]]] = {}
+    standalone_raw: List[Dict[str, Any]] = []
+    for it in filtered_items:
+        ord_id = str(it.get("order_id", "")).strip()
+        if ord_id and str(it.get("source", "")) != "JournalPair":
+            order_groups.setdefault((it["ticker"], it["trd_side"], ord_id), []).append(it)
+        else:
+            standalone_raw.append(it)
+
+    # 僅對無 order_id 的獨立流水（例如 CSV 匯入或舊紀錄）做語意去重
+    by_sem_standalone: Dict[tuple, Dict[str, Any]] = {}
+    for it in standalone_raw:
+        t_min = it["trade_time"][:16]
+        sem_key = (it["ticker"], it["trd_side"], t_min, round(it["price"], 3), it["shares"])
+        prev = by_sem_standalone.get(sem_key)
+        if prev is None or _src_priority(it) >= _src_priority(prev):
+            by_sem_standalone[sem_key] = it
+
+    merged_items: List[Dict[str, Any]] = list(by_sem_standalone.values())
+    for (tk, side, ord_id), grp in order_groups.items():
+        if len(grp) == 1:
+            merged_items.append(grp[0])
+            continue
+        grp.sort(key=lambda x: x["trade_time"])
+        tot_sh = sum(x["shares"] for x in grp)
+        vwap_px = round(sum(x["shares"] * x["price"] for x in grp) / max(tot_sh, 1), 4)
+        tot_fee = round(sum(float(x.get("fee", 0.0) or 0.0) for x in grp), 2)
+        base = dict(grp[-1])
+        base["shares"] = tot_sh
+        base["price"] = vwap_px
+        base["fee"] = tot_fee
+        base["exec_id"] = f"ORD_{ord_id}"
+        merged_items.append(base)
+
+    # Step 5: 若已有真實成交單，自動剔除同日同價的 JournalPair 衍生重複流水
+    real_day_keys = set()
+    for it in merged_items:
+        if str(it.get("source", "")) != "JournalPair":
+            real_day_keys.add((it["ticker"], it["trd_side"], it["trade_date"], round(it["price"], 2)))
+
+    cleaned: List[Dict[str, Any]] = []
+    for it in merged_items:
+        if str(it.get("source", "")) == "JournalPair":
+            if (it["ticker"], it["trd_side"], it["trade_date"], round(it["price"], 2)) in real_day_keys:
+                continue
+        cleaned.append(it)
+
+    cleaned.sort(key=lambda x: (x.get("trade_time", ""), str(x.get("exec_id", ""))), reverse=True)
+    return cleaned
+
+
+def _dedup_closed_trades_journal(journal_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """[v59.5 交易復盤淨化 + 同波段分批平倉整合 + 嚴格時間排序引擎]
+    1) 統一標準化 entry_date / exit_date / exit_time，並修正歷史倒置日期；
+    2) 徹底清除舊版本由鏡像模式以「今日日期 + 今日市價」偽造的『自動偵測清倉賣出 / 系統偵測已無持倉』假記錄（根治 AAPL/FOXA 錯日期與假盈利）；
+    3) 歸併同日同買賣價的分批拆單重複（例如 200+100+300股 -> 保留完整 300股）；
+    4) 清除重複 SELL 衍生的 0.00% FIFO_UNMATCHED_SELL 假記錄；
+    5) 【同波段分批平倉整合】同一股票、同一方向若持倉期重疊（例如閱文集團中間部分平倉獲利、之後再平餘倉），自動合併為 1 筆完整波段交易，計算加權買賣均價、總股數、合併淨盈虧與 R 倍數，並於備註保留各批次明細；
+    6) 嚴格按 (exit_time, exit_date, entry_date) 由新到舊排序。
+    """
+    if not journal_list:
+        return []
+
+    def _is_unmatched_same_price(item: Dict[str, Any]) -> bool:
+        tid = str(item.get("trade_id", ""))
+        if tid.startswith("FIFO_UNMATCHED_SELL_"):
+            return True
+        try:
+            ep = round(float(item.get("entry_price", 0.0) or 0.0), 2)
+            xp = round(float(item.get("exit_price", 0.0) or 0.0), 2)
+            ed = _normalize_iso_date(item.get("entry_date", ""))
+            xd = _normalize_iso_date(item.get("exit_date", ""))
+            return (ep > 0 and ep == xp and ed == xd and "早期底倉" in str(item.get("exit_reason", "")))
+        except Exception:
+            return False
+
+    def _is_auto_mirror_close(item: Dict[str, Any]) -> bool:
+        rsn = str(item.get("exit_reason", ""))
+        nts = str(item.get("notes", ""))
+        return ("自動偵測清倉賣出" in rsn) or ("系統偵測已無持倉" in rsn) or ("偵測到該持倉已平倉歸零" in nts)
+
+    def _quality_score(item: Dict[str, Any]) -> int:
+        score = 0
+        if not _is_unmatched_same_price(item):
+            score += 10
+        if not _is_auto_mirror_close(item):
+            score += 6
+        if str(item.get("trade_id", "")).startswith("FIFO_"):
+            score += 4
+        try:
+            if round(float(item.get("entry_price", 0.0) or 0.0), 2) != round(float(item.get("exit_price", 0.0) or 0.0), 2):
+                score += 5
+            if float(item.get("initial_sl", 0.0) or 0.0) > 0:
+                score += 2
+        except Exception:
+            pass
+        if str(item.get("notes", "")).strip():
+            score += 1
+        return score
+
+    def _days_diff(d1: str, d2: str) -> int:
+        try:
+            return abs((datetime.strptime(d1[:10], "%Y-%m-%d") - datetime.strptime(d2[:10], "%Y-%m-%d")).days)
+        except Exception:
+            return 9999
+
+    # Step 0 & 1: 標準化欄位並直接清除所有偽造的「自動偵測清倉賣出」假記錄
+    step1_list: List[Dict[str, Any]] = []
+    for raw in journal_list:
+        if not isinstance(raw, dict):
+            continue
+        if _is_auto_mirror_close(raw):
+            continue
+        it = dict(raw)
+        tk = str(it.get("ticker", "")).strip().upper()
+        d_code = "SHORT" if "SHORT" in str(it.get("dir_code", "LONG")).upper() else "LONG"
+        ed = _normalize_iso_date(it.get("entry_date", ""))
+        xd = _normalize_iso_date(it.get("exit_date", ""))
+        if not ed and xd:
+            ed = xd
+        if not xd and ed:
+            xd = ed
+        if ed and xd and ed > xd:
+            ed, xd = xd, ed
+        try:
+            ep = float(it.get("entry_price", 0.0) or 0.0)
+            xp = float(it.get("exit_price", 0.0) or 0.0)
+            sh = int(round(float(it.get("shares", 0) or 0)))
+        except Exception:
+            continue
+        if not tk or xp <= 0 or sh <= 0:
+            continue
+        it["ticker"] = tk
+        it["dir_code"] = d_code
+        it["entry_date"] = ed
+        it["exit_date"] = xd
+        x_tm = _normalize_iso_datetime(it.get("exit_time") or xd, default_time="15:30:00")
+        if x_tm and xd and x_tm[:10] != xd:
+            x_tm = f"{xd} {x_tm[11:19] if len(x_tm) >= 19 else '15:30:00'}"
+        it["exit_time"] = x_tm or f"{xd} 15:30:00"
+        it["entry_price"] = round(ep, 3)
+        it["exit_price"] = round(xp, 3)
+        it["shares"] = sh
+        step1_list.append(it)
+
+    # Step 2: 語意完全相同之交易合併去重
+    by_sem: Dict[tuple, Dict[str, Any]] = {}
+    for it in step1_list:
+        sem_key = (
+            it["ticker"], it["dir_code"], it["entry_date"], it["exit_date"],
+            round(it["entry_price"], 2), round(it["exit_price"], 2), it["shares"]
+        )
+        prev = by_sem.get(sem_key)
+        if prev is None or _quality_score(it) >= _quality_score(prev):
+            by_sem[sem_key] = it
+
+    # Step 3: 同股同日同買賣價的分批拆單去重與合併 (例如 200股 + 100股 + 300股 -> 僅保留 300股)
+    price_groups: Dict[tuple, List[Dict[str, Any]]] = {}
+    for it in by_sem.values():
+        g_key = (
+            it["ticker"], it["dir_code"], it["exit_date"],
+            round(it["entry_price"], 2), round(it["exit_price"], 2)
+        )
+        price_groups.setdefault(g_key, []).append(it)
+
+    step3_list: List[Dict[str, Any]] = []
+    for g_key, grp in price_groups.items():
+        if len(grp) == 1:
+            step3_list.append(grp[0])
+            continue
+        grp.sort(key=lambda x: (-x["shares"], -_quality_score(x), x["entry_date"]))
+        top = grp[0]
+        others = grp[1:]
+        others_sum = sum(x["shares"] for x in others)
+        if top["shares"] == others_sum and all(_days_diff(top["entry_date"], x["entry_date"]) <= 2 for x in others):
+            step3_list.append(top)
+        elif all(x["entry_date"] == top["entry_date"] for x in others):
+            merged = dict(top)
+            merged["shares"] = sum(x["shares"] for x in grp)
+            merged["round_trip_fee"] = round(sum(float(x.get("round_trip_fee", 0.0) or 0.0) for x in grp), 2)
+            merged["net_pnl"] = round(sum(float(x.get("net_pnl", 0.0) or 0.0) for x in grp), 2)
+            merged["exit_time"] = max(x["exit_time"] for x in grp)
+            step3_list.append(merged)
+        else:
+            step3_list.extend(grp)
+
+    # Step 4: [v60.0] 徹底清除所有無配對 0.00% 幽靈平倉列（包括 FIFO_UNMATCHED_SELL 及同日同買賣價 0.00% 偽平倉，如 2018.HK / INTC 100股）
+    step4_list: List[Dict[str, Any]] = []
+    for it in step3_list:
+        if _is_unmatched_same_price(it):
+            continue
+        if (
+            it["entry_date"] == it["exit_date"]
+            and round(it["entry_price"], 2) == round(it["exit_price"], 2)
+            and abs(float(it.get("pnl_pct", 0.0) or 0.0)) < 0.01
+        ):
+            continue
+        step4_list.append(it)
+
+    # Step 5: [v59.5 同波段分批平倉整合] 將同一股票、同一方向且持倉期重疊的分批平倉（如部分止盈 + 餘倉平倉）整合為 1 筆完整波段交易
+    by_tk_dir: Dict[tuple, List[Dict[str, Any]]] = {}
+    unmatched_keep: List[Dict[str, Any]] = []
+    for it in step4_list:
+        if _is_unmatched_same_price(it):
+            unmatched_keep.append(it)
+        else:
+            by_tk_dir.setdefault((it["ticker"], it["dir_code"]), []).append(it)
+
+    consolidated: List[Dict[str, Any]] = list(unmatched_keep)
+    for (tk, d_code), grp in by_tk_dir.items():
+        grp.sort(key=lambda x: (x["entry_date"], x["exit_date"], x["exit_time"]))
+        campaigns: List[List[Dict[str, Any]]] = []
+        for tr in grp:
+            if not campaigns:
+                campaigns.append([tr])
+                continue
+            cur_camp = campaigns[-1]
+            camp_max_exit = max(x["exit_date"] for x in cur_camp)
+            camp_min_entry = min(x["entry_date"] for x in cur_camp)
+            # 若新交易的買入日早於或等於當前波段最遲賣出日（同一次持倉期間的分批減倉/加倉平倉），合併入同一波段
+            if tr["entry_date"] <= camp_max_exit and tr["exit_date"] >= camp_min_entry:
+                cur_camp.append(tr)
+            else:
+                campaigns.append([tr])
+
+        for camp in campaigns:
+            if len(camp) == 1:
+                consolidated.append(camp[0])
+                continue
+            # [v59.6 嚴格冪等性修復] 防止磁碟合併時將已整合的 CAMP_ 列與原始 FIFO_ 列重複累加（根治 1000股變 5000股！）
+            raw_rows = [x for x in camp if not str(x.get("trade_id", "")).startswith("CAMP_")]
+            camp_rows = [x for x in camp if str(x.get("trade_id", "")).startswith("CAMP_")]
+            if raw_rows:
+                # 若同時存在原始分批列與舊 CAMP_ 列，一律丟棄舊 CAMP_ 列，只由原始列重新計算
+                # 並先按 (exit_date, round(exit_price, 2), shares) 去重，防止多來源同批次重複計入
+                uniq_raw: Dict[tuple, Dict[str, Any]] = {}
+                for rx in raw_rows:
+                    r_key = (rx["exit_date"], round(rx["exit_price"], 2), rx["shares"])
+                    prev_r = uniq_raw.get(r_key)
+                    if prev_r is None or _quality_score(rx) >= _quality_score(prev_r):
+                        uniq_raw[r_key] = rx
+                camp = list(uniq_raw.values())
+                if len(camp) == 1:
+                    consolidated.append(camp[0])
+                    continue
+            else:
+                # 若整個波段內只有已合併過的 CAMP_ 列，絕不可再相加，只保留最精準的一筆（股數較小且最接近原始真實值，避免倍數膨脹）
+                camp_rows.sort(key=lambda x: (x["shares"], -_quality_score(x), x["exit_time"]))
+                consolidated.append(camp_rows[0])
+                continue
+            camp.sort(key=lambda x: (x["exit_date"], x["exit_time"]))
+            tot_sh = sum(x["shares"] for x in camp)
+            vwap_entry = round(sum(x["shares"] * x["entry_price"] for x in camp) / max(tot_sh, 1), 3)
+            vwap_exit = round(sum(x["shares"] * x["exit_price"] for x in camp) / max(tot_sh, 1), 3)
+            tot_fee = round(sum(float(x.get("round_trip_fee", 0.0) or 0.0) for x in camp), 2)
+            tot_net = round(sum(float(x.get("net_pnl", 0.0) or 0.0) for x in camp), 2)
+            pnl_pct = round(((vwap_exit - vwap_entry) / max(vwap_entry, 1e-6)) * 100.0 * (1.0 if d_code == "LONG" else -1.0), 2)
+
+            sl_vals = [float(x.get("initial_sl", 0.0) or 0.0) for x in camp if float(x.get("initial_sl", 0.0) or 0.0) > 0]
+            ref_sl = sl_vals[0] if sl_vals else round(vwap_entry * (0.955 if d_code == "LONG" else 1.045), 3)
+            unit_risk = abs(vwap_entry - ref_sl) if abs(vwap_entry - ref_sl) > 1e-5 else vwap_entry * 0.045
+            realized_r = round(((vwap_exit - vwap_entry) if d_code == "LONG" else (vwap_entry - vwap_exit)) / max(unit_risk, 1e-5), 2)
+
+            first_ed = min(x["entry_date"] for x in camp)
+            last_xd = max(x["exit_date"] for x in camp)
+            last_xtm = max(x["exit_time"] for x in camp)
+            tranche_desc = "｜".join([f"{x['exit_date'][5:]} 賣{x['shares']}股@{x['exit_price']:.2f}" for x in camp])
+
+            base = dict(camp[-1])
+            base["trade_id"] = f"CAMP_{tk}_{d_code}_{first_ed}_{last_xd}_{tot_sh}"
+            base["entry_date"] = first_ed
+            base["exit_date"] = last_xd
+            base["exit_time"] = last_xtm
+            base["shares"] = tot_sh
+            base["entry_price"] = vwap_entry
+            base["exit_price"] = vwap_exit
+            base["round_trip_fee"] = tot_fee
+            base["net_pnl"] = tot_net
+            base["pnl_pct"] = pnl_pct
+            base["realized_r"] = realized_r
+            base["exit_reason"] = f"📊 同波段分 {len(camp)} 批平倉整合"
+            base["notes"] = f"分 {len(camp)} 批整合：{tranche_desc}"
+            consolidated.append(base)
+
+    # Step 6: 嚴格按時間順序（最新賣出時間優先，其次賣出日、買入日）排序
+    consolidated.sort(
+        key=lambda x: (
+            _normalize_iso_datetime(x.get("exit_time") or x.get("exit_date", "")),
+            _normalize_iso_date(x.get("exit_date", "")),
+            _normalize_iso_date(x.get("entry_date", "")),
+            str(x.get("recorded_at", ""))
+        ),
+        reverse=True
+    )
+    return consolidated
+
 def load_persisted_state_from_disk(persistent_dict: dict) -> None:
-    """[v59.0 雙軌永久帳本讀取] 從本地磁碟與獨立交易總帳本載入所有歷史買賣成交、已平倉復盤日誌与全量持倉，支援跨重啟去重合併，永不遺失過往交易"""
+    """[v59.1 雙軌永久帳本讀取] 從本地磁碟與獨立交易總帳本載入所有歷史買賣成交、已平倉復盤日誌與全量持倉，支援跨重啟語意去重合併"""
     try:
         for f_path in [STATE_BACKUP_FILE, ACCOUNT_ALL_TRADES_LEDGER_FILE]:
             if _os_lib.path.exists(f_path):
@@ -3980,18 +4435,22 @@ def load_persisted_state_from_disk(persistent_dict: dict) -> None:
                     if "user_holding_directions" in data and isinstance(data["user_holding_directions"], dict):
                         persistent_dict.setdefault("user_holding_directions", {}).update(data["user_holding_directions"])
                     if "closed_trades_journal" in data and isinstance(data["closed_trades_journal"], list):
-                        persistent_dict["closed_trades_journal"] = _merge_dedup_list_by_key(
-                            persistent_dict.get("closed_trades_journal", []),
-                            data["closed_trades_journal"],
-                            key_field="trade_id",
-                            sort_field="exit_date"
+                        persistent_dict["closed_trades_journal"] = _dedup_closed_trades_journal(
+                            _merge_dedup_list_by_key(
+                                persistent_dict.get("closed_trades_journal", []),
+                                data["closed_trades_journal"],
+                                key_field="trade_id",
+                                sort_field="exit_date"
+                            )
                         )
                     if "account_all_executions_ledger" in data and isinstance(data["account_all_executions_ledger"], list):
-                        persistent_dict["account_all_executions_ledger"] = _merge_dedup_list_by_key(
-                            persistent_dict.get("account_all_executions_ledger", []),
-                            data["account_all_executions_ledger"],
-                            key_field="exec_id",
-                            sort_field="trade_time"
+                        persistent_dict["account_all_executions_ledger"] = _dedup_executions_ledger(
+                            _merge_dedup_list_by_key(
+                                persistent_dict.get("account_all_executions_ledger", []),
+                                data["account_all_executions_ledger"],
+                                key_field="exec_id",
+                                sort_field="trade_time"
+                            )
                         )
                     if "futu_last_sync_info" in data and isinstance(data["futu_last_sync_info"], dict):
                         persistent_dict["futu_last_sync_info"] = dict(data["futu_last_sync_info"])
@@ -4006,7 +4465,7 @@ def load_persisted_state_from_disk(persistent_dict: dict) -> None:
 
 
 def save_persisted_state_to_disk(persistent_dict: dict, watchlist_dict: Optional[ dict ] = None) -> None:
-    """[v59.0 雙軌永久帳本寫入] 以原子寫入方式同時備份至系統狀態檔與獨立全帳號交易總帳本，確保所有歷史交易只增不減、永不截斷"""
+    """[v59.1 雙軌永久帳本寫入] 以原子寫入方式同時備份至系統狀態檔與獨立全帳號交易總帳本，寫入前自動執行語意去重"""
     try:
         if watchlist_dict is not None:
             persistent_dict["_disk_watchlist_dict"] = watchlist_dict
@@ -4026,17 +4485,21 @@ def save_persisted_state_to_disk(persistent_dict: dict, watchlist_dict: Optional
                 pass
         persistent_dict.pop("_allow_journal_delete_sync", None)
 
-        merged_closed = _merge_dedup_list_by_key(
-            disk_closed,
-            persistent_dict.get("closed_trades_journal", []),
-            key_field="trade_id",
-            sort_field="exit_date"
+        merged_closed = _dedup_closed_trades_journal(
+            _merge_dedup_list_by_key(
+                disk_closed,
+                persistent_dict.get("closed_trades_journal", []),
+                key_field="trade_id",
+                sort_field="exit_date"
+            )
         )
-        merged_execs = _merge_dedup_list_by_key(
-            disk_execs,
-            persistent_dict.get("account_all_executions_ledger", []),
-            key_field="exec_id",
-            sort_field="trade_time"
+        merged_execs = _dedup_executions_ledger(
+            _merge_dedup_list_by_key(
+                disk_execs,
+                persistent_dict.get("account_all_executions_ledger", []),
+                key_field="exec_id",
+                sort_field="trade_time"
+            )
         )
         persistent_dict["closed_trades_journal"] = merged_closed
         persistent_dict["account_all_executions_ledger"] = merged_execs
@@ -4048,6 +4511,7 @@ def save_persisted_state_to_disk(persistent_dict: dict, watchlist_dict: Optional
             "closed_trades_journal": merged_closed,
             "account_all_executions_ledger": merged_execs,
             "futu_last_sync_info": persistent_dict.get("futu_last_sync_info", {}),
+            "futu_bridge_prefs": persistent_dict.get("futu_bridge_prefs", {}),
             "auto_entry_date_hash_store": persistent_dict.get("auto_entry_date_hash_store", {}),
             "signal_lifecycle_store": persistent_dict.get("signal_lifecycle_store", {}),
             "watchlist_dict": watchlist_dict if watchlist_dict is not None else persistent_dict.get("_disk_watchlist_dict", {})
@@ -4061,6 +4525,12 @@ def save_persisted_state_to_disk(persistent_dict: dict, watchlist_dict: Optional
             if payload["watchlist_dict"]:
                 _global_persistent_data["_disk_watchlist_dict"] = dict(payload["watchlist_dict"])
 
+        if _os_lib.path.exists(ACCOUNT_ALL_TRADES_LEDGER_FILE):
+            try:
+                import shutil as _shutil_bak
+                _shutil_bak.copy2(ACCOUNT_ALL_TRADES_LEDGER_FILE, ACCOUNT_ALL_TRADES_LEDGER_FILE + ".bak")
+            except Exception:
+                pass
         for target_file in [STATE_BACKUP_FILE, ACCOUNT_ALL_TRADES_LEDGER_FILE]:
             tmp_path = target_file + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -7790,6 +8260,259 @@ US_MOMENTUM_POOL = [
     "RKLB", "IONQ", "AFRM", "SOFI", "UPST", "DUOL", "CAVA", "TOST", "CELH", "VRT"
 ]
 
+# ==============================================================================
+# [v60.1 兩全其美引擎] 跨板塊輪動補充池 + 富途 OpenD 全市場動態活水初篩 + 板塊資金羅盤
+# （100% 保留原有 5 個靜態池不動，新增「核心底座 + 活水探索」混合漏斗）
+# ==============================================================================
+US_SECTOR_ROTATION_SUPPLEMENT_POOL = [
+    # 醫療 / 生技 / 醫療器械
+    "LLY", "UNH", "ISRG", "VRTX", "REGN", "BSX", "SYK", "NVO",
+    # 能源 / 油氣 / 核能與電力基建
+    "XOM", "CVX", "SLB", "EOG", "MPC", "CCJ",
+    # 工業 / 軍工 / 航空基建
+    "CAT", "URI", "ETN", "PH", "LMT", "RTX", "GD", "PWR",
+    # 黃金 / 銅 / 大宗商品材料
+    "NEM", "AEM", "WPM", "FCX", "SCCO", "LIN",
+    # 金融 / 投行 / 支付與保險
+    "JPM", "GS", "MS", "KKR", "APO", "PGR",
+    # 消費零售 / 餐飲 / 服務
+    "COST", "WMT", "DECK", "CMG"
+]
+
+HK_SECTOR_ROTATION_SUPPLEMENT_POOL = [
+    # 黃金 / 銅 / 資源週期
+    "2899.HK", "1818.HK", "3993.HK", "0358.HK", "2600.HK", "1378.HK",
+    # 電訊 / 公用 / 電力設備與基建
+    "0941.HK", "0728.HK", "1072.HK", "0836.HK", "0916.HK",
+    # 創新藥 / 生技醫療
+    "9926.HK", "6160.HK", "1801.HK", "2269.HK", "9969.HK",
+    # 新消費 / 旅遊 / 內需領頭羊
+    "9992.HK", "0780.HK", "9896.HK", "1929.HK",
+    # 券商 / 保險 / 金融彈性
+    "6030.HK", "3908.HK", "2628.HK", "0388.HK",
+    # AI / 智駕 / 軟件與設備
+    "0268.HK", "3888.HK", "9698.HK", "1347.HK"
+]
+
+SECTOR_COMPASS_ETFS: List[Tuple[str, str, str]] = [
+    ("XLK", "🇺🇸 科技板塊", "US"),
+    ("SMH", "🇺🇸 半導體", "US"),
+    ("XLV", "🇺🇸 醫療保健", "US"),
+    ("IBB", "🇺🇸 生物科技", "US"),
+    ("XLE", "🇺🇸 能源油氣", "US"),
+    ("XLI", "🇺🇸 工業基建", "US"),
+    ("ITA", "🇺🇸 航太軍工", "US"),
+    ("XLF", "🇺🇸 金融銀行", "US"),
+    ("GDX", "🇺🇸 黃金礦業", "US"),
+    ("XLB", "🇺🇸 基礎材料", "US"),
+    ("XLY", "🇺🇸 非必需消費", "US"),
+    ("2800.HK", "🇭🇰 盈富基金 (恒指)", "HK"),
+    ("3033.HK", "🇭🇰 南方恒生科技", "HK"),
+    ("KWEB", "🇨🇳 中概互聯網", "HK"),
+    ("FXI", "🇨🇳 富時中國大型股", "HK"),
+]
+
+
+def fetch_futu_dynamic_discovery_pool(
+    market_code: str,
+    futu_host: str = "127.0.0.1",
+    futu_port: int = 11111,
+    max_count: int = 38
+) -> Tuple[List[str], str]:
+    """
+    [v60.1] 呼叫富途 OpenD `get_stock_filter` 執行第一層全市場動態活水初篩：
+    - 強制流動性與防仙股硬濾網：
+      * 港股 (HK)：股價 >= HK$3.0、當日成交額 >= HK$5,000 萬
+      * 美股 (US)：股價 >= US$8.0、當日成交額 >= US$2,500 萬
+    - 按當日升幅/動能由高至低取 Top `max_count` 隻活水標的；若未連線 OpenD 則秒速安全降級，絕不卡死。
+    """
+    q_ctx = None
+    try:
+        from futu import OpenQuoteContext, Market, SimpleFilter, StockField, SortDir, RET_OK  # type: ignore
+        mkt_enum = Market.HK if market_code == "HK" else Market.US
+        min_px = 3.0 if market_code == "HK" else 8.0
+        min_turnover = 50_000_000.0 if market_code == "HK" else 25_000_000.0
+
+        f_px = SimpleFilter()
+        f_px.filter_min = min_px
+        f_px.stock_field = StockField.CUR_PRICE
+        f_px.is_no_filter = False
+
+        f_turn = SimpleFilter()
+        f_turn.filter_min = min_turnover
+        f_turn.stock_field = StockField.TURNOVER
+        f_turn.is_no_filter = False
+
+        f_chg = SimpleFilter()
+        f_chg.filter_min = 0.5
+        f_chg.filter_max = 35.0
+        f_chg.stock_field = StockField.CHANGE_RATE
+        f_chg.sort = SortDir.DESCEND
+        f_chg.is_no_filter = False
+
+        q_ctx = OpenQuoteContext(host=futu_host, port=int(futu_port))
+        ret, data = q_ctx.get_stock_filter(market=mkt_enum, filter_list=[f_px, f_turn, f_chg], begin=0, num=max(40, max_count + 15))
+        if ret != RET_OK or not data or len(data) < 3:
+            return [], "富途條件選股暫無回傳，已自動切換全板塊均衡補充池"
+
+        stock_list = data[2] or []
+        discovered: List[str] = []
+        for item in stock_list:
+            raw_code = str(getattr(item, "stock_code", "") or "")
+            sys_tk = _convert_futu_code_to_sys_ticker(raw_code)
+            if not sys_tk:
+                continue
+            # 排除 ETF/窩輪/牛熊證（港股 5 位數以外或常見指數 ETF 代碼）
+            if market_code == "HK":
+                num_part = sys_tk.replace(".HK", "")
+                if not num_part.isdigit():
+                    continue
+                if int(num_part) >= 10000:
+                    continue
+            if sys_tk not in discovered:
+                discovered.append(sys_tk)
+            if len(discovered) >= max_count:
+                break
+        if discovered:
+            return discovered, f"已由富途 OpenD 全市場即時篩出 {len(discovered)} 隻高流動性活水標的"
+        return [], "富途條件選股結果為空（可能處於非交易時段），已自動啟用全板塊均衡補充池"
+    except Exception as e_flt:
+        swing_logger.debug(f"Futu dynamic discovery skipped ({market_code}): {e_flt}")
+        return [], "未連線富途 OpenD，已無縫降級為「核心底座 + 全板塊均衡補充池」"
+    finally:
+        if q_ctx is not None:
+            try:
+                q_ctx.close()
+            except Exception:
+                pass
+
+
+def build_core_satellite_hybrid_pool(
+    market_code: str,
+    futu_host: str = "127.0.0.1",
+    futu_port: int = 11111,
+    futu_enabled: bool = False,
+    target_total: int = 86
+) -> Tuple[List[str], Dict[str, str], str]:
+    """
+    [v60.1 兩全其美混合選股池建構器]
+    - 核心底座 (Core)：保留用戶熟悉的港/美股主流龍頭 (~45~50 隻)
+    - 動態活水 (Satellite)：優先以富途 OpenD 全市場條件初篩 (防仙股濾網) 補入 ~35~38 隻新黑馬；
+      若離線或不足額，則以跨板塊輪動補充池自動補齊至 ~86 隻，兼顧速度與零盲區！
+    """
+    core_base = list(HK_MOMENTUM_POOL[:50]) if market_code == "HK" else list(US_MOMENTUM_POOL[:46])
+    supp_base = list(HK_SECTOR_ROTATION_SUPPLEMENT_POOL) if market_code == "HK" else list(US_SECTOR_ROTATION_SUPPLEMENT_POOL)
+
+    combined: List[str] = []
+    source_map: Dict[str, str] = {}
+    for tk in core_base:
+        if tk not in source_map:
+            combined.append(tk)
+            source_map[tk] = "🏛️ 核心池"
+
+    futu_added = 0
+    status_note = "已採用「核心底座 + 全板塊均衡補充池」（未啟用富途連線）"
+    if futu_enabled:
+        dyn_tks, dyn_msg = fetch_futu_dynamic_discovery_pool(
+            market_code=market_code,
+            futu_host=futu_host,
+            futu_port=futu_port,
+            max_count=max(25, target_total - len(combined))
+        )
+        for tk in dyn_tks:
+            if tk not in source_map and len(combined) < target_total:
+                combined.append(tk)
+                source_map[tk] = "🆕 富途活水發現"
+                futu_added += 1
+        status_note = dyn_msg
+
+    supp_added = 0
+    for tk in supp_base:
+        if tk not in source_map and len(combined) < target_total:
+            combined.append(tk)
+            source_map[tk] = "🧭 板塊輪動補充"
+            supp_added += 1
+
+    summary_msg = f"混合池組成：🏛️ 核心底座 {len(core_base)} 隻 ＋ 🆕 富途活水 {futu_added} 隻 ＋ 🧭 跨板塊補充 {supp_added} 隻（共 {len(combined)} 隻）｜{status_note}"
+    return combined, source_map, summary_msg
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _compute_sector_rs_compass_df() -> pd.DataFrame:
+    """[v60.1] 計算美股與港股主要板塊 ETF 的 5日/20日/63日強弱與均線結構"""
+    syms = [x[0] for x in SECTOR_COMPASS_ETFS]
+    rows = []
+    try:
+        raw = yf.download(syms, period="4mo", interval="1d", progress=False, threads=True, auto_adjust=True)
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+        for sym, label, mkt in SECTOR_COMPASS_ETFS:
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    if sym in raw.columns.get_level_values(1):
+                        s_c = raw["Close"][sym].dropna()
+                    elif sym in raw.columns.get_level_values(0):
+                        s_c = raw[sym]["Close"].dropna()
+                    else:
+                        continue
+                else:
+                    s_c = raw["Close"].dropna()
+                if len(s_c) < 25:
+                    continue
+                c_now = float(s_c.iloc[-1])
+                c_5 = float(s_c.iloc[-6]) if len(s_c) >= 6 else float(s_c.iloc[0])
+                c_20 = float(s_c.iloc[-21]) if len(s_c) >= 21 else float(s_c.iloc[0])
+                c_63 = float(s_c.iloc[-64]) if len(s_c) >= 64 else float(s_c.iloc[0])
+                r5 = ((c_now - c_5) / max(c_5, 1e-6)) * 100.0
+                r20 = ((c_now - c_20) / max(c_20, 1e-6)) * 100.0
+                r63 = ((c_now - c_63) / max(c_63, 1e-6)) * 100.0
+                ma20 = float(s_c.tail(20).mean())
+                ma50 = float(s_c.tail(50).mean()) if len(s_c) >= 50 else ma20
+                if c_now >= ma20 and ma20 >= ma50:
+                    trend_s = "🟢 強勢多頭 (站穩20/50MA)"
+                elif c_now >= ma50:
+                    trend_s = "🟡 回踩50MA整理"
+                else:
+                    trend_s = "🔴 弱勢破線 (低於20/50MA)"
+                rs_score = round(0.45 * r20 + 0.35 * r63 + 0.20 * r5, 2)
+                rows.append({
+                    "板塊 ETF": f"{sym} {label}",
+                    "市場": "🇭🇰 港/中概" if mkt == "HK" else "🇺🇸 美股",
+                    "5日%": round(r5, 2),
+                    "20日%": round(r20, 2),
+                    "63日%": round(r63, 2),
+                    "動能綜合分": rs_score,
+                    "趨勢結構": trend_s
+                })
+            except Exception:
+                continue
+    except Exception:
+        return pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
+    df_out = pd.DataFrame(rows).sort_values(by="動能綜合分", ascending=False).reset_index(drop=True)
+    return df_out
+
+
+def render_sector_rs_compass_panel(context_key: str = "mode1_sector") -> None:
+    """[v60.1] 按需載入之「🧭 板塊資金輪動羅盤」，幫助 Swing Trader 先看資金流向再掃個股"""
+    with st.expander("🧭 板塊資金輪動羅盤 (Sector RS 強弱排行｜先睇大資金喺邊個板塊，按需載入不拖慢開頁)", expanded=False):
+        s_key = f"_sector_compass_loaded_{context_key}"
+        if st.button("🔄 即時掃描港美股主流板塊強弱 (15 隻代表 ETF)", key=f"btn_sector_compass_{context_key}"):
+            st.session_state[s_key] = True
+        if not st.session_state.get(s_key, False):
+            st.caption("💡 點擊上方按鈕即時排列科技、半導體、醫療、能源、工業軍工、黃金、金融與恒生科技嘅 5日/20日/63日相對強弱，助你避開弱勢板塊。")
+            return
+        with st.spinner("正在計算 15 大主流板塊 ETF 相對強弱..."):
+            df_sec = _compute_sector_rs_compass_df()
+        if df_sec.empty:
+            st.warning("⚠️ 暫未能取得板塊 ETF 數據，請稍後再試。")
+        else:
+            top3 = " ｜ ".join(df_sec["板塊 ETF"].head(3).tolist())
+            st.success(f"🔥 **當前資金最強 Top 3 板塊**：{top3}")
+            st.dataframe(df_sec, use_container_width=True, hide_index=True)
+
+
 @st.cache_data(ttl=3600)
 def get_us_dual_benchmark_regime(interval: str = "1d") -> Dict[str, Any]:
     out = {"nasdaq_bear": False, "nasdaq_dist_days": 0, "dual_index_hostile": False, "dual_index_note": ""}
@@ -10216,9 +10939,11 @@ def sync_full_account_all_trades_from_futu_opend(
     }
 
     live_futu_positions: Dict[str, Dict[str, Any]] = {}
+    seen_pos_acc_tk: set = set()  # [v60.2 修復] 記錄已讀取之 (acc_id, ticker)，徹底杜絕富途綜合帳戶跨港/美循環雙倍計算股數！
     all_raw_historical_deals: List[Dict[str, Any]] = []
     recent_deals_exit_px: Dict[str, float] = {}
     queried_markets_ok: List[str] = []
+    rate_limited_markets: List[str] = []
     watchlist_hold_group_tks: List[str] = []
 
     # Step A: 從 OpenQuoteContext 讀取富途自選股「持倉」分組（對應手機截圖「持倉」Tab）
@@ -10264,7 +10989,7 @@ def sync_full_account_all_trades_from_futu_opend(
                         if env_str_target in str(r.get("trd_env", "")).upper()
                     ]
                     if matched_accs:
-                        acc_ids_to_query = matched_accs
+                        acc_ids_to_query = list(dict.fromkeys(matched_accs))
             except Exception:
                 acc_ids_to_query = [0]
 
@@ -10285,11 +11010,15 @@ def sync_full_account_all_trades_from_futu_opend(
                             cost_p = float(prow.get("cost_price", 0.0) or prow.get("cost_price_valid", 0.0) or prow.get("nominal_price", 0.0) or 0.0)
                             nom_p = float(prow.get("nominal_price", 0.0) or cost_p or 0.0)
                             if abs(qty_val) <= 1e-5:
-                                if nom_p > 0:
-                                    recent_deals_exit_px[sys_tk] = nom_p
+                                # [v59.3 修復] 不再將 0 股持倉的今日名義價寫入 recent_deals_exit_px，避免覆蓋真實歷史賣出價
                                 continue
                             dir_c = "SHORT" if qty_val < 0 else "LONG"
-                            # 若同一股票在現金倉與孖展倉皆有持倉，自動累加股數並計算加權平均成本！
+                            _acc_pos_key = (int(acc_id_val), sys_tk, dir_c)
+                            if _acc_pos_key in seen_pos_acc_tk:
+                                # 綜合帳戶在 HK/US 兩次循環會回傳同一持倉，必須跳過以免股數變 2 倍！
+                                continue
+                            seen_pos_acc_tk.add(_acc_pos_key)
+                            # 若同一股票確實分佈於兩個不同 acc_id (例如獨立現金倉與獨立孖展倉)，才累加股數
                             if sys_tk in live_futu_positions and live_futu_positions[sys_tk]["dir_code"] == dir_c:
                                 prev_q = int(live_futu_positions[sys_tk]["qty"])
                                 prev_c = float(live_futu_positions[sys_tk]["cost_price"])
@@ -10306,21 +11035,35 @@ def sync_full_account_all_trades_from_futu_opend(
                                     "market": mkt_code_str
                                 }
 
-                # B2. 查詢跨年份歷史成交 (`history_deal_list_query`) — 以 85 日滑動窗口分段抓取帳號所有歷史交易
+                # B2 & B3. [v59.4 極速防卡死同步引擎]
+                # 1) 設定嚴格時間預算 (每市場最多 12 秒)，絕不因 5~10 年長區間限頻重試而卡死介面；
+                # 2) 最近 180 日（首 2 個窗口）同時查 history_deal_list_query + history_order_list_query，確保美股盤前/盤後/夜盤成交 100% 補齊；
+                # 3) 較早期歷史僅在該窗口無 deal 時才補查 order；一旦遇富途頻率限制即安全跳出，保留已拉取之實時持倉與近期成交！
                 if is_real_env:
                     cur_end = end_dt_now
                     days_covered = 0
-                    while days_covered < total_days_back:
+                    _win_idx = 0
+                    _mkt_t0 = time.time()
+                    _rate_limited = False
+                    while days_covered < total_days_back and not _rate_limited:
+                        if (time.time() - _mkt_t0) > 12.0:
+                            break
                         cur_start = cur_end - timedelta(days=window_step_days)
                         s_str = cur_start.strftime("%Y-%m-%d 00:00:00")
                         e_str = cur_end.strftime("%Y-%m-%d 23:59:59")
                         got_window_deals = False
+
                         try:
                             try:
                                 hd_ret, hd_df = trd_ctx.history_deal_list_query(start=s_str, end=e_str, trd_env=target_env, acc_id=acc_id_val)
                             except TypeError:
                                 hd_ret, hd_df = trd_ctx.history_deal_list_query(start=s_str, end=e_str, trd_env=target_env)
-                            if hd_ret == RET_OK and hd_df is not None and not hd_df.empty:
+                            if hd_ret != RET_OK:
+                                if any(k in str(hd_df).lower() for k in ["freq", "limit", "頻率", "频率", "too many"]):
+                                    _rate_limited = True
+                                    if mkt_code_str not in rate_limited_markets:
+                                        rate_limited_markets.append(mkt_code_str)
+                            elif hd_df is not None and not hd_df.empty:
                                 got_window_deals = True
                                 for _, drow in hd_df.iterrows():
                                     d_tk = _convert_futu_code_to_sys_ticker(str(drow.get("code", "")))
@@ -10344,11 +11087,11 @@ def sync_full_account_all_trades_from_futu_opend(
                                         })
                                         if "SELL" in d_side:
                                             recent_deals_exit_px[d_tk] = d_px
-                        except Exception:
-                            pass
+                        except Exception as _hd_err:
+                            swing_logger.debug(f"Futu history_deal_list_query error ({mkt_code_str} {s_str[:10]}): {_hd_err}")
 
-                        # B3. 雙重保障：若該窗口未返回 deal，或為模擬倉，自動查詢歷史已成交訂單 (`history_order_list_query`)
-                        if not got_window_deals:
+                        # 近 180 日（首 2 窗口）必查 history_order_list_query 以補齊美股盤前/盤後/夜盤成交；更早期僅在無 deal 時補查
+                        if not _rate_limited and (_win_idx < 2 or not got_window_deals) and (time.time() - _mkt_t0) <= 12.0:
                             try:
                                 if _has_ord_status:
                                     ho_ret, ho_df = trd_ctx.history_order_list_query(
@@ -10360,7 +11103,10 @@ def sync_full_account_all_trades_from_futu_opend(
                                     )
                                 else:
                                     ho_ret, ho_df = trd_ctx.history_order_list_query(start=s_str, end=e_str, trd_env=target_env)
-                                if ho_ret == RET_OK and ho_df is not None and not ho_df.empty:
+                                if ho_ret != RET_OK:
+                                    if any(k in str(ho_df).lower() for k in ["freq", "limit", "頻率", "频率", "too many"]):
+                                        _rate_limited = True
+                                elif ho_df is not None and not ho_df.empty:
                                     for _, orow in ho_df.iterrows():
                                         o_status = str(orow.get("order_status", "")).upper()
                                         if "FILLED" not in o_status and "成交" not in o_status:
@@ -10371,6 +11117,14 @@ def sync_full_account_all_trades_from_futu_opend(
                                         o_side = str(orow.get("trd_side", "BUY")).upper()
                                         o_time = str(orow.get("updated_time", orow.get("create_time", s_str[:10])))
                                         o_id = str(orow.get("order_id", f"HO_{acc_id_val}_{o_tk}_{o_time}_{o_px}_{o_qty}"))
+                                        o_sess = str(orow.get("session", "")).upper()
+                                        sess_tag = ""
+                                        if "PRE" in o_sess:
+                                            sess_tag = " [盤前]"
+                                        elif "AFTER" in o_sess:
+                                            sess_tag = " [盤後]"
+                                        elif "OVERNIGHT" in o_sess or "NIGHT" in o_sess:
+                                            sess_tag = " [夜盤]"
                                         if o_px > 0 and o_qty > 0:
                                             all_raw_historical_deals.append({
                                                 "exec_id": f"FUTU_ORD_{o_id}",
@@ -10381,13 +11135,14 @@ def sync_full_account_all_trades_from_futu_opend(
                                                 "shares": int(round(o_qty)),
                                                 "trade_time": o_time,
                                                 "source": "FutuOpenD_HistoryOrder",
-                                                "notes": f"富途歷史已成交訂單 ({mkt_code_str} 帳戶 {acc_id_val})"
+                                                "notes": f"富途歷史已成交訂單{sess_tag} ({mkt_code_str} 帳戶 {acc_id_val})"
                                             })
                                             if "SELL" in o_side:
                                                 recent_deals_exit_px[o_tk] = o_px
-                            except Exception:
-                                pass
+                            except Exception as _ho_err:
+                                swing_logger.debug(f"Futu history_order_list_query error ({mkt_code_str} {s_str[:10]}): {_ho_err}")
 
+                        _win_idx += 1
                         cur_end = cur_start - timedelta(days=1)
                         days_covered += window_step_days
 
@@ -10433,7 +11188,8 @@ def sync_full_account_all_trades_from_futu_opend(
     if not queried_markets_ok and not watchlist_hold_group_tks:
         return False, "❌ 未能從富途 OpenD 讀取港股或美股資料，請確認 Mac 已打開並登入 FutuOpenD。"
 
-    # Step C: 執行全帳號歷史成交 FIFO / 加權成本配對重建
+    # Step C: 先對原始成交做語意去重，再執行全帳號歷史成交 FIFO / 加權成本配對重建
+    all_raw_historical_deals = _dedup_executions_ledger(all_raw_historical_deals)
     fifo_summary = reconstruct_all_account_trades_and_holdings_fifo(all_raw_historical_deals, source_tag="FutuOpenD_AllHistory")
     fifo_open_map = fifo_summary.get("open_positions", {})
 
@@ -10516,35 +11272,24 @@ def sync_full_account_all_trades_from_futu_opend(
         }
 
     if sync_mirror_mode:
-        protected_watch_set = set(watchlist_hold_group_tks)
+        # [v59.5 核心修正] 鏡像模式只負責清理已清倉股票出「當前持倉名單」，
+        # 嚴禁再以「今日日期 + 今日市價」偽造平倉記錄（此舉曾導致早年已止損的 AAPL/FOXA 被錯寫成今日獲利平倉！）。
+        # 所有已平倉交易一律只由富途真實成交單 (HistoryDeal / HistoryOrder / TodayDeal) 或用戶手動輸入產生。
+        # [v60.2] 若該市場已成功讀取真實持倉 (position_list_query)，以真實持倉為準，
+        # 不再讓手機自選「持倉」分組留住已清倉的 0 股舊股（根治 1929.HK / 2382.HK 顯示買入成本「-」）
         for old_tk in list(prev_hold_set):
             old_mkt = "HK" if old_tk.endswith(".HK") else "US"
-            if old_mkt in queried_markets_ok and old_tk not in live_futu_positions and old_tk not in protected_watch_set:
-                old_rec = locked_map.get(old_tk, {})
-                exit_px_auto = recent_deals_exit_px.get(old_tk, 0.0)
-                if exit_px_auto <= 0:
-                    eq_auto = fetch_single_extended_hours_quote(old_tk)
-                    exit_px_auto = float(eq_auto.get("live_price") or 0.0)
-                if exit_px_auto <= 0 and old_tk in _PRELOADED_DAILY_CACHE and not _PRELOADED_DAILY_CACHE[old_tk].empty:
-                    exit_px_auto = float(_PRELOADED_DAILY_CACHE[old_tk]["Close"].iloc[-1])
-                if exit_px_auto > 0 and old_rec:
-                    record_closed_trade_to_journal(
-                        ticker=old_tk,
-                        dir_code=str(old_rec.get("dir_code", "LONG")),
-                        entry_price=float(old_rec.get("entry", exit_px_auto)),
-                        exit_price=float(exit_px_auto),
-                        shares=int(old_rec.get("held_shares", 100) or 100),
-                        entry_date_str=str(old_rec.get("anchor_date", datetime.now().strftime("%Y-%m-%d"))),
-                        exit_date_str=datetime.now().strftime("%Y-%m-%d"),
-                        initial_sl=float(old_rec.get("fixed_sl", 0.0)),
-                        initial_tp=float(old_rec.get("fixed_tp", 0.0)),
-                        exit_reason="🐂 富途OpenD自動偵測清倉賣出",
-                        notes="連線富途牛牛同步時偵測到該持倉已平倉歸零"
-                    )
-                    auto_closed_list.append(f"{old_tk}(@{exit_px_auto:.2f})")
+            if old_mkt in queried_markets_ok and old_tk not in live_futu_positions:
+                auto_closed_list.append(f"{old_tk}(已移出持倉)")
                 locked_map.pop(old_tk, None)
                 manual_dir_map.pop(old_tk, None)
                 wl_dict[hold_cat_name] = [x for x in wl_dict.get(hold_cat_name, []) if format_and_detect_market(x)[0] != old_tk]
+
+    # 同步完成後自動清除舊版本遺留的偽造「自動偵測清倉賣出」記錄並強制覆寫磁碟
+    persistent_data["closed_trades_journal"] = _dedup_closed_trades_journal(
+        persistent_data.get("closed_trades_journal", [])
+    )
+    persistent_data["_allow_journal_delete_sync"] = True
 
     st.session_state.watchlist_radar_results.pop(hold_cat_name, None)
     total_exec_cnt = len(persistent_data.get("account_all_executions_ledger", []))
@@ -10580,16 +11325,27 @@ def render_futu_opend_sidebar_bridge() -> None:
     """
     with st.sidebar.expander("🐂 富途牛牛 OpenD 全帳號持倉 & 歷史交易同步中心", expanded=False):
         st.caption("無需自己寫任何 Python 代碼！開啟 Mac 版 **FutuOpenD**，即可一鍵同步富途所有子帳戶持倉、自選「持倉」分組，並自動拉取你呢個帳號由開戶至今嘅**所有歷史買賣成交**！")
-        enable_futu = st.checkbox("⚡ 啟用富途 OpenD 本地連線", value=False, key="chk_enable_futu_opend_bridge")
+        _futu_prefs = persistent_data.setdefault("futu_bridge_prefs", {"enabled": False, "host": "127.0.0.1", "port": 11111})
+        enable_futu = st.checkbox(
+            "⚡ 啟用富途 OpenD 本地連線",
+            value=bool(_futu_prefs.get("enabled", False)),
+            key="chk_enable_futu_opend_bridge"
+        )
+        if enable_futu != bool(_futu_prefs.get("enabled", False)):
+            _futu_prefs["enabled"] = bool(enable_futu)
+            save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
         if not enable_futu:
             st.info("💡 尚未開啟連線。請先開啟 Mac 版 FutuOpenD 並登入，再打勾即可使用！")
             return
 
         f_col1, f_col2 = st.columns([1.8, 1.2])
         with f_col1:
-            futu_host = st.text_input("OpenD 主機位址", value="127.0.0.1", key="inp_futu_host")
+            futu_host = st.text_input("OpenD 主機位址", value=str(_futu_prefs.get("host", "127.0.0.1")), key="inp_futu_host")
         with f_col2:
-            futu_port = st.number_input("API 端口 (Port)", value=11111, step=1, key="inp_futu_port")
+            futu_port = st.number_input("API 端口 (Port)", value=int(_futu_prefs.get("port", 11111)), step=1, key="inp_futu_port")
+        if futu_host != _futu_prefs.get("host") or int(futu_port) != int(_futu_prefs.get("port", 11111)):
+            _futu_prefs["host"] = futu_host
+            _futu_prefs["port"] = int(futu_port)
 
         trd_env_choice = st.radio(
             "選擇讀取之富途帳戶環境 (預設真實持倉)",
@@ -10757,7 +11513,7 @@ def rename_watchlist_group_in_place(old_cat: str, new_cat: str) -> Tuple[bool, s
         _global_persistent_data["_disk_watchlist_dict"] = new_wl_dict
         if old_cat in _global_persistent_data.get("watchlist_radar_results", {}):
             _global_persistent_data["watchlist_radar_results"][new_cat_clean] = _global_persistent_data["watchlist_radar_results"].pop(old_cat)
-        save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
+    save_persisted_state_to_disk(persistent_data, st.session_state.watchlist_dict)
     return True, f"✅ 已將分組「{old_cat}」改名為「{new_cat_clean}」（組內股票與掃描記錄已自動保留）！"
 
 def render_futu_quick_watchlist_bar(fmt_ticker: str, stock_name: str, context_key: str = "diag") -> None:
@@ -11140,7 +11896,7 @@ def _render_color_boxed_holdings_html_table(rows_list: List[Dict[str, Any]], the
         bg_row = "#FFFFFF" if idx % 2 == 0 else pal["row_even"]
         link_url = r.get("link_url", "#")
         btn_html = (
-            f'<a href="{link_url}" target="_self" style="display:inline-block; background:#1E293B; color:#FFFFFF; text-decoration:none; '
+            f'<a href="{link_url}" target="_blank" rel="noopener noreferrer" style="display:inline-block; background:#1E293B; color:#FFFFFF; text-decoration:none; '
             f'padding:3px 9px; border-radius:5px; font-size:12px; font-weight:700; white-space:nowrap;">🔍 診斷</a>'
         )
         action_lvl = r.get("action_level", "hold")
@@ -11211,6 +11967,326 @@ def _render_color_boxed_holdings_html_table(rows_list: List[Dict[str, Any]], the
         f'</table></div>'
     )
     st.markdown(table_html, unsafe_allow_html=True)
+
+
+
+# ==============================================================================
+# [v59.3 新增模組 1] 港/美股開市隔空跌穿止損三級應對引擎 (ORL 機構風控法則)
+# ==============================================================================
+def diagnose_gap_down_below_stop_loss(
+    open_px: float,
+    prev_close: float,
+    live_px: float,
+    sl_px: float,
+    entry_px: float,
+    atr_val: float,
+    dir_code: str = "LONG",
+    mkt_code: str = "HK"
+) -> Dict[str, Any]:
+    """
+    針對港股（09:30 開市）及美股開市直接跳空跌穿止損位（Gap-Down Below SL）提供三級量化應對指引：
+    - 輕度跳空（穿 SL <= 1.0x ATR 或 <= 3.0%）：忌首 5 分鐘盲目市價踩踏，改守首 15-30 分鐘 ORL（開市區間低點）。
+    - 中度跳空（穿 SL 1.0~2.0x ATR 或 3.0%~6.0%）：即刻先減半 50% 控單筆虧損上限，餘倉守首 15 分鐘 ORL。
+    - 極端跳空（穿 SL > 2.0x ATR 或 > 6.0%）：黑天鵝風險已超 1R 紅線，嚴禁溝貨，優先止血並觸發當日新倉冷靜期。
+    """
+    res = {
+        "is_gap_through_sl": False,
+        "tier": 0,
+        "gap_below_sl_pct": 0.0,
+        "gap_below_sl_atr": 0.0,
+        "gap_from_prev_pct": 0.0,
+        "short_tag": "",
+        "protocol_text": ""
+    }
+    if sl_px <= 0 or open_px <= 0 or prev_close <= 0:
+        return res
+
+    atr_safe = max(float(atr_val or 0.0), open_px * 0.015)
+    if dir_code == "LONG":
+        # 昨日收市仍在止損之上（或接近），今日開市直接跳空跌穿止損
+        if open_px < sl_px and prev_close >= sl_px * 0.995:
+            gap_sl_abs = sl_px - open_px
+            gap_sl_pct = (gap_sl_abs / max(sl_px, 1e-6)) * 100.0
+            gap_sl_atr = gap_sl_abs / atr_safe
+            gap_prev_pct = ((open_px - prev_close) / max(prev_close, 1e-6)) * 100.0
+            res["is_gap_through_sl"] = True
+            res["gap_below_sl_pct"] = round(gap_sl_pct, 2)
+            res["gap_below_sl_atr"] = round(gap_sl_atr, 2)
+            res["gap_from_prev_pct"] = round(gap_prev_pct, 2)
+            open_time_hint = "09:30 開市首 5 分鐘" if mkt_code == "HK" else "21:30 開市首 5 分鐘"
+            orl_time_hint = "09:45–10:00" if mkt_code == "HK" else "21:45–22:00"
+            if gap_sl_atr <= 1.0 and gap_sl_pct <= 3.0:
+                res["tier"] = 1
+                res["short_tag"] = f"⚡ 輕度跳空穿SL (-{gap_sl_pct:.1f}% / {gap_sl_atr:.1f}ATR)・守15m ORL"
+                res["protocol_text"] = (
+                    f"【Tier 1 輕度隔空穿止損：開市 {open_px:.2f} 穿止損 {sl_px:.2f} 達 {gap_sl_pct:.1f}% ({gap_sl_atr:.1f}×ATR)】"
+                    f"切忌於 {open_time_hint} 競價/恐慌市價斬倉！改以首 15–30 分鐘低點 (ORL) 為底線；"
+                    f"若 {orl_time_hint} 無法反抽收復 {sl_px:.2f} 或跌穿 ORL 即果斷清倉。"
+                )
+            elif gap_sl_atr <= 2.0 and gap_sl_pct <= 6.0:
+                res["tier"] = 2
+                res["short_tag"] = f"✂️ 中度跳空穿SL (-{gap_sl_pct:.1f}% / {gap_sl_atr:.1f}ATR)・先減半守ORL"
+                res["protocol_text"] = (
+                    f"【Tier 2 中度隔空穿止損：開市 {open_px:.2f} 穿止損 {sl_px:.2f} 達 {gap_sl_pct:.1f}% ({gap_sl_atr:.1f}×ATR)】"
+                    f"建議先減倉 50% 鎖定單筆最大虧損，餘下 50% 嚴守首 15 分鐘 ORL；若反抽至 {sl_px:.2f} 下方受阻則全數離場。"
+                )
+            else:
+                res["tier"] = 3
+                res["short_tag"] = f"🚨 極端跳空穿SL (-{gap_sl_pct:.1f}% / {gap_sl_atr:.1f}ATR)・禁溝貨止血"
+                res["protocol_text"] = (
+                    f"【Tier 3 極端黑天鵝跳空：開市 {open_px:.2f} 穿止損 {sl_px:.2f} 達 {gap_sl_pct:.1f}% ({gap_sl_atr:.1f}×ATR)】"
+                    f"虧損已遠超預設 1R 紅線！嚴禁溝貨攤平，優先清倉保護組合本金，並啟動當日新開倉冷靜期。"
+                )
+    else:
+        if open_px > sl_px and prev_close <= sl_px * 1.005:
+            gap_sl_abs = open_px - sl_px
+            gap_sl_pct = (gap_sl_abs / max(sl_px, 1e-6)) * 100.0
+            gap_sl_atr = gap_sl_abs / atr_safe
+            gap_prev_pct = ((open_px - prev_close) / max(prev_close, 1e-6)) * 100.0
+            res["is_gap_through_sl"] = True
+            res["gap_below_sl_pct"] = round(gap_sl_pct, 2)
+            res["gap_below_sl_atr"] = round(gap_sl_atr, 2)
+            res["gap_from_prev_pct"] = round(gap_prev_pct, 2)
+            if gap_sl_atr <= 1.0 and gap_sl_pct <= 3.0:
+                res["tier"] = 1
+                res["short_tag"] = f"⚡ 空單輕度高開穿SL (+{gap_sl_pct:.1f}%)・守15m ORH"
+                res["protocol_text"] = f"【Tier 1 空單輕度跳空穿止損 {sl_px:.2f}】守首 15 分鐘高點 (ORH)，突破 ORH 即回補防軋空。"
+            else:
+                res["tier"] = 3
+                res["short_tag"] = f"🚨 空單跳空穿SL (+{gap_sl_pct:.1f}%)・防軋空即回補"
+                res["protocol_text"] = f"【空單高開穿止損 {sl_px:.2f} (+{gap_sl_pct:.1f}%)】空頭風險不對稱，立即回補止損防逼空。"
+    return res
+
+
+# ==============================================================================
+# [v59.3 新增模組 2] 隔夜美股期貨 / 中概 ETF / 港股 ADR 折算與跳空風險預警面板
+# ==============================================================================
+HK_TO_US_ADR_MAP: Dict[str, Dict[str, Any]] = {
+    "9988.HK": {"adr": "BABA", "ratio": 8.0, "tier": "NYSE 高流動性"},
+    "9618.HK": {"adr": "JD", "ratio": 2.0, "tier": "NASDAQ 高流動性"},
+    "9888.HK": {"adr": "BIDU", "ratio": 8.0, "tier": "NASDAQ 高流動性"},
+    "9999.HK": {"adr": "NTES", "ratio": 5.0, "tier": "NASDAQ 高流動性"},
+    "9866.HK": {"adr": "NIO", "ratio": 1.0, "tier": "NYSE 高流動性"},
+    "9868.HK": {"adr": "XPEV", "ratio": 2.0, "tier": "NYSE 高流動性"},
+    "2015.HK": {"adr": "LI", "ratio": 2.0, "tier": "NASDAQ 高流動性"},
+    "9961.HK": {"adr": "TCOM", "ratio": 1.0, "tier": "NASDAQ 高流動性"},
+    "2423.HK": {"adr": "BEKE", "ratio": 3.0, "tier": "NYSE 高流動性"},
+    "0005.HK": {"adr": "HSBC", "ratio": 5.0, "tier": "NYSE 高流動性"},
+    "0700.HK": {"adr": "TCEHY", "ratio": 1.0, "tier": "⚠️ OTC 低流動性"},
+    "3690.HK": {"adr": "MPNGY", "ratio": 2.0, "tier": "⚠️ OTC 低流動性"},
+    "1810.HK": {"adr": "XIACY", "ratio": 5.0, "tier": "⚠️ OTC 低流動性"},
+    "1211.HK": {"adr": "BYDDY", "ratio": 2.0, "tier": "⚠️ OTC 低流動性"},
+}
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch_macro_and_adr_last_change(symbols_tuple: Tuple[str, ...]) -> Dict[str, Dict[str, float]]:
+    """[v59.3] 輕量快取拉取美股期貨、中概 ETF、匯率與港股 ADR 最新收盤與升跌幅"""
+    out: Dict[str, Dict[str, float]] = {}
+    if not symbols_tuple:
+        return out
+    try:
+        raw_df = yf.download(list(symbols_tuple), period="5d", interval="1d", progress=False, threads=True, auto_adjust=False)
+        if raw_df is None or raw_df.empty:
+            return out
+        for sym in symbols_tuple:
+            try:
+                if isinstance(raw_df.columns, pd.MultiIndex):
+                    if sym in raw_df.columns.get_level_values(1):
+                        s_close = raw_df["Close"][sym].dropna()
+                    elif sym in raw_df.columns.get_level_values(0):
+                        s_close = raw_df[sym]["Close"].dropna()
+                    else:
+                        continue
+                else:
+                    s_close = raw_df["Close"].dropna()
+                if len(s_close) >= 2:
+                    last_c = float(s_close.iloc[-1])
+                    prev_c = float(s_close.iloc[-2])
+                    chg = ((last_c - prev_c) / max(prev_c, 1e-6)) * 100.0
+                    out[sym] = {"last": last_c, "prev": prev_c, "chg_pct": round(chg, 2)}
+                elif len(s_close) == 1:
+                    out[sym] = {"last": float(s_close.iloc[-1]), "prev": float(s_close.iloc[-1]), "chg_pct": 0.0}
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def render_hk_adr_and_us_lead_panel(hk_tickers_to_check: List[str], locked_map: Dict[str, Any], context_key: str = "adr_hub") -> None:
+    """[v59.3] 隔夜美股期貨 / 中概 ETF / 港股 ADR 折算與跳空風險濾網面板（僅作開市風險預警，不作盲目追高信號）"""
+    macro_syms = ["ES=F", "NQ=F", "KWEB", "FXI", "EWH", "HKD=X"]
+    matched_hk = [t for t in dict.fromkeys(hk_tickers_to_check) if t in HK_TO_US_ADR_MAP]
+    adr_syms = [HK_TO_US_ADR_MAP[t]["adr"] for t in matched_hk]
+
+    with st.expander(f"🌐 隔夜美股期貨 / 中概 ETF / 港股 ADR 開市跳空預警（已匹配 {len(matched_hk)} 隻港股 ADR｜僅作風險濾網）", expanded=False):
+        st.caption(
+            "⚖️ **專業 Swing Trader 提醒**：隔夜 ADR、KWEB、美股期貨只適合作為 **09:30 開市跳空風險預警** 與 **避開高開低走 (Gap & Fade) 陷阱**，"
+            "切忌單憑隔夜 ADR 大升便於 09:30 市價追高；OTC ADR（如 TCEHY / MPNGY）成交稀疏，價差僅供方向參考。"
+        )
+        _adr_state_key = f"_adr_snap_loaded_{context_key}"
+        _btn_adr_load = st.button("🔄 即時載入隔夜美股期貨 / 中概 ETF / 港股 ADR 數據", key=f"btn_load_adr_{context_key}")
+        if _btn_adr_load:
+            st.session_state[_adr_state_key] = True
+        if not st.session_state.get(_adr_state_key, False):
+            st.info("💡 為確保掃描與富途同步零延遲，隔夜期貨與 ADR 數據採按需載入；請點擊上方按鈕即時更新。")
+            return
+        all_fetch = tuple(dict.fromkeys(macro_syms + adr_syms + matched_hk))
+        snap = _fetch_macro_and_adr_last_change(all_fetch)
+        usdhkd = float(snap.get("HKD=X", {}).get("last", 7.78) or 7.78)
+        if usdhkd < 7.5 or usdhkd > 8.1:
+            usdhkd = 7.78
+
+        mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+        for col_w, sym_k, label_k in [
+            (mc1, "ES=F", "🇺🇸 標普期貨 (ES=F)"),
+            (mc2, "NQ=F", "💻 納指期貨 (NQ=F)"),
+            (mc3, "KWEB", "🇨🇳 中概互聯網 (KWEB)"),
+            (mc4, "FXI", "🇭🇰 富時中國 (FXI)"),
+            (mc5, "EWH", "🇭🇰 香港ETF (EWH)")
+        ]:
+            info_m = snap.get(sym_k, {})
+            if info_m:
+                col_w.metric(label_k, f"{info_m['last']:.2f}", f"{info_m['chg_pct']:+.2f}%")
+            else:
+                col_w.metric(label_k, "N/A", "-")
+
+        if matched_hk:
+            adr_rows = []
+            for hk_tk in matched_hk:
+                meta = HK_TO_US_ADR_MAP[hk_tk]
+                adr_s = meta["adr"]
+                ratio = float(meta["ratio"])
+                adr_info = snap.get(adr_s, {})
+                hk_info = snap.get(hk_tk, {})
+                if not adr_info or not hk_info:
+                    continue
+                parity_hk = round((adr_info["last"] * usdhkd) / max(ratio, 1e-6), 2)
+                hk_prev = hk_info["last"]
+                implied_gap = round(((parity_hk - hk_prev) / max(hk_prev, 1e-6)) * 100.0, 2)
+                l_rec = locked_map.get(hk_tk, {})
+                sl_ref = float(l_rec.get("fixed_sl", 0.0) or 0.0)
+                if sl_ref > 0 and parity_hk <= sl_ref:
+                    risk_flag = f"🚨 折合價穿止損 ({sl_ref:.2f})！備妥 ORL 應對"
+                elif implied_gap >= 3.0:
+                    risk_flag = "⚠️ 隱含大幅高開，提防 09:30 高開低走 (Gap & Fade)"
+                elif implied_gap <= -3.0:
+                    risk_flag = "⚠️ 隱含大幅低開，留意開市承接與止損位"
+                else:
+                    risk_flag = "✅ 跳空幅度溫和"
+                adr_rows.append({
+                    "港股代碼": f"{hk_tk} {get_stock_name(hk_tk)}",
+                    "對應美股 ADR": f"{adr_s} ({meta['tier']})",
+                    "ADR 升跌": f"{adr_info['chg_pct']:+.2f}%",
+                    "ADR 折合港股 (HK$)": parity_hk,
+                    "港股上日收市 (HK$)": round(hk_prev, 2),
+                    "隱含開市跳空 %": f"{implied_gap:+.2f}%",
+                    "開市風控提示": risk_flag
+                })
+            if adr_rows:
+                st.dataframe(pd.DataFrame(adr_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("ℹ️ 目前持倉及自選股中暫無常見美股 ADR 對應港股（如 9988.HK / 0700.HK / 9618.HK / 3690.HK / 9868.HK 等）；上方期貨與 KWEB/FXI/EWH 仍可作為大市跳空濾網。")
+
+
+# ==============================================================================
+# [v59.3 新增模組 3] 模式一「⭐ 我的自選股即時調動雷達」面板
+# ==============================================================================
+def render_watchlist_quick_action_radar_hub(context_key: str = "mode1_wl") -> None:
+    """[v59.3] 在掃描雷達首頁直接保留用戶自選股即時狀態，一入頁即睇清邊啲自選股突破待買、回踩支撐或破線需剔除"""
+    wl_dict = st.session_state.get("watchlist_dict", {})
+    non_hold_cats = [c for c, lst in wl_dict.items() if lst and not ("持倉" in c or "holding" in c.lower() or "portfolio" in c.lower())]
+    all_non_empty_cats = [c for c, lst in wl_dict.items() if lst]
+    if not all_non_empty_cats:
+        return
+
+    default_opts = ["🌟 全部非持倉自選股"] + non_hold_cats if non_hold_cats else all_non_empty_cats
+    with st.expander(f"⭐ 我的自選股即時調動雷達（共 {len(all_non_empty_cats)} 個自選分組｜即時識別突破 / 回踩 / 破線需調動標的）", expanded=True):
+        wc1, wc2 = st.columns([2.8, 1.4])
+        with wc1:
+            sel_wl_view = st.selectbox(
+                "📂 選擇要即時監控的自選分組：",
+                options=default_opts,
+                key=f"wl_quick_radar_cat_{context_key}"
+            )
+        if sel_wl_view == "🌟 全部非持倉自選股":
+            tks_raw = []
+            for c_nm in non_hold_cats:
+                tks_raw.extend(wl_dict.get(c_nm, []))
+        else:
+            tks_raw = list(wl_dict.get(sel_wl_view, []))
+
+        wl_syms = list(dict.fromkeys([format_and_detect_market(x)[0] for x in tks_raw if str(x).strip()]))
+        with wc2:
+            st.caption(f"目前追蹤：**{len(wl_syms)} 隻**自選標的")
+            _refresh_wl = st.button("🔄 刷新自選股行情", key=f"btn_refresh_wl_radar_{context_key}", use_container_width=True)
+
+        if not wl_syms:
+            st.info("目前所選自選分組暫無股票。")
+            return
+
+        if _refresh_wl or any(s not in _PRELOADED_DAILY_CACHE for s in wl_syms):
+            batch_preload_ohlcv_cache(wl_syms)
+
+        rows_wl = []
+        cnt_breakout, cnt_pullback, cnt_weak = 0, 0, 0
+        for sym in wl_syms:
+            df_w = _PRELOADED_DAILY_CACHE.get(sym)
+            if df_w is None or df_w.empty or len(df_w) < 20:
+                rows_wl.append({
+                    "股票": f"{sym} {get_stock_name(sym)}",
+                    "最新價": "-",
+                    "5日升跌": "-",
+                    "距20MA": "-",
+                    "均線結構": "⏳ 數據待刷新",
+                    "建議調動動作": "點擊右上「刷新自選股行情」"
+                })
+                continue
+            close_s = df_w["Close"].astype(float)
+            high_s = df_w["High"].astype(float)
+            vol_s = df_w["Volume"].astype(float) if "Volume" in df_w.columns else pd.Series([0.0] * len(df_w))
+            c_now = float(close_s.iloc[-1])
+            c_5d = float(close_s.iloc[-6]) if len(close_s) >= 6 else float(close_s.iloc[0])
+            chg_5d = ((c_now - c_5d) / max(c_5d, 1e-6)) * 100.0
+            ma20 = float(close_s.tail(20).mean())
+            ma50 = float(close_s.tail(50).mean()) if len(close_s) >= 50 else ma20
+            hi20 = float(high_s.tail(20).max())
+            vol_ratio = float(vol_s.iloc[-1]) / max(float(vol_s.tail(20).mean()), 1.0)
+            dist_20 = ((c_now - ma20) / max(ma20, 1e-6)) * 100.0
+
+            if c_now >= ma20 and ma20 >= ma50 * 0.995 and c_now >= hi20 * 0.975:
+                cnt_breakout += 1
+                ma_tag = "🟢 多頭突破區"
+                act_tag = f"🚀 接近/突破20日高 (量比 {vol_ratio:.1f}x) — 優先診斷入場"
+            elif c_now >= ma50 * 0.985 and ma20 >= ma50 * 0.985:
+                cnt_pullback += 1
+                ma_tag = "🟡 趨勢回踩支撐"
+                act_tag = "🎯 留意縮量回踩 20/50MA 低吸機會"
+            elif c_now < ma20 and c_now < ma50 * 0.985:
+                cnt_weak += 1
+                ma_tag = "🔴 跌穿20/50MA"
+                act_tag = "✂️ 趨勢轉弱 — 考慮剔出自選或轉觀察做空"
+            else:
+                ma_tag = "⚪ 均線震盪"
+                act_tag = "👀 暫不操作，等待方向表態"
+
+            rows_wl.append({
+                "股票": f"{sym} {get_stock_name(sym)}",
+                "最新價": round(c_now, 2),
+                "5日升跌": f"{chg_5d:+.1f}%",
+                "距20MA": f"{dist_20:+.1f}%",
+                "均線結構": ma_tag,
+                "建議調動動作": act_tag
+            })
+
+        wm1, wm2, wm3, wm4 = st.columns(4)
+        wm1.metric("⭐ 監控總數", f"{len(wl_syms)} 隻")
+        wm2.metric("🚀 突破待診斷", f"{cnt_breakout} 隻")
+        wm3.metric("🎯 回踩支撐觀察", f"{cnt_pullback} 隻")
+        wm4.metric("✂️ 破線建議剔除", f"{cnt_weak} 隻")
+        if rows_wl:
+            st.dataframe(pd.DataFrame(rows_wl), use_container_width=True, hide_index=True)
 
 
 def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> None:
@@ -11472,13 +12548,21 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
             if pos_dir_code == "LONG":
                 pnl_pct = ((c_live - entry_p) / max(entry_p, 1e-6)) * 100.0
                 ext_from_20ma_atr = (c_live - s20) / max(atr_h, 1e-6)
+                prev_c_h = float(df_h["Close"].iloc[-2]) if (df_h is not None and len(df_h) >= 2) else c_rth
+                gap_diag = diagnose_gap_down_below_stop_loss(
+                    open_px=o_last, prev_close=prev_c_h, live_px=c_live,
+                    sl_px=sl_p, entry_px=entry_p, atr_val=atr_h, dir_code="LONG", mkt_code=mkt_s
+                ) if has_cost else {"is_gap_through_sl": False}
                 broke_sl = has_cost and ((c_live <= sl_p) or (ext_q.get("has_extended_data") and float(ext_q.get("ext_low", c_live) or c_live) <= sl_p))
                 broke_50ma_vol = (c_live < s50 * 0.990) and (vol_ratio_h >= 1.28) and (c_rth < o_last)
 
                 if broke_sl or broke_50ma_vol or tech_is_bear:
                     action_clear_cnt += 1
                     act_lvl = "clear"
-                    if broke_50ma_vol:
+                    if gap_diag.get("is_gap_through_sl"):
+                        s_verd = gap_diag["short_tag"]
+                        s_reas = gap_diag["protocol_text"]
+                    elif broke_50ma_vol:
                         s_verd, s_reas = "🚨 清倉 + 🔄可反手空", f"放量 {vol_ratio_h:.1f}x 跌穿 50MA ({s50:.2f})"
                     elif tech_is_bear and not broke_sl:
                         s_verd, s_reas = "⚡ 破線減倉/防守", f"失守 20/50MA，嚴守止損 {sl_p:.2f} (若你實為做空請於下方切換方向)"
@@ -11579,6 +12663,45 @@ def render_holdings_group_regime_advisory_hub(context_key: str = "wl_hub") -> No
         hm3.metric("📊 指數/行業 ETF", f"{total_etf_cnt} 隻", f"🇭🇰 港股 {len(etf_hk_rows)} ｜ 🇺🇸 美股 {len(etf_us_rows)}")
         hm4.metric("🚨 需立即清倉/回補", f"{action_clear_cnt} 隻", "觸及止損或均線破位", delta_color="inverse" if action_clear_cnt > 0 else "normal")
         hm5.metric("💰 建議減倉 / ✅ 續抱", f"減 {action_trim_cnt} / 抱 {action_hold_cnt}", f"合共追蹤 {len(hold_tickers)} 隻")
+
+        # [v60.0 新增：組合總開倉風險 (Portfolio Total Open Heat) 量化風控儀表]
+        _tot_heat_hkd = 0.0
+        _heat_cnt = 0
+        for _htk in hold_tickers:
+            _hl = locked_map.get(_htk, {})
+            if isinstance(_hl, dict):
+                _he = float(_hl.get("entry", 0.0) or 0.0)
+                _hsl = float(_hl.get("fixed_sl", 0.0) or 0.0)
+                _hsh = int(_hl.get("held_shares", 0) or 0)
+                if _he > 0 and _hsl > 0 and _hsh > 0:
+                    _fx = 1.0 if _htk.endswith(".HK") else 7.78
+                    _tot_heat_hkd += abs(_he - _hsl) * _hsh * _fx
+                    _heat_cnt += 1
+        if _heat_cnt > 0:
+            _ref_1r = float(st.session_state.get("max_loss_hkd", 1000.0) or 1000.0)
+            _heat_r = _tot_heat_hkd / max(_ref_1r, 1.0)
+            if _heat_r > 6.0:
+                st.warning(f"🔥 **組合總開倉風險警示 (Total Open Heat)**：已設定止損之 {_heat_cnt} 隻持倉若同時觸及止損，總風險約 **HK${_tot_heat_hkd:,.0f} ({_heat_r:.1f}R)**，高於建議上限 6.0R，請嚴控新開倉及同板塊相關性暴露。")
+            else:
+                st.caption(f"🛡️ **組合總開倉風險 (Total Open Heat)**：已鎖止損之 {_heat_cnt} 隻持倉總風險約 **HK${_tot_heat_hkd:,.0f} ({_heat_r:.1f}R)**（安全區間 ≤ 6.0R）")
+
+        if urgent_alerts:
+            st.error("\n\n".join(urgent_alerts))
+
+        # [v59.3 新增] 港股開市隔空跌穿止損 SOP 速查卡 + 隔夜美股期貨/ADR 跳空預警
+        with st.expander("📖 港股開市隔空跌穿止損 (Gap-Down Below SL) 實戰應對 SOP（機構 ORL 三級法則）", expanded=False):
+            st.markdown(
+                "- **Tier 1 輕度跳空（穿 SL ≤ 1.0×ATR 或 ≤ 3%）**：切忌於 **09:20–09:30 競價盤 / 09:30 首 5 分鐘**恐慌市價踩踏；改以首 15–30 分鐘低點（**ORL**）作底線，若 09:45–10:00 無法反抽收復止損位或跌穿 ORL 即斬倉。\n"
+                "- **Tier 2 中度跳空（穿 SL 1.0–2.0×ATR 或 3%–6%）**：開市回穩後先**減倉 50%**鎖定單筆最大虧損，餘倉嚴守首 15 分鐘 ORL；反抽原止損位下方受阻則全清。\n"
+                "- **Tier 3 極端黑天鵝跳空（穿 SL > 2.0×ATR 或 > 6%）**：風險已遠超預設 1R，**嚴禁溝貨攤平**，優先清倉保護組合並啟動當日新倉冷靜期。"
+            )
+        _hk_adr_candidates = [t for t in hold_tickers if t.endswith(".HK")]
+        for _wl_c_nm, _wl_c_lst in wl_dict.items():
+            for _wt in _wl_c_lst:
+                _ft_w = format_and_detect_market(_wt)[0]
+                if _ft_w.endswith(".HK") and _ft_w not in _hk_adr_candidates:
+                    _hk_adr_candidates.append(_ft_w)
+        render_hk_adr_and_us_lead_panel(_hk_adr_candidates, locked_map, context_key=f"adr_{context_key}")
 
         # 4. 渲染三大色彩分區框（青藍 ETF 框 ｜ 綠色做多框 ｜ 紅色做空框）—— 100% 全螢幕上下排列
         if etf_hk_rows or etf_us_rows:
@@ -12036,32 +13159,65 @@ def render_trade_journal_and_post_exit_review_hub(context_key: str = "main_journ
             if not journal_list:
                 st.info("📭 目前尚無已結算的賣出交易記錄。你可以喺上方輸入任何過往或今日賣出交易，或切換至【📥 Tab 3：批量匯入富途全歷史交易】一鍵拉取帳號所有歷史交易！")
             else:
-                # 篩選工具列：支援檢視「全部歷史 (All-Time)」或按年份/市場/代碼篩選，絕不截斷舊交易！
-                flt_c1, flt_c2, flt_c3, flt_c4 = st.columns([1.5, 1.3, 1.8, 1.4])
-                all_years = sorted(list({str(t.get("exit_date", ""))[:4] for t in journal_list if len(str(t.get("exit_date", ""))) >= 4}), reverse=True)
+                # 篩選工具列：支援檢視「全部歷史 (All-Time)」、排序方式、市場與代碼篩選，絕不截斷舊交易！
+                flt_c1, flt_c2, flt_c3, flt_c4, flt_c5, flt_c6 = st.columns([1.3, 1.1, 1.3, 1.3, 1.2, 1.2])
+                all_years = sorted(list({_normalize_iso_date(t.get("exit_date", ""))[:4] for t in journal_list if len(_normalize_iso_date(t.get("exit_date", ""))) >= 4}), reverse=True)
                 with flt_c1:
-                    sel_yr_flt = st.selectbox("📅 時間範圍 (預設顯示帳號全部歷史):", options=["🌎 全部歷史交易 (All-Time)"] + [f"{y} 年" for y in all_years], key=f"j_flt_yr_{context_key}")
+                    sel_yr_flt = st.selectbox("📅 時間範圍:", options=["🌎 全部歷史交易 (All-Time)"] + [f"{y} 年" for y in all_years], key=f"j_flt_yr_{context_key}")
                 with flt_c2:
                     sel_mkt_flt = st.selectbox("🌐 市場篩選:", options=["全部市場 (HK+US)", "🇭🇰 僅港股 (HK)", "🇺🇸 僅美股 (US)"], key=f"j_flt_mkt_{context_key}")
                 with flt_c3:
-                    inp_tk_flt = st.text_input("🔍 搜尋特定股票代碼/名稱:", placeholder="留空顯示全部股票...", key=f"j_flt_tk_{context_key}").strip().upper()
+                    sel_sort_flt = st.selectbox(
+                        "↕️ 時間排序:",
+                        options=["最新賣出優先 (由新到舊)", "最舊賣出優先 (由舊到新)", "最新買入優先 (由新到舊)"],
+                        key=f"j_flt_sort_{context_key}"
+                    )
                 with flt_c4:
+                    inp_tk_flt = st.text_input("🔍 搜尋股票代碼/名稱:", placeholder="留空顯示全部...", key=f"j_flt_tk_{context_key}").strip().upper()
+                with flt_c5:
                     st.write("")
                     csv_j = pd.DataFrame(journal_list).to_csv(index=False).encode("utf-8-sig")
                     st.download_button(
-                        f"📥 匯出全歷史復盤 ({len(journal_list)}筆)",
+                        f"📥 匯出復盤 ({len(journal_list)}筆)",
                         data=csv_j,
                         file_name=f"swing_all_closed_trades_review_{datetime.now().strftime('%Y%m%d')}.csv",
                         mime="text/csv",
                         use_container_width=True,
                         key=f"dl_closed_journal_csv_{context_key}"
                     )
+                with flt_c6:
+                    st.write("")
+                    if st.button("🧹 去重 + 重建時間", use_container_width=True, key=f"btn_dedup_journal_{context_key}", help="去重並清除已被真實成交覆蓋的錯誤自動清倉日期，若存在真實成交流水則按真 FIFO 重建"):
+                        before_j = len(persistent_data.get("closed_trades_journal", []))
+                        before_e = len(persistent_data.get("account_all_executions_ledger", []))
+                        clean_execs = _dedup_executions_ledger(persistent_data.get("account_all_executions_ledger", []))
+                        persistent_data["account_all_executions_ledger"] = clean_execs
+                        real_execs_only = [x for x in clean_execs if str(x.get("source", "")) != "JournalPair"]
+                        if real_execs_only:
+                            # 清除舊版自動偵測錯誤平倉列，保留手動記錄並由真實成交流水重建精確 FIFO 買賣日期
+                            kept_manual = [
+                                x for x in persistent_data.get("closed_trades_journal", [])
+                                if not str(x.get("trade_id", "")).startswith("FIFO_")
+                                and not str(x.get("trade_id", "")).startswith("CAMP_")
+                                and "自動偵測清倉賣出" not in str(x.get("exit_reason", ""))
+                                and "系統偵測已無持倉" not in str(x.get("exit_reason", ""))
+                            ]
+                            persistent_data["closed_trades_journal"] = kept_manual
+                            reconstruct_all_account_trades_and_holdings_fifo(real_execs_only, source_tag="CleanRebuild")
+                        persistent_data["closed_trades_journal"] = _dedup_closed_trades_journal(persistent_data.get("closed_trades_journal", []))
+                        persistent_data["_allow_journal_delete_sync"] = True
+                        save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
+                        after_j = len(persistent_data.get("closed_trades_journal", []))
+                        after_e = len(persistent_data.get("account_all_executions_ledger", []))
+                        st.toast(f"✅ 真 FIFO 重建與去重完成：已結算復盤 {before_j}→{after_j} 筆｜成交流水 {before_e}→{after_e} 筆")
+                        st.rerun()
 
                 filtered_journal = []
                 for tr in journal_list:
+                    _tr_xd = _normalize_iso_date(tr.get("exit_date", ""))
                     if not sel_yr_flt.startswith("🌎"):
                         yr_target = sel_yr_flt.split()[0].strip()
-                        if not str(tr.get("exit_date", "")).startswith(yr_target):
+                        if not _tr_xd.startswith(yr_target):
                             continue
                     if "僅港股" in sel_mkt_flt and str(tr.get("market_type", "")) != "HK":
                         continue
@@ -12070,6 +13226,25 @@ def render_trade_journal_and_post_exit_review_hub(context_key: str = "main_journ
                     if inp_tk_flt and (inp_tk_flt not in str(tr.get("ticker", "")).upper() and inp_tk_flt not in str(tr.get("stock_name", "")).upper()):
                         continue
                     filtered_journal.append(tr)
+
+                # [v59.2 嚴格時間排序] 確保交易紀錄按真實賣出/買入時間順序排列
+                if "最新買入" in sel_sort_flt:
+                    filtered_journal.sort(
+                        key=lambda x: (
+                            _normalize_iso_date(x.get("entry_date", "")),
+                            _normalize_iso_datetime(x.get("exit_time") or x.get("exit_date", ""))
+                        ),
+                        reverse=True
+                    )
+                else:
+                    filtered_journal.sort(
+                        key=lambda x: (
+                            _normalize_iso_datetime(x.get("exit_time") or x.get("exit_date", "")),
+                            _normalize_iso_date(x.get("exit_date", "")),
+                            _normalize_iso_date(x.get("entry_date", ""))
+                        ),
+                        reverse=("由新到舊" in sel_sort_flt)
+                    )
 
                 closed_syms = list(dict.fromkeys([str(t.get("ticker", "")) for t in filtered_journal if t.get("ticker")]))
                 if closed_syms:
@@ -12121,7 +13296,7 @@ def render_trade_journal_and_post_exit_review_hub(context_key: str = "main_journ
                     g_fg = "#15803D" if rr["theme_level"] == "success" else ("#B91C1C" if rr["theme_level"] == "error" else ("#B45309" if rr["theme_level"] == "warning" else "#0369A1"))
                     tr_html_list.append(
                         f'<tr style="background:{bg_c}; border-bottom:1px solid #FED7AA;">'
-                        f'<td style="padding:7px 9px; white-space:nowrap;"><a href="{rr["link_url"]}" target="_self" style="background:#1E293B; color:#FFF; padding:3px 8px; border-radius:5px; text-decoration:none; font-size:11.5px; font-weight:700;">🔍 復盤K線</a></td>'
+                        f'<td style="padding:7px 9px; white-space:nowrap;"><a href="{rr["link_url"]}" target="_blank" rel="noopener noreferrer" style="background:#1E293B; color:#FFF; padding:3px 8px; border-radius:5px; text-decoration:none; font-size:11.5px; font-weight:700;">🔍 復盤K線</a></td>'
                         f'<td style="padding:7px 9px; font-weight:800; font-size:13px; color:#0F172A; white-space:nowrap;">{rr["stock_label"]}</td>'
                         f'<td style="padding:7px 9px; font-weight:700; font-size:12px; white-space:nowrap;">{rr["dir_str"]}</td>'
                         f'<td style="padding:7px 9px; font-family:monospace; font-size:12px; color:#475569; white-space:nowrap;">{rr["dates_str"]}</td>'
@@ -14237,9 +15412,134 @@ if mode == mode_options[0]:
     render_atomic_section_header("🔎 市場動能掃描雷達", level=1)
     render_global_multi_timezone_clock_banner("mode1_radar")
     render_global_quick_guide_banner()
+
+    # [v59.2 核心追蹤池與全景掃描按鈕置頂顯眼區塊 — 保留 main25 所有優化，解決掃描按鈕被推落底部的問題]
+    render_color_zone_header(
+        "🚀 核心追蹤池 & 一鍵全景量化掃描",
+        "先揀選港美股潛力池或你的自選股類別，再點擊右側主按鈕即時啟動全景動能掃描",
+        theme="blue"
+    )
+    _wl_pool_opts = [f"⭐ 自選類別：【{c}】({len(gl)}隻)" for c, gl in st.session_state.watchlist_dict.items() if len(gl) > 0]
+    _scan_top_c1, _scan_top_c2 = st.columns([3.2, 1.3])
+    with _scan_top_c1:
+        pool_choice = st.selectbox(
+            "🎯 核心追蹤池 (保留全部舊池，新增「🔥 兩全其美混合池」兼顧熟股底座與全市場活水黑馬)：",
+            [
+                "🔥 兩全其美・港股「核心底座 + 富途全市場活水」混合池 (約86隻｜防仙股濾網)",
+                "🔥 兩全其美・美股「核心底座 + 富途全市場活水」混合池 (約86隻｜全板塊+活水)",
+                "🚀 超級績效・港股中小型高彈性潛力池 (ADR 3.2%~7.5% 細分龍頭)",
+                "🚀 超級績效・美股中小型高爆發潛力池 (Minervini 風格高 RS 成長股)",
+                "港股高動能增長池 (全市場強勢成分股｜已剔除慢速內銀)",
+                "美股高動能爆發池 (全市場科技與成長領頭羊)",
+                "港股收息防守池 (低波幅藍籌/內銀公用股)",
+            ] + _wl_pool_opts + [
+                "自訂擴充名單 (從側欄載入)"
+            ],
+            key="mode1_top_pool_choice"
+        )
+    target_pool = []
+    _is_hybrid_hk = ("兩全其美・港股" in pool_choice)
+    _is_hybrid_us = ("兩全其美・美股" in pool_choice)
+    if _is_hybrid_hk:
+        target_pool = list(dict.fromkeys(HK_MOMENTUM_POOL[:50] + HK_SECTOR_ROTATION_SUPPLEMENT_POOL))[:86]
+    elif _is_hybrid_us:
+        target_pool = list(dict.fromkeys(US_MOMENTUM_POOL[:46] + US_SECTOR_ROTATION_SUPPLEMENT_POOL))[:86]
+    elif pool_choice.startswith("⭐ 自選類別：【"):
+        _chosen_wl_cat = pool_choice.split("【", 1)[1].split("】", 1)[0]
+        target_pool = list(st.session_state.watchlist_dict.get(_chosen_wl_cat, []))
+    elif "港股中小型" in pool_choice:
+        target_pool = HK_SMALL_MID_SUPER_POOL
+    elif "美股中小型" in pool_choice:
+        target_pool = US_SMALL_MID_SUPER_POOL
+    elif "港股高動能" in pool_choice:
+        target_pool = HK_MOMENTUM_POOL
+    elif "收息防守" in pool_choice:
+        target_pool = HK_DEFENSIVE_DIVIDEND_POOL
+    elif "美股" in pool_choice:
+        target_pool = US_MOMENTUM_POOL
+    else:
+        if custom_tickers_raw:
+            target_pool = [x.strip().upper() for x in re.split(r'[\s,]+', custom_tickers_raw) if x.strip()]
+        else:
+            st.warning("⚠️ 自訂名單為空，請在左側欄位輸入股票代碼！")
+
+    with _scan_top_c2:
+        st.write("")
+        _btn_lbl_cnt = "動態~86隻" if (_is_hybrid_hk or _is_hybrid_us) else f"{len(target_pool)}隻"
+        _trigger_full_scan = st.button(
+            f"🚀 啟動全景量化掃描 ({_btn_lbl_cnt})",
+            type="primary",
+            use_container_width=True,
+            key="btn_mode1_top_full_scan"
+        )
+
+    render_sector_rs_compass_panel(context_key="mode1_top")
+
+    if _trigger_full_scan and target_pool:
+        _hybrid_src_map: Dict[str, str] = {}
+        _actual_scan_pool = list(target_pool)
+        if _is_hybrid_hk or _is_hybrid_us:
+            _h_mkt = "HK" if _is_hybrid_hk else "US"
+            _f_prefs_m1 = persistent_data.get("futu_bridge_prefs", {})
+            _f_en = bool(st.session_state.get("chk_enable_futu_opend_bridge", _f_prefs_m1.get("enabled", False)))
+            _f_host = str(st.session_state.get("inp_futu_host", _f_prefs_m1.get("host", "127.0.0.1")) or "127.0.0.1")
+            _f_port = int(st.session_state.get("inp_futu_port", _f_prefs_m1.get("port", 11111)) or 11111)
+            _actual_scan_pool, _hybrid_src_map, _hybrid_msg = build_core_satellite_hybrid_pool(
+                market_code=_h_mkt,
+                futu_host=_f_host,
+                futu_port=_f_port,
+                futu_enabled=_f_en,
+                target_total=86
+            )
+            st.info(f"🔥 {_hybrid_msg}")
+        with st.spinner(f"掃描中 (正在分析 {len(_actual_scan_pool)} 隻標的，請稍候)..."):
+            df_res = run_all_inclusive_radar(_actual_scan_pool)
+            if df_res is not None and _hybrid_src_map and "代碼" in df_res.columns:
+                try:
+                    df_res = df_res.copy()
+                    df_res.insert(1, "池來源", df_res["代碼"].map(lambda x: _hybrid_src_map.get(str(x).strip(), "🏛️ 核心池")))
+                except Exception:
+                    pass
+            if df_res is not None:
+                if "自訂" in pool_choice:
+                    dict_key = "自訂"
+                elif "港股" in pool_choice:
+                    dict_key = "港股"
+                else:
+                    dict_key = "美股"
+
+                st.session_state.radar_results[dict_key] = df_res
+                mark_radar_cache_updated(persistent_data, dict_key)
+                persistent_data.setdefault("radar_breadth_stats", {})[dict_key] = {
+                    "pct_above_50ma": df_res.attrs.get("pct_above_50ma", 0.0),
+                    "pct_above_200ma": df_res.attrs.get("pct_above_200ma", 0.0)
+                }
+
+                active_df = df_res[df_res['交易方向'].astype(str).str.contains("做多|做空", na=False)].copy()
+                rs_map = dict(zip(active_df['代碼'], active_df['RS強度']))
+                warnings, corr_matrix = build_dynamic_correlation_report(
+                    list(active_df['代碼']),
+                    rs_map=rs_map,
+                    lookback=50,
+                    threshold=0.75
+                )
+
+                st.session_state.radar_correlation_warnings[dict_key] = warnings
+                st.session_state.radar_correlation_matrices[dict_key] = corr_matrix
+                with _CACHE_LOCK:
+                    _global_persistent_data["radar_results"][dict_key] = df_res
+                    _global_persistent_data["radar_correlation_warnings"][dict_key] = warnings
+                    _global_persistent_data["radar_correlation_matrices"][dict_key] = corr_matrix
+                    _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
+                    _global_persistent_data.setdefault("radar_breadth_stats", {}).update(persistent_data.get("radar_breadth_stats", {}))
+                    _global_persistent_data.setdefault("signal_lifecycle_store", {}).update(persistent_data.get("signal_lifecycle_store", {}))
+                save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
+            else:
+                st.error("⚠️ 未取得任何有效數據，所有股票可能未能符合當前系統的過濾標準。")
+
     render_atomic_caption("💡 提示：掃描結果表格內每隻股票旁均設有 **「☑️ 勾選」方格** 與 **「⭐ 點擊放入自選」下拉格**，點擊即可直接將股票歸類至你的自選股票名單！")
 
-    # [v49.0 升級：雷達頁頂部採用 st.form 原子表單封裝「即時單股掃描 + 快速加入自選類別」，徹底解決輸入股票時畫面自動刷新或按鈕失靈]
+    # [v49.0 保留：雷達頁單股即時掃描 + 快速加入自選類別原子表單]
     with st.form("form_radar_top_quick_bar", clear_on_submit=False):
         rad_top_c1, rad_top_c2, rad_top_c3, rad_top_c4, rad_top_c5 = st.columns([2.1, 1.3, 1.2, 1.1, 1.1])
         with rad_top_c1:
@@ -14302,93 +15602,6 @@ if mode == mode_options[0]:
             render_styled_dataframe(q_df, table_key="quick_search_radar_tbl")
         st.markdown("---")
 
-    # [v54.0 新增：在掃描雷達頁同步提供「🛡️ 持倉分組 × 大市見頂/轉勢每日智能風控與調倉導航中心」]
-    try:
-        render_holdings_group_regime_advisory_hub(context_key="mode1_top")
-    except Exception as _e_hold_m1:
-        st.warning(f"⚠️ 持倉監控面板載入異常 (已自動隔離，不影響下方掃描雷達): {_e_hold_m1}")
-    try:
-        render_trade_journal_and_post_exit_review_hub(context_key="mode1_top")
-    except Exception as _e_jour_m1:
-        st.warning(f"⚠️ 交易復盤日誌載入異常 (已自動隔離，不影響下方掃描雷達): {_e_jour_m1}")
-
-    # [v48.0 升級：將用戶所有「⭐ 自選股票類別」直接納入雷達核心追蹤池選單]
-    _wl_pool_opts = [f"⭐ 自選類別：【{c}】({len(gl)}隻)" for c, gl in st.session_state.watchlist_dict.items() if len(gl) > 0]
-    pool_choice = st.selectbox(
-        "核心追蹤池 (可直接揀選系統潛力池或你的自選股票類別)：",
-        [
-            "🚀 超級績效・港股中小型高彈性潛力池 (ADR 3.2%~7.5% 細分龍頭)",
-            "🚀 超級績效・美股中小型高爆發潛力池 (Minervini 風格高 RS 成長股)",
-            "港股高動能增長池 (全市場強勢成分股｜已剔除慢速內銀)",
-            "美股高動能爆發池 (全市場科技與成長領頭羊)",
-            "港股收息防守池 (低波幅藍籌/內銀公用股)",
-        ] + _wl_pool_opts + [
-            "自訂擴充名單 (從側欄載入)"
-        ]
-    )
-    
-    target_pool = []
-    if pool_choice.startswith("⭐ 自選類別：【"):
-        _chosen_wl_cat = pool_choice.split("【", 1)[1].split("】", 1)[0]
-        target_pool = list(st.session_state.watchlist_dict.get(_chosen_wl_cat, []))
-    elif "港股中小型" in pool_choice:
-        target_pool = HK_SMALL_MID_SUPER_POOL
-    elif "美股中小型" in pool_choice:
-        target_pool = US_SMALL_MID_SUPER_POOL
-    elif "港股高動能" in pool_choice:
-        target_pool = HK_MOMENTUM_POOL
-    elif "收息防守" in pool_choice:
-        target_pool = HK_DEFENSIVE_DIVIDEND_POOL
-    elif "美股" in pool_choice:
-        target_pool = US_MOMENTUM_POOL
-    else:
-        if custom_tickers_raw:
-            import re
-            target_pool = [x.strip().upper() for x in re.split(r'[\s,]+', custom_tickers_raw) if x.strip()]
-        else:
-            st.warning("⚠️ 自訂名單為空，請在左側欄位輸入股票代碼！")
-
-    if st.button("🚀 啟動全景量化掃描") and target_pool:
-        with st.spinner("掃描中 (資料池已擴大，保證產出 20~50 隻符合條件標的，請稍候)..."):
-            df_res = run_all_inclusive_radar(target_pool)
-            if df_res is not None:
-                if "自訂" in pool_choice:
-                    dict_key = "自訂"
-                elif "港股" in pool_choice:
-                    dict_key = "港股"
-                else:
-                    dict_key = "美股"
-                    
-                st.session_state.radar_results[dict_key] = df_res
-                # [NEW INCREMENTAL PATCH 修復 Bug 3 & J Law 市場寬度記錄]
-                mark_radar_cache_updated(persistent_data, dict_key)
-                persistent_data.setdefault("radar_breadth_stats", {})[dict_key] = {
-                    "pct_above_50ma": df_res.attrs.get("pct_above_50ma", 0.0),
-                    "pct_above_200ma": df_res.attrs.get("pct_above_200ma", 0.0)
-                }
-
-                active_df = df_res[df_res['交易方向'].astype(str).str.contains("做多|做空", na=False)].copy()
-                rs_map = dict(zip(active_df['代碼'], active_df['RS強度']))
-                warnings, corr_matrix = build_dynamic_correlation_report(
-                    list(active_df['代碼']),
-                    rs_map=rs_map,
-                    lookback=50,
-                    threshold=0.75
-                )
-
-                st.session_state.radar_correlation_warnings[dict_key] = warnings
-                st.session_state.radar_correlation_matrices[dict_key] = corr_matrix
-                with _CACHE_LOCK:
-                    _global_persistent_data["radar_results"][dict_key] = df_res
-                    _global_persistent_data["radar_correlation_warnings"][dict_key] = warnings
-                    _global_persistent_data["radar_correlation_matrices"][dict_key] = corr_matrix
-                    _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
-                    _global_persistent_data.setdefault("radar_breadth_stats", {}).update(persistent_data.get("radar_breadth_stats", {}))
-                    _global_persistent_data.setdefault("signal_lifecycle_store", {}).update(persistent_data.get("signal_lifecycle_store", {}))
-                    save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
-            else:
-                st.error("⚠️ 未取得任何有效數據，所有股票可能未能符合當前系統的過濾標準。")
-
     if st.session_state.radar_results.get("港股") is not None:
         render_radar_results(st.session_state.radar_results["港股"], "### 📋 港股雷達結果 (暫存)", market_key="港股")
         st.markdown("---")
@@ -14403,6 +15616,16 @@ if mode == mode_options[0]:
 # ==========================================
 # 🌟 13. 模式 3：自選股票名單 (仿富途牛牛旗艦系統 v49.0：支援自由拉動調位、多股同列九宮格、原子表單防吞鍵與本頁無縫診斷)
 # ==========================================
+    # [v54.0 保留：持倉分組風控中心與交易復盤日誌置於掃描結果下方，不遮擋頂部掃描按鈕]
+    try:
+        render_holdings_group_regime_advisory_hub(context_key="mode1_top")
+    except Exception as _e_hold_m1:
+        st.warning(f"⚠️ 持倉監控面板載入異常 (已自動隔離，不影響上方掃描雷達): {_e_hold_m1}")
+    try:
+        render_trade_journal_and_post_exit_review_hub(context_key="mode1_top")
+    except Exception as _e_jour_m1:
+        st.warning(f"⚠️ 交易復盤日誌載入異常 (已自動隔離，不影響上方掃描雷達): {_e_jour_m1}")
+
 elif mode == mode_options[2]:
     if st.query_params.get("mode") == "診斷":
         try:
@@ -14885,7 +16108,7 @@ elif mode == mode_options[2]:
                                     _global_persistent_data["radar_correlation_warnings"][f"自選_{cat}"] = warnings
                                     _global_persistent_data["radar_correlation_matrices"][f"自選_{cat}"] = corr_matrix
                                     _global_persistent_data.setdefault("radar_timestamps", {}).update(persistent_data.get("radar_timestamps", {}))
-                                    save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
+                                save_persisted_state_to_disk(persistent_data, st.session_state.get("watchlist_dict"))
                             else:
                                 st.error("掃描失敗，未取得有效數據。")
                 with scan_col2:
